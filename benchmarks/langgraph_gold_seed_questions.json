@@ -1,0 +1,32 @@
+[
+  {
+    "id": "windows_failed_logons_7d",
+    "family": "windows_auth",
+    "question": "Show failed Windows logons in the last 7 days with usernames and source IPs."
+  },
+  {
+    "id": "windows_process_creation_30d",
+    "family": "windows_process",
+    "question": "Show Windows process creation activity in the last 30 days with image, command line, user, and parent image."
+  },
+  {
+    "id": "linux_failed_ssh_24h",
+    "family": "linux_auth",
+    "question": "Show failed SSH login activity in the last 24 hours on my linux systems."
+  },
+  {
+    "id": "linux_sudo_behavior_24h",
+    "family": "linux_privilege",
+    "question": "Show sudo behavior on linux in the last 24 hours and preserve the evidence rows."
+  },
+  {
+    "id": "linux_audit_activity_30d",
+    "family": "linux_audit",
+    "question": "Show Linux audit activity by host, audit type, operation, and result."
+  },
+  {
+    "id": "cross_platform_failed_logins_7d",
+    "family": "cross_platform_auth",
+    "question": "Show failed login activity in the last 7 days on windows and linux."
+  }
+]

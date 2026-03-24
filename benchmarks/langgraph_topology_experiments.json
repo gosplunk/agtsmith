@@ -1,0 +1,57 @@
+[
+  {
+    "id": "baseline_full",
+    "description": "Current recommended runtime: reviewer on, conditional peer review, evidence review on, summary on, repair on.",
+    "env": {
+      "LANGGRAPH_ENABLE_SECURITY_REVIEW": "1",
+      "LANGGRAPH_ENABLE_PEER_REVIEW": "1",
+      "LANGGRAPH_ENABLE_EVIDENCE_REVIEW": "1",
+      "LANGGRAPH_ENABLE_FINAL_SUMMARY": "1",
+      "LANGGRAPH_ENABLE_QUERY_REPAIR": "1"
+    }
+  },
+  {
+    "id": "no_peer_review",
+    "description": "Skip peer reviewers entirely and trust the first reviewer to hand off directly to validation.",
+    "env": {
+      "LANGGRAPH_ENABLE_SECURITY_REVIEW": "1",
+      "LANGGRAPH_ENABLE_PEER_REVIEW": "0",
+      "LANGGRAPH_ENABLE_EVIDENCE_REVIEW": "1",
+      "LANGGRAPH_ENABLE_FINAL_SUMMARY": "1",
+      "LANGGRAPH_ENABLE_QUERY_REPAIR": "1"
+    }
+  },
+  {
+    "id": "lean_runtime",
+    "description": "Cheaper runtime: reviewer on, no peer review, no model summary, repair on.",
+    "env": {
+      "LANGGRAPH_ENABLE_SECURITY_REVIEW": "1",
+      "LANGGRAPH_ENABLE_PEER_REVIEW": "0",
+      "LANGGRAPH_ENABLE_EVIDENCE_REVIEW": "1",
+      "LANGGRAPH_ENABLE_FINAL_SUMMARY": "0",
+      "LANGGRAPH_ENABLE_QUERY_REPAIR": "1"
+    }
+  },
+  {
+    "id": "repair_off",
+    "description": "Measure whether one-pass repair materially improves outcomes.",
+    "env": {
+      "LANGGRAPH_ENABLE_SECURITY_REVIEW": "1",
+      "LANGGRAPH_ENABLE_PEER_REVIEW": "1",
+      "LANGGRAPH_ENABLE_EVIDENCE_REVIEW": "1",
+      "LANGGRAPH_ENABLE_FINAL_SUMMARY": "1",
+      "LANGGRAPH_ENABLE_QUERY_REPAIR": "0"
+    }
+  },
+  {
+    "id": "reviewer_off",
+    "description": "Aggressive topology for measurement only: writer goes straight to deterministic validation.",
+    "env": {
+      "LANGGRAPH_ENABLE_SECURITY_REVIEW": "0",
+      "LANGGRAPH_ENABLE_PEER_REVIEW": "0",
+      "LANGGRAPH_ENABLE_EVIDENCE_REVIEW": "1",
+      "LANGGRAPH_ENABLE_FINAL_SUMMARY": "0",
+      "LANGGRAPH_ENABLE_QUERY_REPAIR": "1"
+    }
+  }
+]

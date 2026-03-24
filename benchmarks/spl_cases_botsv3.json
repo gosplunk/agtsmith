@@ -1,0 +1,545 @@
+[
+  {
+    "id": "botsv3_apache_top_ips_all_time",
+    "family": "apache_access_top_ips",
+    "question": "Across the full BOTSv3 dataset, show the top web client IPs in access_combined.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=access_combined",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "clientip",
+      "status",
+      "method",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_apache_user_agents_all_time",
+    "family": "apache_suspicious_user_agents",
+    "question": "Across the full BOTSv3 dataset, show suspicious web user agents and client IPs.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=access_combined",
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_linux_sudo_activity_all_time",
+    "family": "linux_privilege_escalation_activity",
+    "question": "Across the full BOTSv3 dataset, show sudo and su activity in linux_secure with process type, actor, target user, and commands.",
+    "expected_intent": "linux_privilege_escalation_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "linux_secure",
+      "process_name",
+      "actor",
+      "target_user",
+      "table"
+    ],
+    "forbidden_query_terms": [
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "host",
+      "process_name",
+      "outcome",
+      "actor"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_cloudtrail_activity_all_time",
+    "family": "aws_cloudtrail_activity",
+    "question": "Across the full BOTSv3 dataset, show top CloudTrail API activity.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "eventSource",
+      "eventName",
+      "principal",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "eventSource",
+      "eventName",
+      "principal",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_cloudtrail_sources_all_time",
+    "family": "aws_cloudtrail_activity",
+    "question": "Across the full BOTSv3 dataset, show suspicious CloudTrail activity sources.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "sourceIPAddress",
+      "principal",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "sourceIPAddress",
+      "eventSource",
+      "eventName",
+      "principal",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_cloudtrail_event_service_all_time",
+    "family": "aws_cloudtrail_activity",
+    "question": "Across the full BOTSv3 dataset, investigate CloudTrail activity by event name and service.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "eventSource",
+      "eventName",
+      "principal",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "eventSource",
+      "eventName",
+      "principal",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_cisco_asa_flows_all_time",
+    "family": "cisco_asa_network_flows",
+    "question": "Across the full BOTSv3 dataset, show top Cisco ASA blocked and allowed flows.",
+    "expected_intent": "cisco_asa_network_flows",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=cisco:asa"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=cisco:asa",
+      "action",
+      "src_ip",
+      "dest_ip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "action",
+      "src_ip",
+      "dest_ip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_top_indexes_all_time",
+    "family": "top_indexes",
+    "question": "Across the full BOTSv3 dataset, show the busiest index.",
+    "expected_intent": "top_indexes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=botsv3",
+      "stats",
+      "by index"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "index",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_stream_http_all_time",
+    "family": "stream_http_activity",
+    "question": "Across the full BOTSv3 dataset, show top HTTP methods, status codes, destination sites, and client IPs from stream:http.",
+    "expected_intent": "stream_http_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=stream:http"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=stream:http",
+      "spath",
+      "http_method",
+      "status",
+      "site",
+      "src_ip"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=access_combined",
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "http_method",
+      "status",
+      "site",
+      "src_ip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_osquery_process_all_time",
+    "family": "osquery_process_activity",
+    "question": "Across the full BOTSv3 dataset, investigate osquery process monitoring results and show added processes by host, path, and cmdline.",
+    "expected_intent": "osquery_process_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=osquery:results"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=osquery:results",
+      "spath",
+      "hostidentifier",
+      "path",
+      "cmdline"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=osquery:processes"
+    ],
+    "required_result_fields": [
+      "hostIdentifier",
+      "action",
+      "path",
+      "cmdline",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_vpc_flow_all_time",
+    "family": "aws_vpc_flow_activity",
+    "question": "Across the full BOTSv3 dataset, show top accepted and rejected AWS VPC flows by source IP, destination IP, destination port, and action.",
+    "expected_intent": "aws_vpc_flow_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudwatchlogs:vpcflow"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudwatchlogs:vpcflow",
+      "rex",
+      "action",
+      "src_ip",
+      "dest_ip",
+      "dest_port"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=aws:cloudtrail",
+      "eventsource=vpc.amazonaws.com"
+    ],
+    "required_result_fields": [
+      "action",
+      "src_ip",
+      "dest_ip",
+      "dest_port",
+      "transport",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_aad_signin_all_time",
+    "family": "aad_signin_activity",
+    "question": "Across the full BOTSv3 dataset, show Azure AD sign-in activity by user, IP address, app, and login status.",
+    "expected_intent": "aad_signin_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:aad:signin"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:aad:signin",
+      "spath",
+      "userprincipalname",
+      "ipaddress",
+      "appdisplayname",
+      "loginstatus"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=azure:ad:signins"
+    ],
+    "required_result_fields": [
+      "userPrincipalName",
+      "ipAddress",
+      "appDisplayName",
+      "loginStatus",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_stream_dns_all_time",
+    "family": "stream_dns_activity",
+    "question": "Across the full BOTSv3 dataset, show DNS activity from stream:dns by query name, reply code, source IP, and destination IP.",
+    "expected_intent": "stream_dns_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=stream:dns"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=stream:dns",
+      "spath",
+      "reply_code",
+      "src_ip",
+      "dest_ip"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "query",
+      "reply_code",
+      "src_ip",
+      "dest_ip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_o365_management_all_time",
+    "family": "o365_management_activity",
+    "question": "Across the full BOTSv3 dataset, show Office 365 management activity by user, operation, workload, and client IP.",
+    "expected_intent": "o365_management_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:o365:management"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:o365:management",
+      "spath",
+      "userid",
+      "operation",
+      "workload",
+      "clientip"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=ms:aad:signin"
+    ],
+    "required_result_fields": [
+      "UserId",
+      "Operation",
+      "Workload",
+      "ClientIP",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_windows_process_all_time",
+    "family": "windows_process_activity",
+    "question": "Across the full BOTSv3 dataset, show Windows process creation activity with image, command line, user, and parent image.",
+    "expected_intent": "windows_process_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=xmlwineventlog"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=xmlwineventlog",
+      "Image",
+      "CommandLine",
+      "ParentImage",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "Computer",
+      "Image",
+      "CommandLine",
+      "User",
+      "ParentImage",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_linux_audit_all_time",
+    "family": "linux_audit_activity",
+    "question": "Across the full BOTSv3 dataset, show Linux audit activity by host, audit type, operation, and result.",
+    "expected_intent": "linux_audit_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=linux_audit"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=linux_audit",
+      "audit_type",
+      "audit_op",
+      "audit_res",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "audit_type",
+      "audit_op",
+      "audit_res",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  }
+]

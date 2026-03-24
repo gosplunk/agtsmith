@@ -1,0 +1,2051 @@
+[
+  {
+    "id": "linux_auth_failures_24h",
+    "family": "linux_auth_failures",
+    "question": "Show failed SSH login activity in the last 24 hours on my linux systems. Identify the top source IPs, usernames targeted, ports used, and which host is being targeted most.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "auth.log",
+      "Invalid user",
+      "stats",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "forbidden_query_terms": [
+      "match(_raw",
+      "case(match(",
+      "index=*"
+    ],
+    "required_result_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_auth_failures_24h_variant",
+    "family": "linux_auth_failures",
+    "question": "Investigate repeated failed SSH login attempts on my linux hosts over the last 24 hours and show the top usernames, source IPs, and ports.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "Invalid user",
+      "stats",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "access_combined"
+    ],
+    "required_result_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_auth_failures_7d",
+    "family": "linux_auth_failures",
+    "question": "Show failed login activity in the last 7 days on my linux machines.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "stats",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "forbidden_query_terms": [
+      "index=*"
+    ],
+    "required_result_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_auth_failures_today",
+    "family": "linux_auth_failures",
+    "question": "Show linux authentication failures today.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "access_combined"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "windows_failed_logons_24h",
+    "family": "windows_auth_failures",
+    "question": "Show failed login activity in the last 24 hours in windows.",
+    "expected_intent": "windows_auth_failures",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "XmlWinEventLog",
+      "4625",
+      "| table",
+      "user_name",
+      "src_ip"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by user_name src_ip"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "windows_failed_logons_7d",
+    "family": "windows_auth_failures",
+    "question": "Show failed logon attempts on Windows systems in the last 7 days and preserve the evidence rows.",
+    "expected_intent": "windows_auth_failures",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "XmlWinEventLog",
+      "4625",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by user_name src_ip"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "windows_failed_logons_today_hosts",
+    "family": "windows_auth_failures",
+    "question": "Which Windows hosts had the most authentication failures today?",
+    "expected_intent": "windows_auth_failures",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "XmlWinEventLog",
+      "4625",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "auth.log"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "windows_credential_access_30d",
+    "family": "windows_credential_access_activity",
+    "question": "Show Windows credential access activity in the last 30 days and preserve the evidence rows.",
+    "expected_intent": "windows_credential_access_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "5379",
+      "SubjectUserName",
+      "TargetName",
+      "CountOfCredentialsReturned",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by"
+    ],
+    "required_result_fields": [
+      "Computer",
+      "SubjectUserName",
+      "TargetName"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-30d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "windows_sysmon_network_30d",
+    "family": "windows_sysmon_network_activity",
+    "question": "Show Windows Sysmon network connections in the last 30 days with process image, source IP, destination IP, destination port, and protocol.",
+    "expected_intent": "windows_sysmon_network_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "index=windows_sysmon",
+      "Microsoft-Windows-Sysmon/Operational",
+      "EventID=3",
+      "DestinationIp",
+      "DestinationPort",
+      "Protocol",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "4625"
+    ],
+    "required_result_fields": [
+      "Computer",
+      "Image",
+      "DestinationIp",
+      "DestinationPort",
+      "Protocol"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-30d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "windows_sysmon_dns_30d",
+    "family": "windows_sysmon_dns_activity",
+    "question": "Show Windows Sysmon DNS queries in the last 30 days with process image, query name, and query results.",
+    "expected_intent": "windows_sysmon_dns_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "index=windows_sysmon",
+      "Microsoft-Windows-Sysmon/Operational",
+      "EventID=22",
+      "QueryName",
+      "QueryResults",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "4625"
+    ],
+    "required_result_fields": [
+      "Computer",
+      "Image",
+      "QueryName"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-30d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "mixed_failed_logons_7d",
+    "family": "cross_platform_auth_failures",
+    "question": "Show failed login activity in the last 7 days on my windows or linux machines.",
+    "expected_intent": "failed_login_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux",
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure",
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "index=windows",
+      "4625",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "index",
+      "host",
+      "sourcetype"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "mixed_failed_logons_24h_variant",
+    "family": "cross_platform_auth_failures",
+    "question": "Show failed logon activity across Windows and Linux in the last 24 hours and summarize the most suspicious sources.",
+    "expected_intent": "failed_login_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux",
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure",
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "index=windows",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "index",
+      "host",
+      "sourcetype"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_priv_esc_failures",
+    "family": "linux_privilege_escalation",
+    "question": "Show failed sudo or su activity on linux in the last 24 hours.",
+    "expected_intent": "linux_privilege_escalation",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "sudo",
+      "su",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=*"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_priv_esc_failures_variant",
+    "family": "linux_privilege_escalation",
+    "question": "Investigate failed privilege escalation attempts on my linux systems over the last day.",
+    "expected_intent": "linux_privilege_escalation",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "sudo",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_priv_esc_first_seen",
+    "family": "linux_privilege_escalation_first_seen",
+    "question": "Show the first time privilege escalation activity was seen on my linux hosts in the last 7 days.",
+    "expected_intent": "linux_privilege_escalation_first_seen",
+    "expected_shape": "first_seen",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "earliest(_time)",
+      "first_seen",
+      "last_seen",
+      "sort 0 first_seen"
+    ],
+    "forbidden_query_terms": [
+      "| table _time"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_priv_esc_first_seen_variant",
+    "family": "linux_privilege_escalation_first_seen",
+    "question": "Show newly observed sudo or su activity on Linux over the last week.",
+    "expected_intent": "linux_privilege_escalation_first_seen",
+    "expected_shape": "first_seen",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "earliest(_time)",
+      "first_seen"
+    ],
+    "forbidden_query_terms": [
+      "| table _time",
+      "access_combined"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_top_ips",
+    "family": "apache_access_top_ips",
+    "question": "Investigate weird logon attempts on my apache web server.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "access_combined",
+      "clientip",
+      "status",
+      "method",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=*"
+    ],
+    "required_result_fields": [
+      "clientip",
+      "status",
+      "method",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_top_ips_variant",
+    "family": "apache_access_top_ips",
+    "question": "Investigate suspicious web access activity in access_combined over the last 24 hours. Show top client IPs, status codes, methods, and likely scanning behavior.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "access_combined",
+      "clientip",
+      "status",
+      "method",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [
+      "clientip",
+      "status",
+      "method",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_top_ips_simple",
+    "family": "apache_access_top_ips",
+    "question": "Show top client IPs in apache access logs over the last 24 hours.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log"
+    ],
+    "required_result_fields": [
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_404_spike",
+    "family": "apache_404_spike",
+    "question": "Show 404 spike behavior in apache access logs over the last 24 hours.",
+    "expected_intent": "apache_404_spike",
+    "expected_shape": "timechart",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "access_combined",
+      "status=404",
+      "timechart"
+    ],
+    "forbidden_query_terms": [
+      "index=*"
+    ],
+    "required_result_fields": [],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_404_today_variant",
+    "family": "apache_404_spike",
+    "question": "Show 404 spikes on my web server today.",
+    "expected_intent": "apache_404_spike",
+    "expected_shape": "timechart",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "status=404",
+      "timechart"
+    ],
+    "forbidden_query_terms": [
+      "auth.log",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_suspicious_user_agents",
+    "family": "apache_suspicious_user_agents",
+    "question": "Show suspicious user agents in apache access_combined logs in the last 24 hours.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "access_combined",
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=*"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_suspicious_user_agents_variant",
+    "family": "apache_suspicious_user_agents",
+    "question": "Show suspicious bots in apache access logs over the last 24 hours.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "top_indexes",
+    "family": "inventory",
+    "question": "Which indexes had the most events in the last 24 hours?",
+    "expected_intent": "top_indexes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=*"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=*",
+      "NOT index=_*",
+      "stats count by index"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "index",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "top_indexes_variant",
+    "family": "inventory",
+    "question": "What indexes are the busiest today?",
+    "expected_intent": "top_indexes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=*"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "stats count by index"
+    ],
+    "forbidden_query_terms": [
+      "index=_internal"
+    ],
+    "required_result_fields": [
+      "index",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "internal_sourcetypes_24h",
+    "family": "internal_sourcetypes",
+    "question": "What sourcetypes generated the most _internal events in the last 24 hours?",
+    "expected_intent": "internal_sourcetypes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=_internal"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=_internal",
+      "stats count by sourcetype"
+    ],
+    "forbidden_query_terms": [
+      "NOT index=_*"
+    ],
+    "required_result_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "internal_sourcetypes_variant",
+    "family": "internal_sourcetypes",
+    "question": "Show top Splunk internal sourcetypes over the last 24 hours.",
+    "expected_intent": "internal_sourcetypes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=_internal"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=_internal",
+      "sourcetype"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_auth_failures_bruteforce_variant",
+    "family": "linux_auth_failures",
+    "question": "Show me ssh brute force attempts on linux in the last day.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "stats",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "access_combined"
+    ],
+    "required_result_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-1d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_session_activity_30d",
+    "family": "linux_session_activity",
+    "question": "Show linux session activity in the last 30 days, including session opened and closed evidence.",
+    "expected_intent": "linux_session_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "session_state",
+      "session_user",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=*"
+    ],
+    "required_result_fields": [
+      "host",
+      "session_state",
+      "session_user"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-30d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "cross_platform_auth_bruteforce_variant",
+    "family": "cross_platform_auth_failures",
+    "question": "Investigate brute-force behavior across windows and linux over the last day.",
+    "expected_intent": "failed_login_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux",
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure",
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "index=windows",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "index",
+      "host",
+      "sourcetype"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-1d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_bots_variant",
+    "family": "apache_suspicious_user_agents",
+    "question": "Show crawler and bot traffic in apache access logs.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_scanners_variant",
+    "family": "apache_suspicious_user_agents",
+    "question": "Show weird web scanners in access_combined over the last 24 hours.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "internal_sourcetypes_today_variant",
+    "family": "internal_sourcetypes",
+    "question": "What Splunk internal sourcetypes are most active today?",
+    "expected_intent": "internal_sourcetypes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=_internal"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=_internal",
+      "sourcetype"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "inventory_busiest_indexes_variant",
+    "family": "inventory",
+    "question": "What are my busiest indexes today?",
+    "expected_intent": "top_indexes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=*"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "stats count by index"
+    ],
+    "forbidden_query_terms": [
+      "index=_internal"
+    ],
+    "required_result_fields": [
+      "index",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_auth_failures_yesterday",
+    "family": "linux_auth_failures",
+    "question": "Show linux failed logins yesterday.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "access_combined"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-1d@d",
+    "expected_latest_time": "@d"
+  },
+  {
+    "id": "apache_404_yesterday",
+    "family": "apache_404_spike",
+    "question": "Show apache 404 spikes yesterday.",
+    "expected_intent": "apache_404_spike",
+    "expected_shape": "timechart",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "status=404",
+      "timechart"
+    ],
+    "forbidden_query_terms": [
+      "auth.log"
+    ],
+    "required_result_fields": [],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-1d@d",
+    "expected_latest_time": "@d"
+  },
+  {
+    "id": "windows_failed_logons_yesterday",
+    "family": "windows_auth_failures",
+    "question": "Show Windows failed logons yesterday and keep the evidence rows.",
+    "expected_intent": "windows_auth_failures",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "XmlWinEventLog",
+      "4625",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by user_name src_ip"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-1d@d",
+    "expected_latest_time": "@d"
+  },
+  {
+    "id": "cross_platform_password_spray_24h",
+    "family": "cross_platform_auth_failures",
+    "question": "Show password spray activity across windows and linux over the last 24 hours.",
+    "expected_intent": "failed_login_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux",
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure",
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "index=windows",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "index",
+      "host",
+      "sourcetype"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_priv_esc_first_observed_yesterday",
+    "family": "linux_privilege_escalation_first_seen",
+    "question": "Show first observed sudo behavior yesterday.",
+    "expected_intent": "linux_privilege_escalation_first_seen",
+    "expected_shape": "first_seen",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "earliest(_time)",
+      "first_seen"
+    ],
+    "forbidden_query_terms": [
+      "| table _time"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-1d@d",
+    "expected_latest_time": "@d"
+  },
+  {
+    "id": "linux_priv_esc_new_behavior_24h",
+    "family": "linux_privilege_escalation_first_seen",
+    "question": "Show new sudo behavior over the last day.",
+    "expected_intent": "linux_privilege_escalation_first_seen",
+    "expected_shape": "first_seen",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "earliest(_time)",
+      "first_seen"
+    ],
+    "forbidden_query_terms": [
+      "| table _time"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-1d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "internal_auth_failures",
+    "family": "internal_auth_failures",
+    "question": "Show internal Splunk auth failures.",
+    "expected_intent": "internal_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=_audit"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=_audit",
+      "info=failed",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "user",
+      "src",
+      "count"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_web_crawlers_yesterday",
+    "family": "apache_suspicious_user_agents",
+    "question": "Show suspicious web crawlers yesterday.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-1d@d",
+    "expected_latest_time": "@d"
+  },
+  {
+    "id": "internal_auth_failures_today",
+    "family": "internal_auth_failures",
+    "question": "Show failed Splunk logins today.",
+    "expected_intent": "internal_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=_audit"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=_audit",
+      "info=failed",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "user",
+      "src",
+      "count"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "windows_password_spraying_today",
+    "family": "windows_auth_failures",
+    "question": "Show password spraying on windows today.",
+    "expected_intent": "windows_auth_failures",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "XmlWinEventLog",
+      "4625",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by user_name src_ip"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "internal_audit_auth_failures_today",
+    "family": "internal_auth_failures",
+    "question": "Show _audit auth failures today.",
+    "expected_intent": "internal_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=_audit"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=_audit",
+      "info=failed",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "user",
+      "src",
+      "count"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_first_observed_root_sessions_today",
+    "family": "linux_privilege_escalation_first_seen",
+    "question": "Show first observed root sessions today.",
+    "expected_intent": "linux_privilege_escalation_first_seen",
+    "expected_shape": "first_seen",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "earliest(_time)",
+      "first_seen"
+    ],
+    "forbidden_query_terms": [
+      "| table _time"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_404_scanners_today",
+    "family": "apache_404_spike",
+    "question": "Show apache 404 scanners today.",
+    "expected_intent": "apache_404_spike",
+    "expected_shape": "timechart",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "status=404",
+      "timechart"
+    ],
+    "forbidden_query_terms": [
+      "auth.log"
+    ],
+    "required_result_fields": [],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_scanners_today",
+    "family": "apache_suspicious_user_agents",
+    "question": "Show suspicious scanners in apache today.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "cross_platform_failed_logins_today",
+    "family": "cross_platform_auth_failures",
+    "question": "Show failed login evidence on windows and linux today.",
+    "expected_intent": "failed_login_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux",
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure",
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "index=windows",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "index",
+      "host",
+      "sourcetype"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_scanning_bots_today",
+    "family": "apache_suspicious_user_agents",
+    "question": "Show scanning bots in my web logs today.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_top_404_source_ips_yesterday",
+    "family": "apache_access_top_ips",
+    "question": "Show top 404 source IPs on apache yesterday.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "clientip",
+      "status",
+      "method",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log"
+    ],
+    "required_result_fields": [
+      "clientip",
+      "status",
+      "method",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-1d@d",
+    "expected_latest_time": "@d"
+  },
+  {
+    "id": "windows_failed_login_usernames_week",
+    "family": "windows_auth_failures",
+    "question": "Show top windows failed login usernames in the last week.",
+    "expected_intent": "windows_auth_failures",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "XmlWinEventLog",
+      "4625",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by user_name src_ip"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_auth_failures_by_host_week",
+    "family": "linux_auth_failures",
+    "question": "Show linux auth failures over the last week by host.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=*"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "internal_auth_failures_yesterday",
+    "family": "internal_auth_failures",
+    "question": "Show failed Splunk logins yesterday.",
+    "expected_intent": "internal_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=_audit"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=_audit",
+      "info=failed",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "user",
+      "src",
+      "count"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-1d@d",
+    "expected_latest_time": "@d"
+  },
+  {
+    "id": "top_indexes_7d",
+    "family": "inventory",
+    "question": "Show busiest indexes over the last 7 days.",
+    "expected_intent": "top_indexes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=*"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "stats count by index"
+    ],
+    "forbidden_query_terms": [
+      "index=_internal"
+    ],
+    "required_result_fields": [
+      "index",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "apache_web_crawler_evidence_today",
+    "family": "apache_suspicious_user_agents",
+    "question": "Show apache web crawler evidence today.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "auth.log",
+      "XmlWinEventLog"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "internal_auth_failure_sources_today",
+    "family": "internal_auth_failures",
+    "question": "Show top internal auth failure sources today.",
+    "expected_intent": "internal_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=_audit"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=_audit",
+      "info=failed",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "user",
+      "src",
+      "count"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_sudo_behavior_24h",
+    "family": "linux_privilege_escalation_activity",
+    "question": "Show sudo behavior on linux in the last 24 hours.",
+    "expected_intent": "linux_privilege_escalation_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "sudo:",
+      "table",
+      "outcome",
+      "actor",
+      "process_name",
+      "target_user",
+      "command"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by host user tty src"
+    ],
+    "required_result_fields": [
+      "host",
+      "sourcetype",
+      "process_name",
+      "outcome",
+      "actor",
+      "target_user"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_sudo_activity_24h",
+    "family": "linux_privilege_escalation_activity",
+    "question": "Show sudo activity on linux in the last 24 hours.",
+    "expected_intent": "linux_privilege_escalation_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "sudo:",
+      "table",
+      "outcome",
+      "actor",
+      "process_name",
+      "target_user",
+      "command"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by host user tty src"
+    ],
+    "required_result_fields": [
+      "host",
+      "sourcetype",
+      "process_name",
+      "outcome",
+      "actor",
+      "target_user"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_sudo_sessions_pidx_hosts",
+    "family": "linux_privilege_escalation_activity",
+    "question": "Investigate sudo and su activity on pidx1 and pidx3 over the last 30 days. Show the process type, actor, target user, and commands executed.",
+    "expected_intent": "linux_privilege_escalation_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "sudo:",
+      "su:",
+      "host IN (pidx1,pidx3)",
+      "process_name",
+      "actor",
+      "target_user",
+      "command",
+      "table"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by host user tty src"
+    ],
+    "required_result_fields": [
+      "host",
+      "process_name",
+      "outcome",
+      "actor",
+      "target_user"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-30d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_su_success_test_user_pidx3",
+    "family": "linux_privilege_escalation_activity",
+    "question": "Show successful su activity to agtsmith_test on pidx3 in the last 3 hours.",
+    "expected_intent": "linux_privilege_escalation_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "host IN (pidx3)",
+      "process_name",
+      "outcome",
+      "actor",
+      "target_user",
+      "table"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by host user tty src"
+    ],
+    "required_result_fields": [
+      "host",
+      "process_name",
+      "outcome",
+      "actor",
+      "target_user"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-3h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_non_sudoer_failure_pidx3",
+    "family": "linux_privilege_escalation_activity",
+    "question": "Show non-sudoer privilege failures for agtsmith_test on pidx3 in the last 3 hours.",
+    "expected_intent": "linux_privilege_escalation_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "host IN (pidx3)",
+      "process_name",
+      "outcome",
+      "actor",
+      "table"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by host user tty src"
+    ],
+    "required_result_fields": [
+      "host",
+      "process_name",
+      "outcome",
+      "actor",
+      "command"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-3h",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_failed_sudo_pidx1_2h",
+    "family": "linux_privilege_escalation",
+    "question": "Show failed sudo attempts on pidx1 in the last 7 days.",
+    "expected_intent": "linux_privilege_escalation",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "host IN (pidx1)",
+      "pam_unix(sudo:auth): authentication failure",
+      "stats",
+      "actor",
+      "process_name"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by host user tty src"
+    ],
+    "required_result_fields": [
+      "host",
+      "process_name",
+      "actor",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_failed_sudo_pidx3_2h",
+    "family": "linux_privilege_escalation",
+    "question": "Show failed sudo attempts on pidx3 in the last 7 days.",
+    "expected_intent": "linux_privilege_escalation",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "host IN (pidx3)",
+      "pam_unix(sudo:auth): authentication failure",
+      "process_name",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by host user tty src"
+    ],
+    "required_result_fields": [
+      "host",
+      "process_name",
+      "actor",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "linux_failed_su_pidx3_2h",
+    "family": "linux_privilege_escalation",
+    "question": "Show failed su attempts on pidx3 in the last 7 days.",
+    "expected_intent": "linux_privilege_escalation",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "host IN (pidx3)",
+      "pam_unix(su:auth): authentication failure",
+      "process_name",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by host user tty src"
+    ],
+    "required_result_fields": [
+      "host",
+      "process_name",
+      "actor",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "internal_splunk_auth_failures_precise",
+    "family": "internal_auth_failures",
+    "question": "Show internal Splunk auth failures.",
+    "expected_intent": "internal_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=_audit"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=audittrail"
+    ],
+    "required_query_terms": [
+      "index=_audit",
+      "sourcetype=audittrail",
+      "info=failed",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "host",
+      "user",
+      "src",
+      "count"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now"
+  }
+]

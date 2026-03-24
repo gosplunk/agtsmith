@@ -1,0 +1,17 @@
+services:
+  agentchain-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agentchain-ui:local
+    container_name: agentchain-ui
+    working_dir: /app
+    user: "${AGENTCHAIN_UID:-1000}:${AGENTCHAIN_GID:-1000}"
+    command: ["python", "scripts/web_ui_server.py", "--host", "0.0.0.0", "--port", "8787"]
+    env_file:
+      - config/ui.env
+    ports:
+      - "${AGENTCHAIN_UI_PORT:-8787}:8787"
+    volumes:
+      - ./:/app
+    restart: unless-stopped

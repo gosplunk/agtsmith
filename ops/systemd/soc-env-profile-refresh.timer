@@ -1,0 +1,10 @@
+[Unit]
+Description=Run environment profile refresh every 45 minutes
+
+[Timer]
+OnCalendar=*:0/45
+Persistent=true
+Unit=soc-env-profile-refresh.service
+
+[Install]
+WantedBy=timers.target

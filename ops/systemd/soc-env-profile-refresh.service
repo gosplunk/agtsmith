@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh Splunk SOC environment profile
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/joe/splunk-soc-agent
+ExecStart=/usr/bin/make env-profile-refresh
