@@ -5589,10 +5589,10 @@ def _configure_page_body() -> str:
     .cfg-step-toggle{color:#9fb4cc;font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;}
     .cfg-step[open] .cfg-step-toggle::after{content:"Hide";}
     .cfg-step:not([open]) .cfg-step-toggle::after{content:"Show";}
-    .cfg-step-body{margin-top:16px;}
+    .cfg-step-body{margin-top:16px;min-width:0;}
     .cfg-stack{display:grid;gap:16px;}
     .cfg-grid{display:grid;grid-template-columns:minmax(320px,.95fr) minmax(420px,1.05fr);gap:16px;align-items:start;}
-    .cfg-panel{border:1px solid #23445f;border-radius:18px;background:linear-gradient(180deg,#081525,#06111d);padding:18px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.015);}
+    .cfg-panel{border:1px solid #23445f;border-radius:18px;background:linear-gradient(180deg,#081525,#06111d);padding:18px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.015);min-width:0;max-width:100%;}
     .cfg-panel h2{margin:0 0 10px;font-size:19px;letter-spacing:.2px;}
     .cfg-panel h3{margin:18px 0 8px;font-size:13px;color:#b9d9f6;text-transform:uppercase;letter-spacing:.09em;}
     .cfg-help{color:#9fb4cc;font-size:13px;line-height:1.6;margin:0 0 12px;}
@@ -5619,7 +5619,7 @@ def _configure_page_body() -> str:
     .cfg-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:16px;}
     .cfg-status{font-size:13px;color:#9fb4cc;}
     .cfg-note{margin-top:14px;padding:12px 14px;border:1px solid #36516b;border-radius:14px;background:#091423;color:#dbeafe;font-size:13px;line-height:1.55;}
-    .cfg-pre{white-space:pre-wrap;background:#020617;border:1px solid #1f2937;border-radius:14px;padding:14px;overflow:auto;line-height:1.5;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;}
+    .cfg-pre{white-space:pre-wrap;background:#020617;border:1px solid #1f2937;border-radius:14px;padding:14px;overflow:auto;line-height:1.5;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;max-width:100%;min-width:0;}
     .cfg-badges{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 0;}
     .cfg-badge{display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;border:1px solid #294560;background:#0b2130;color:#bde6ff;font-size:12px;font-weight:700;}
     .cfg-linkline{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0 16px;}
@@ -5643,7 +5643,7 @@ def _configure_page_body() -> str:
     .cfg-check-name{font-weight:800;color:#f8fafc;font-size:13px;}
     .cfg-check-detail{color:#d7e6f5;font-size:13px;line-height:1.45;white-space:pre-wrap;}
     .cfg-check-meta{margin-top:6px;color:#bfd3e7;font-size:12px;line-height:1.4;white-space:pre-wrap;}
-    .cfg-model-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:14px;}
+    .cfg-model-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:14px;min-width:0;}
     .cfg-model-card{
       --cfg-accent:#38bdf8;
       border:1px solid color-mix(in srgb, var(--cfg-accent) 34%, #183246);border-radius:20px;
@@ -5711,8 +5711,10 @@ def _configure_page_body() -> str:
       padding:2px 0 0;
     }
     .cfg-tip{font-size:12px;color:#a9bfd6;line-height:1.55;margin-top:8px;}
-    .cfg-subgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
-    .cfg-compare{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:14px 0 16px;}
+    .cfg-subgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;min-width:0;}
+    .cfg-subgrid > *{min-width:0;}
+    .cfg-compare{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:14px 0 16px;min-width:0;}
+    .cfg-compare > *{min-width:0;}
     .cfg-compare-card{
       border:1px solid #2a4a64;border-radius:18px;
       background:linear-gradient(180deg,#0a1627,#07111f 78%);
