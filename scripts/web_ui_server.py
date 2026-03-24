@@ -5903,7 +5903,15 @@ def _configure_page_body() -> str:
       <div class="cfg-row wide"><label for="cfg-edge-model">EDGE_LLM_MODEL</label><div class="cfg-example">Small routing model name visible from the edge Ollama host. Example: <code>qwen2.5:1.5b</code></div><input id="cfg-edge-model" list="cfg-edge-models-list" placeholder="qwen2.5:1.5b" /></div>
       </div>
       <div class="cfg-note">
-        If enabled, validation checks the edge endpoint and confirms the assigned model is installed. If disabled, the validation board records that the helper is intentionally excluded.
+        If enabled, validation checks the edge endpoint, confirms the assigned model is installed, and lists the models currently visible from the edge Ollama host. If disabled, the checker records that the helper is intentionally excluded.
+      </div>
+      <div class="cfg-actions">
+        <button id="cfg-edge-validate" class="btn-secondary">Validate Edge Helper</button>
+        <span id="cfg-edge-status" class="cfg-status">No edge validation has been run yet.</span>
+      </div>
+      <h3>Edge Validation Checker</h3>
+      <div id="cfg-edge-validation-results" class="cfg-validate-grid">
+        <div class="cfg-note">No edge validation has been run yet.</div>
       </div>
       <div class="cfg-subgrid">
         <div>
@@ -5911,8 +5919,8 @@ def _configure_page_body() -> str:
           <pre id="cfg-edge-checks" class="cfg-pre"></pre>
         </div>
         <div>
-          <h3>Discovered Edge Models</h3>
-          <pre id="cfg-edge-model-list" class="cfg-pre"></pre>
+          <h3>Installed Edge Models</h3>
+          <div id="cfg-edge-model-picks" class="cfg-model-picks"></div>
         </div>
       </div>
       <h3>Edge Pull Command</h3>
@@ -6197,6 +6205,34 @@ def _configure_page_body() -> str:
       };
     });
   }
+  function cfgRenderEdgeModelOptions(models){
+    const list = cfg$('cfg-edge-models-list');
+    const picker = cfg$('cfg-edge-model-picks');
+    const input = cfg$('cfg-edge-model');
+    list.innerHTML = '';
+    const normalized = Array.isArray(models) ? models : [];
+    normalized.forEach((model) => {
+      const option = document.createElement('option');
+      option.value = model;
+      list.appendChild(option);
+    });
+    const current = String(input.value || '').trim();
+    if(!normalized.length){
+      picker.innerHTML = '<div class="cfg-model-pick-empty">No edge models discovered yet.</div>';
+      return;
+    }
+    picker.innerHTML = normalized.map((model) => {
+      const active = current === model ? ' active' : '';
+      return `<button type="button" class="cfg-model-pick${active}" data-model="${cfgEscape(model)}">${cfgEscape(model)}</button>`;
+    }).join('');
+    picker.querySelectorAll('.cfg-model-pick').forEach((btn) => {
+      btn.onclick = () => {
+        input.value = btn.getAttribute('data-model') || '';
+        cfgRenderEdgeModelOptions(normalized);
+      };
+    });
+    input.oninput = () => cfgRenderEdgeModelOptions(normalized);
+  }
   function cfgPopulateModelOptions(models){
     const list = cfg$('cfg-models-list');
     list.innerHTML = '';
@@ -6211,6 +6247,27 @@ def _configure_page_body() -> str:
       input.oninput = () => cfgRenderQuickPicks(inputId, pickerId, normalized);
       cfgRenderQuickPicks(inputId, pickerId, normalized);
     });
+  }
+  function cfgRenderEdgeValidation(data){
+    const checks = Array.isArray(data?.checks) ? data.checks : [];
+    const edgeCheck = checks.find((item) => String(item?.name || '') === 'edge_helper');
+    if(!edgeCheck){
+      cfg$('cfg-edge-validation-results').innerHTML = '<div class="cfg-note">No edge validation results available.</div>';
+      return;
+    }
+    const extraBits = [];
+    if(Array.isArray(edgeCheck.models) && edgeCheck.models.length){ extraBits.push(`models: ${edgeCheck.models.join(', ')}`); }
+    if(Array.isArray(edgeCheck.missing_models) && edgeCheck.missing_models.length){ extraBits.push(`missing: ${edgeCheck.missing_models.join(', ')}`); }
+    cfg$('cfg-edge-validation-results').innerHTML = `
+      <div class="cfg-check ${cfgEscape(edgeCheck.status || 'warn')}">
+        <div class="cfg-check-head">
+          <div class="cfg-check-name">edge_helper</div>
+          <span class="cfg-badge">${cfgEscape(edgeCheck.status || 'unknown')}</span>
+        </div>
+        <div class="cfg-check-detail">${cfgEscape(edgeCheck.detail || '')}</div>
+        ${extraBits.length ? `<div class="cfg-check-meta">${cfgEscape(extraBits.join('\\n'))}</div>` : ''}
+      </div>
+    `;
   }
   function cfgRenderValidation(data){
     const summary = data.summary || {};
@@ -6276,15 +6333,9 @@ def _configure_page_body() -> str:
       data.connectivity_checks?.splunk_mcp || ''
     ].filter(Boolean).join('\\n\\n');
     cfg$('cfg-edge-checks').textContent = data.connectivity_checks?.edge_ollama_tags || 'Edge helper disabled or not configured.';
-    cfg$('cfg-edge-model-list').textContent = (data.edge_ollama_available_models || []).join('\\n') || 'No edge models discovered.';
+    cfgRenderEdgeModelOptions(data.edge_ollama_available_models || []);
     cfg$('cfg-edge-pull').textContent = data.edge_helper?.pull_command || 'No edge model pull command generated.';
-    const edgeList = cfg$('cfg-edge-models-list');
-    edgeList.innerHTML = '';
-    (data.edge_ollama_available_models || []).forEach((model) => {
-      const option = document.createElement('option');
-      option.value = model;
-      edgeList.appendChild(option);
-    });
+    cfgRenderEdgeValidation({checks: []});
     cfg$('cfg-restart').textContent = [
       `Host runtime:\\n${data.host_restart_command || ''}`,
       `Docker wrapper:\\n${data.docker_wrapper_restart_command || ''}`,
@@ -6326,22 +6377,21 @@ def _configure_page_body() -> str:
     if(!resp.ok){
       cfgApplyPayload(draft);
       cfg$('cfg-status').textContent = data.error || `validation failed (${resp.status})`;
+      cfg$('cfg-edge-status').textContent = data.error || `edge validation failed (${resp.status})`;
       return;
     }
     if(Array.isArray(data.ollama_available_models)){ cfgPopulateModelOptions(data.ollama_available_models); }
     cfgApplyPayload(draft);
     cfgRenderModelCompare(draft, data.ollama_available_models || [], data.expected_models || []);
     cfgRenderValidation(data);
+    cfgRenderEdgeModelOptions(data.edge_ollama_available_models || []);
+    cfgRenderEdgeValidation(data);
     if(data.environment_profile_status === 'in_progress'){
       cfg$('cfg-status').textContent = 'Validation complete. Data Domains initialization started.';
     } else {
       cfg$('cfg-status').textContent = 'Validation complete.';
     }
-    const runtime = await fetch('/api/config/runtime');
-    if(runtime.ok){
-      const runtimeData = await runtime.json();
-      cfgRender(runtimeData);
-    }
+    cfg$('cfg-edge-status').textContent = 'Edge helper validation complete.';
   }
   cfg$('cfg-save').onclick = async () => {
     cfg$('cfg-status').textContent = 'Saving...';
@@ -6403,6 +6453,7 @@ def _configure_page_body() -> str:
     cfg$('cfg-env-refresh-status').textContent = data.detail || 'Data Domains refresh started.';
     await cfgPollEnvRefresh();
   };
+  cfg$('cfg-edge-validate').onclick = cfgValidate;
   cfg$('cfg-validate').onclick = cfgValidate;
   cfgLoad();
 </script>
