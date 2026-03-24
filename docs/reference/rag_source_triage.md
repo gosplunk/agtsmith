@@ -26,12 +26,9 @@ Define which local RAG sources are safe and useful for:
 - `docs/reference/rag_sources/ioc_threat_hunting_example.md`
   - Useful workflow examples and investigation sequencing.
 
-## Medium Value (Use Selectively)
-- `docs/reference/rag_sources/search_commands_metrics.md`
-- `docs/reference/rag_sources/search_commands_mstats.md`
-- `docs/reference/rag_sources/search_commands_streamstats.md`
-- `docs/reference/rag_sources/search_commands_join_alternatives.md`
-  - Useful for enrichment, rollups, and repair patterns, but less central than the primary SPL authoring set.
+## Current Runtime Scope
+Only the high-value sources listed above are included in the current runtime RAG path.
+If a source is not listed there, it is not part of the active planner/repair context.
 
 ## Low Value / Exclude from SPL Planner Context
 - Very large governance/compliance manuals not focused on SPL authoring:
