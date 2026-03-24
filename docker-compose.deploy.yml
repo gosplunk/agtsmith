@@ -1,17 +1,17 @@
 services:
-  agentchain-ui-deploy:
+  agtsmith-ui-deploy:
     build:
       context: .
       dockerfile: Dockerfile.deploy
-    image: agentchain-ui-deploy:local
-    container_name: agentchain-ui-deploy
+    image: agtsmith-ui-deploy:local
+    container_name: agtsmith-ui-deploy
     ports:
-      - "${AGENTCHAIN_DEPLOY_PORT:-8787}:8787"
+      - "${AGTSMITH_DEPLOY_PORT:-8787}:8787"
     volumes:
-      - agentchain_deploy_config:/app/config
-      - agentchain_deploy_artifacts:/app/artifacts
+      - agtsmith_deploy_config:/app/config
+      - agtsmith_deploy_artifacts:/app/artifacts
     restart: unless-stopped
 
 volumes:
-  agentchain_deploy_config:
-  agentchain_deploy_artifacts:
+  agtsmith_deploy_config:
+  agtsmith_deploy_artifacts:

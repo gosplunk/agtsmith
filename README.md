@@ -84,8 +84,8 @@ make docker-deploy-up
 
 If your host user is not UID/GID `1000`, set:
 ```bash
-export AGENTCHAIN_UID=$(id -u)
-export AGENTCHAIN_GID=$(id -g)
+export AGTSMITH_UID=$(id -u)
+export AGTSMITH_GID=$(id -g)
 ```
 
 ## First-Time Setup

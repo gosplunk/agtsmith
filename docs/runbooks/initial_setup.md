@@ -7,10 +7,10 @@ The optional edge-helper model described in the architecture docs is not require
 ## Quick Start
 ```bash
 git clone <your-repo-url>
-cd splunk-soc-agent
+cd agtsmith
 cp config/ui.env.example config/ui.env
-export AGENTCHAIN_UID=$(id -u)
-export AGENTCHAIN_GID=$(id -g)
+export AGTSMITH_UID=$(id -u)
+export AGTSMITH_GID=$(id -g)
 make docker-deploy-build
 make docker-deploy-up
 ```
@@ -49,6 +49,7 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
      ```bash
      ollama pull deepseek-coder-v2:lite
      ollama pull hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
+     ollama pull hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
      ```
    - The Configuration page will also generate the exact pull commands for the models currently assigned to each role.
 

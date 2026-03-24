@@ -893,8 +893,8 @@ def _config_snapshot() -> dict[str, Any]:
         "edge_ollama_available_models": _discover_ollama_models(edge_host) if edge_enabled and edge_host else [],
         "splunk_mcp_config_json": json.dumps(splunk_mcp_config, indent=2),
         "host_restart_command": "make dev",
-        "docker_wrapper_restart_command": "make docker-down && AGENTCHAIN_UI_PORT=8788 make docker-up",
-        "docker_deploy_restart_command": "make docker-deploy-down && AGENTCHAIN_DEPLOY_PORT=8789 make docker-deploy-up",
+        "docker_wrapper_restart_command": "make docker-down && AGTSMITH_UI_PORT=8788 make docker-up",
+        "docker_deploy_restart_command": "make docker-deploy-down && AGTSMITH_DEPLOY_PORT=8789 make docker-deploy-up",
         "setup_guide_path": "runbooks/initial_setup.md",
         "connectivity_checks": {
             "ollama_tags": f"curl {values.get('OLLAMA_HOST', get_ollama_host())}/api/tags",
@@ -1306,8 +1306,8 @@ APP_HTML = """<!doctype html>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>A.G.E.N.T. Smith</title>
-  <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg?v=agentchain3\" />
-  <link rel=\"icon\" href=\"/favicon.ico?v=agentchain3\" />
+  <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg?v=agtsmith1\" />
+  <link rel=\"icon\" href=\"/favicon.ico?v=agtsmith1\" />
   <style>
     :root {
       --bg:#0f172a; --card:#111827; --card2:#0b1220; --muted:#9ca3af; --fg:#e5e7eb;
@@ -3022,8 +3022,8 @@ DOCS_SHELL_HTML = """<!doctype html>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>{title}</title>
-  <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg?v=agentchain3\" />
-  <link rel=\"icon\" href=\"/favicon.ico?v=agentchain3\" />
+  <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg?v=agtsmith1\" />
+  <link rel=\"icon\" href=\"/favicon.ico?v=agtsmith1\" />
   <style>
     :root {{
       --bg:#0f172a; --card:#111827; --card2:#0b1220; --muted:#9ca3af; --fg:#e5e7eb;
@@ -4703,7 +4703,7 @@ def _docs_view_body(path_value: str) -> str:
             (
                 '<h1 class="doc-brand-title">'
                 '<span>A.G.E.N.T. Smith</span>'
-                '<img class="doc-brand-icon" src="/favicon.svg?v=agentchain3" alt="A.G.E.N.T. Smith icon" />'
+                '<img class="doc-brand-icon" src="/favicon.svg?v=agtsmith1" alt="A.G.E.N.T. Smith icon" />'
                 "</h1>"
             ),
             1,
@@ -4733,14 +4733,14 @@ def _favicon_preview_body() -> str:
   <div style=\"display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start;\">
     <div class=\"card\" style=\"max-width:420px;\">
       <h3>320px</h3>
-      <img src=\"/favicon.svg?v=agentchain3\" alt=\"A.G.E.N.T. Smith favicon\" width=\"320\" height=\"320\" style=\"background:#020617; border:1px solid #223245; border-radius:10px;\" />
+      <img src=\"/favicon.svg?v=agtsmith1\" alt=\"A.G.E.N.T. Smith favicon\" width=\"320\" height=\"320\" style=\"background:#020617; border:1px solid #223245; border-radius:10px;\" />
     </div>
     <div class=\"card\" style=\"max-width:220px;\">
       <h3>128px</h3>
-      <img src=\"/favicon.svg?v=agentchain3\" alt=\"A.G.E.N.T. Smith favicon\" width=\"128\" height=\"128\" style=\"background:#020617; border:1px solid #223245; border-radius:10px;\" />
+      <img src=\"/favicon.svg?v=agtsmith1\" alt=\"A.G.E.N.T. Smith favicon\" width=\"128\" height=\"128\" style=\"background:#020617; border:1px solid #223245; border-radius:10px;\" />
     </div>
   </div>
-  <p><a href=\"/favicon.svg?v=agentchain3\">Open raw SVG</a></p>
+  <p><a href=\"/favicon.svg?v=agtsmith1\">Open raw SVG</a></p>
 </div>
 """
 

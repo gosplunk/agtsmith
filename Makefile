@@ -76,11 +76,11 @@ help:
 	@echo "  make dev # canonical app launcher (same behavior as ui-dev)"
 	@echo "  make ui-dev # run browser UI on all interfaces at http://<server-ip>:8787"
 	@echo "  make docker-build # build portable Docker image around the current repo"
-	@echo "  make docker-up [AGENTCHAIN_UI_PORT=8787] # run Dockerized UI with host repo mounted into /app"
+	@echo "  make docker-up [AGTSMITH_UI_PORT=8787] # run Dockerized UI with host repo mounted into /app"
 	@echo "  make docker-down # stop/remove Dockerized UI container"
 	@echo "  make docker-logs # tail Dockerized UI logs"
 	@echo "  make docker-deploy-build # build self-contained deployment image with code/docs/artifacts baked in"
-	@echo "  make docker-deploy-up [AGENTCHAIN_DEPLOY_PORT=8787] # run deployment image without host repo bind mount"
+	@echo "  make docker-deploy-up [AGTSMITH_DEPLOY_PORT=8787] # run deployment image without host repo bind mount"
 	@echo "  make docker-deploy-down # stop/remove deployment container"
 	@echo "  make docker-deploy-logs # tail deployment container logs"
 	@echo "  make ollama-log-tests # run unit+integration tests for remote Ollama log streaming adapter"
@@ -427,13 +427,13 @@ ui-dev:
 	fi
 
 docker-build:
-	@echo "[docker-build] building agentchain-ui image"
+	@echo "[docker-build] building agtsmith-ui image"
 	@docker compose build
 	@echo "[docker-build] complete"
 
 docker-up:
-	@echo "[docker-up] starting Dockerized A.G.E.N.T. Smith UI on host port $${AGENTCHAIN_UI_PORT:-8787}"
-	@AGENTCHAIN_UI_PORT=$${AGENTCHAIN_UI_PORT:-8787} docker compose up -d
+	@echo "[docker-up] starting Dockerized A.G.E.N.T. Smith UI on host port $${AGTSMITH_UI_PORT:-8787}"
+	@AGTSMITH_UI_PORT=$${AGTSMITH_UI_PORT:-8787} docker compose up -d
 	@echo "[docker-up] complete"
 
 docker-down:
@@ -450,8 +450,8 @@ docker-deploy-build:
 	@echo "[docker-deploy-build] complete"
 
 docker-deploy-up:
-	@echo "[docker-deploy-up] starting deployment image on host port $${AGENTCHAIN_DEPLOY_PORT:-8787}"
-	@AGENTCHAIN_DEPLOY_PORT=$${AGENTCHAIN_DEPLOY_PORT:-8787} docker compose -f docker-compose.deploy.yml up -d
+	@echo "[docker-deploy-up] starting deployment image on host port $${AGTSMITH_DEPLOY_PORT:-8787}"
+	@AGTSMITH_DEPLOY_PORT=$${AGTSMITH_DEPLOY_PORT:-8787} docker compose -f docker-compose.deploy.yml up -d
 	@echo "[docker-deploy-up] complete"
 
 docker-deploy-down:
