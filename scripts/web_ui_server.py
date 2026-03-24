@@ -5676,18 +5676,22 @@ def _configure_page_body() -> str:
       padding:12px 14px;font-size:13px;outline:none;transition:border-color .16s ease, box-shadow .16s ease;
     }
     .cfg-model-input:focus{border-color:var(--cfg-accent);box-shadow:0 0 0 3px color-mix(in srgb, var(--cfg-accent) 20%, transparent);}
-    .cfg-model-picks{display:flex;flex-wrap:wrap;gap:8px;}
+    .cfg-model-picks{display:grid;grid-template-columns:1fr;gap:8px;max-height:188px;overflow:auto;padding-right:4px;}
     .cfg-model-pick{
       border:1px solid color-mix(in srgb, var(--cfg-accent) 38%, #29465e);
       background:linear-gradient(180deg,color-mix(in srgb, var(--cfg-accent) 13%, #13283d),#0c1d2e);
       color:#dbeafe;
-      border-radius:999px;
-      padding:8px 12px;
+      border-radius:12px;
+      padding:10px 12px;
       font-size:12px;
       line-height:1.25;
       cursor:pointer;
       box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
       transition:transform .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+      text-align:left;
+      width:100%;
+      overflow-wrap:anywhere;
+      word-break:break-word;
     }
     .cfg-model-pick:hover{
       transform:translateY(-1px);
@@ -5996,6 +6000,28 @@ def _configure_page_body() -> str:
     ['cfg-model-continuation','cfg-model-continuation-picks'],
     ['cfg-model-summary','cfg-model-summary-picks']
   ];
+  function cfgApplyPayload(values){
+    const payload = values || {};
+    cfg$('cfg-ollama-host').value = payload.OLLAMA_HOST || '';
+    cfg$('cfg-splunk-base').value = payload.SPLUNK_BASE_URL || '';
+    cfg$('cfg-splunk-mcp').value = payload.SPLUNK_MCP_URL || '';
+    cfg$('cfg-splunk-token').value = payload.SPLUNK_LAB_BEARER_TOKEN || '';
+    cfg$('cfg-auth-enabled').value = payload.SOC_UI_AUTH_ENABLED || '1';
+    cfg$('cfg-edge-enabled').value = payload.EDGE_LLM_ENABLED || '0';
+    cfg$('cfg-edge-host').value = payload.EDGE_LLM_HOST || '';
+    cfg$('cfg-edge-model').value = payload.EDGE_LLM_MODEL || '';
+    cfg$('cfg-edge-role').value = payload.EDGE_LLM_ROLE || 'edge_router_splitter';
+    cfg$('cfg-edge-timeout').value = payload.EDGE_LLM_TIMEOUT_SEC || '20';
+    cfg$('cfg-model-planner').value = payload.OLLAMA_MODEL_QUERY_PLANNER || '';
+    cfg$('cfg-model-query-writer').value = payload.OLLAMA_MODEL_QUERY_WRITER || '';
+    cfg$('cfg-model-repair').value = payload.OLLAMA_MODEL_QUERY_REPAIR || '';
+    cfg$('cfg-model-evidence').value = payload.OLLAMA_MODEL_EVIDENCE_REVIEWER || '';
+    cfg$('cfg-model-security').value = payload.OLLAMA_MODEL_SECURITY_REVIEWER || '';
+    cfg$('cfg-model-peer1').value = payload.OLLAMA_MODEL_PEER_REVIEWER || '';
+    cfg$('cfg-model-peer2').value = payload.OLLAMA_MODEL_PEER_REVIEWER_2 || '';
+    cfg$('cfg-model-continuation').value = payload.OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER || '';
+    cfg$('cfg-model-summary').value = payload.OLLAMA_MODEL_FINAL_SUMMARY || '';
+  }
   const cfgDefaultAssignments = {
     OLLAMA_MODEL_QUERY_PLANNER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
     OLLAMA_MODEL_QUERY_WRITER: 'deepseek-coder-v2:lite',
@@ -6237,25 +6263,7 @@ def _configure_page_body() -> str:
   }
   function cfgRender(data){
     const values = data.values || {};
-    cfg$('cfg-ollama-host').value = values.OLLAMA_HOST || '';
-    cfg$('cfg-splunk-base').value = values.SPLUNK_BASE_URL || '';
-    cfg$('cfg-splunk-mcp').value = values.SPLUNK_MCP_URL || '';
-    cfg$('cfg-splunk-token').value = values.SPLUNK_LAB_BEARER_TOKEN || '';
-    cfg$('cfg-auth-enabled').value = values.SOC_UI_AUTH_ENABLED || '1';
-    cfg$('cfg-edge-enabled').value = values.EDGE_LLM_ENABLED || '0';
-    cfg$('cfg-edge-host').value = values.EDGE_LLM_HOST || '';
-    cfg$('cfg-edge-model').value = values.EDGE_LLM_MODEL || '';
-    cfg$('cfg-edge-role').value = values.EDGE_LLM_ROLE || 'edge_router_splitter';
-    cfg$('cfg-edge-timeout').value = values.EDGE_LLM_TIMEOUT_SEC || '20';
-    cfg$('cfg-model-planner').value = values.OLLAMA_MODEL_QUERY_PLANNER || '';
-    cfg$('cfg-model-query-writer').value = values.OLLAMA_MODEL_QUERY_WRITER || '';
-    cfg$('cfg-model-repair').value = values.OLLAMA_MODEL_QUERY_REPAIR || '';
-    cfg$('cfg-model-evidence').value = values.OLLAMA_MODEL_EVIDENCE_REVIEWER || '';
-    cfg$('cfg-model-security').value = values.OLLAMA_MODEL_SECURITY_REVIEWER || '';
-    cfg$('cfg-model-peer1').value = values.OLLAMA_MODEL_PEER_REVIEWER || '';
-    cfg$('cfg-model-peer2').value = values.OLLAMA_MODEL_PEER_REVIEWER_2 || '';
-    cfg$('cfg-model-continuation').value = values.OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER || '';
-    cfg$('cfg-model-summary').value = values.OLLAMA_MODEL_FINAL_SUMMARY || '';
+    cfgApplyPayload(values);
     cfgPopulateModelOptions(data.ollama_available_models || []);
     cfgRenderModelCompare(values, data.ollama_available_models || [], data.expected_models || []);
     cfg$('cfg-ollama-pulls').textContent = (data.ollama_pull_commands || []).join('\\n') || 'No model pull commands generated.';
@@ -6305,19 +6313,22 @@ def _configure_page_body() -> str:
     await cfgValidate();
   }
   async function cfgValidate(){
+    const draft = cfgCollectPayload();
     cfg$('cfg-status').textContent = 'Validating live connections...';
     const resp = await fetch('/api/config/validate', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({values: cfgCollectPayload()})
+      body: JSON.stringify({values: draft})
     });
     const data = await resp.json();
     if(!resp.ok){
+      cfgApplyPayload(draft);
       cfg$('cfg-status').textContent = data.error || `validation failed (${resp.status})`;
       return;
     }
     if(Array.isArray(data.ollama_available_models)){ cfgPopulateModelOptions(data.ollama_available_models); }
-    cfgRenderModelCompare(cfgCollectPayload(), data.ollama_available_models || [], data.expected_models || []);
+    cfgApplyPayload(draft);
+    cfgRenderModelCompare(draft, data.ollama_available_models || [], data.expected_models || []);
     cfgRenderValidation(data);
     if(data.environment_profile_status === 'in_progress'){
       cfg$('cfg-status').textContent = 'Validation complete. Data Domains initialization started.';
