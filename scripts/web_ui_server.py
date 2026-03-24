@@ -978,7 +978,20 @@ def _discover_ollama_models(ollama_host: str) -> list[str]:
     return names
 
 
-def _validate_runtime_config(values: dict[str, str]) -> dict[str, Any]:
+def _validation_connectivity_checks(values: dict[str, str]) -> dict[str, str]:
+    ollama_host = str(values.get("OLLAMA_HOST", "")).strip().rstrip("/") or get_ollama_host()
+    edge_enabled = str(values.get("EDGE_LLM_ENABLED", "0")).strip() == "1"
+    edge_host = str(values.get("EDGE_LLM_HOST", "")).strip().rstrip("/")
+    splunk_mcp = str(values.get("SPLUNK_MCP_URL", "")).strip() or get_splunk_mcp_url()
+    token = str(values.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
+    return {
+        "ollama_tags": f"curl {ollama_host}/api/tags",
+        "edge_ollama_tags": f"curl {edge_host}/api/tags" if edge_enabled and edge_host else "",
+        "splunk_mcp": f'curl -k -i -H "Authorization: Bearer {token}" {splunk_mcp}',
+    }
+
+
+def _validate_runtime_config(values: dict[str, str], scope: str = "full") -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     summary = {"ok": 0, "warn": 0, "error": 0}
     available_models: list[str] = []
@@ -992,34 +1005,35 @@ def _validate_runtime_config(values: dict[str, str]) -> dict[str, Any]:
             entry.update(extra)
         results.append(entry)
 
-    ollama_host = str(values.get("OLLAMA_HOST", "")).strip().rstrip("/")
-    try:
-        code, payload = _http_json(f"{ollama_host}/api/tags")
-        models = payload.get("models", []) if isinstance(payload, dict) else []
-        installed = sorted(
-            str(item.get("name", "")).strip() for item in models if isinstance(item, dict) and str(item.get("name", "")).strip()
-        )
-        available_models = installed
-        add_result("ollama_api", "ok", f"Ollama reachable ({code}); discovered {len(installed)} model(s).", {"models": installed})
-        expected = list(expected_models)
-        missing = [model for model in expected if model not in installed]
-        if missing:
-            add_result("ollama_expected_models", "warn", "Some expected models are not installed on the Ollama host.", {"missing_models": missing})
-        else:
-            add_result("ollama_expected_models", "ok", "All expected models are installed on the Ollama host.")
-    except Exception as exc:
-        add_result("ollama_api", "error", f"Could not reach Ollama API: {type(exc).__name__}: {exc}")
+    if scope != "edge":
+        ollama_host = str(values.get("OLLAMA_HOST", "")).strip().rstrip("/")
+        try:
+            code, payload = _http_json(f"{ollama_host}/api/tags")
+            models = payload.get("models", []) if isinstance(payload, dict) else []
+            installed = sorted(
+                str(item.get("name", "")).strip() for item in models if isinstance(item, dict) and str(item.get("name", "")).strip()
+            )
+            available_models = installed
+            add_result("ollama_api", "ok", f"Ollama reachable ({code}); discovered {len(installed)} model(s).", {"models": installed})
+            expected = list(expected_models)
+            missing = [model for model in expected if model not in installed]
+            if missing:
+                add_result("ollama_expected_models", "warn", "Some expected models are not installed on the Ollama host.", {"missing_models": missing})
+            else:
+                add_result("ollama_expected_models", "ok", "All expected models are installed on the Ollama host.")
+        except Exception as exc:
+            add_result("ollama_api", "error", f"Could not reach Ollama API: {type(exc).__name__}: {exc}")
 
-    missing_assignments = [key for key in EXPECTED_MODEL_KEYS if not str(values.get(key, "")).strip()]
-    if missing_assignments:
-        add_result(
-            "model_assignments",
-            "error",
-            "One or more runtime roles do not have an assigned model. Save Configuration after validation to auto-fill supported defaults, or assign models manually.",
-            {"missing_assignments": missing_assignments},
-        )
-    else:
-        add_result("model_assignments", "ok", "All runtime roles currently have assigned models.")
+        missing_assignments = [key for key in EXPECTED_MODEL_KEYS if not str(values.get(key, "")).strip()]
+        if missing_assignments:
+            add_result(
+                "model_assignments",
+                "error",
+                "One or more runtime roles do not have an assigned model. Save Configuration after validation to auto-fill supported defaults, or assign models manually.",
+                {"missing_assignments": missing_assignments},
+            )
+        else:
+            add_result("model_assignments", "ok", "All runtime roles currently have assigned models.")
 
     edge_enabled = str(values.get("EDGE_LLM_ENABLED", "0")).strip() == "1"
     edge_host = str(values.get("EDGE_LLM_HOST", "")).strip().rstrip("/")
@@ -1058,50 +1072,52 @@ def _validate_runtime_config(values: dict[str, str]) -> dict[str, Any]:
     else:
         add_result("edge_helper", "ok", "Edge helper is disabled by operator; the primary inference host handles all planning and writing stages.")
 
-    splunk_base = str(values.get("SPLUNK_BASE_URL", "")).strip().rstrip("/")
-    if splunk_base:
-        try:
-            req = urllib.request.Request(splunk_base, method="GET")
-            context = ssl._create_unverified_context()
-            with urllib.request.urlopen(req, timeout=8.0, context=context) as resp:
-                add_result("splunk_base", "ok", f"Splunk base URL reachable ({getattr(resp, 'status', 200)}).")
-        except urllib.error.HTTPError as exc:
-            add_result("splunk_base", "ok", f"Splunk base URL reachable and returned HTTP {exc.code}.")
-        except Exception as exc:
-            add_result("splunk_base", "error", f"Could not reach Splunk base URL: {type(exc).__name__}: {exc}")
+    if scope != "edge":
+        splunk_base = str(values.get("SPLUNK_BASE_URL", "")).strip().rstrip("/")
+        if splunk_base:
+            try:
+                req = urllib.request.Request(splunk_base, method="GET")
+                context = ssl._create_unverified_context()
+                with urllib.request.urlopen(req, timeout=8.0, context=context) as resp:
+                    add_result("splunk_base", "ok", f"Splunk base URL reachable ({getattr(resp, 'status', 200)}).")
+            except urllib.error.HTTPError as exc:
+                add_result("splunk_base", "ok", f"Splunk base URL reachable and returned HTTP {exc.code}.")
+            except Exception as exc:
+                add_result("splunk_base", "error", f"Could not reach Splunk base URL: {type(exc).__name__}: {exc}")
 
-    splunk_mcp = str(values.get("SPLUNK_MCP_URL", "")).strip()
-    token = str(values.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
-    if splunk_mcp:
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        try:
-            req = urllib.request.Request(splunk_mcp, headers=headers, method="GET")
-            context = ssl._create_unverified_context()
-            with urllib.request.urlopen(req, timeout=8.0, context=context) as resp:
-                add_result("splunk_mcp", "ok", f"Splunk MCP reachable ({getattr(resp, 'status', 200)}).")
-        except urllib.error.HTTPError as exc:
-            if exc.code == 405:
-                add_result("splunk_mcp", "ok", "Splunk MCP endpoint is reachable and returned HTTP 405, which is expected for a non-MCP GET probe.")
-            elif exc.code in {401, 403}:
-                add_result("splunk_mcp", "warn", f"Splunk MCP reached but auth failed with HTTP {exc.code}. Check bearer token.")
-            else:
-                add_result("splunk_mcp", "warn", f"Splunk MCP reached but returned HTTP {exc.code}.")
-        except Exception as exc:
-            add_result("splunk_mcp", "error", f"Could not reach Splunk MCP endpoint: {type(exc).__name__}: {exc}")
+        splunk_mcp = str(values.get("SPLUNK_MCP_URL", "")).strip()
+        token = str(values.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
+        if splunk_mcp:
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            try:
+                req = urllib.request.Request(splunk_mcp, headers=headers, method="GET")
+                context = ssl._create_unverified_context()
+                with urllib.request.urlopen(req, timeout=8.0, context=context) as resp:
+                    add_result("splunk_mcp", "ok", f"Splunk MCP reachable ({getattr(resp, 'status', 200)}).")
+            except urllib.error.HTTPError as exc:
+                if exc.code == 405:
+                    add_result("splunk_mcp", "ok", "Splunk MCP endpoint is reachable and returned HTTP 405, which is expected for a non-MCP GET probe.")
+                elif exc.code in {401, 403}:
+                    add_result("splunk_mcp", "warn", f"Splunk MCP reached but auth failed with HTTP {exc.code}. Check bearer token.")
+                else:
+                    add_result("splunk_mcp", "warn", f"Splunk MCP reached but returned HTTP {exc.code}.")
+            except Exception as exc:
+                add_result("splunk_mcp", "error", f"Could not reach Splunk MCP endpoint: {type(exc).__name__}: {exc}")
 
-    env_state = _environment_profile_bootstrap_state()
-    runtime_label = "container runtime" if _running_in_container() else "host runtime"
-    if env_state == "ready":
-        add_result("environment_profile", "ok", f"Data Domains profile is available for the {runtime_label}.")
-    elif env_state == "in_progress":
-        add_result("environment_profile", "warn", "Initial Data Domains build is running after successful Splunk MCP validation.")
-    else:
-        add_result("environment_profile", "warn", "Data Domains will be initialized after Splunk MCP validates successfully.")
+        env_state = _environment_profile_bootstrap_state()
+        runtime_label = "container runtime" if _running_in_container() else "host runtime"
+        if env_state == "ready":
+            add_result("environment_profile", "ok", f"Data Domains profile is available for the {runtime_label}.")
+        elif env_state == "in_progress":
+            add_result("environment_profile", "warn", "Initial Data Domains build is running after successful Splunk MCP validation.")
+        else:
+            add_result("environment_profile", "warn", "Data Domains will be initialized after Splunk MCP validates successfully.")
 
     return {
         "summary": summary,
         "checks": results,
         "expected_models": expected_models,
+        "connectivity_checks": _validation_connectivity_checks(values),
         "ollama_available_models": available_models,
         "edge_ollama_available_models": edge_available_models,
     }
@@ -6386,11 +6402,37 @@ def _configure_page_body() -> str:
     cfgRenderValidation(data);
     cfgRenderEdgeModelOptions(data.edge_ollama_available_models || []);
     cfgRenderEdgeValidation(data);
+    cfg$('cfg-checks').textContent = [
+      data.connectivity_checks?.ollama_tags || '',
+      data.connectivity_checks?.edge_ollama_tags || '',
+      data.connectivity_checks?.splunk_mcp || ''
+    ].filter(Boolean).join('\\n\\n');
+    cfg$('cfg-edge-checks').textContent = data.connectivity_checks?.edge_ollama_tags || 'Edge helper disabled or not configured.';
     if(data.environment_profile_status === 'in_progress'){
       cfg$('cfg-status').textContent = 'Validation complete. Data Domains initialization started.';
     } else {
       cfg$('cfg-status').textContent = 'Validation complete.';
     }
+    cfg$('cfg-edge-status').textContent = 'Edge helper validation complete.';
+  }
+  async function cfgValidateEdge(){
+    const draft = cfgCollectPayload();
+    cfg$('cfg-edge-status').textContent = 'Validating edge helper...';
+    const resp = await fetch('/api/config/validate', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({values: draft, scope: 'edge'})
+    });
+    const data = await resp.json();
+    if(!resp.ok){
+      cfgApplyPayload(draft);
+      cfg$('cfg-edge-status').textContent = data.error || `edge validation failed (${resp.status})`;
+      return;
+    }
+    cfgApplyPayload(draft);
+    cfgRenderEdgeModelOptions(data.edge_ollama_available_models || []);
+    cfgRenderEdgeValidation(data);
+    cfg$('cfg-edge-checks').textContent = data.connectivity_checks?.edge_ollama_tags || 'Edge helper disabled or not configured.';
     cfg$('cfg-edge-status').textContent = 'Edge helper validation complete.';
   }
   cfg$('cfg-save').onclick = async () => {
@@ -6453,7 +6495,7 @@ def _configure_page_body() -> str:
     cfg$('cfg-env-refresh-status').textContent = data.detail || 'Data Domains refresh started.';
     await cfgPollEnvRefresh();
   };
-  cfg$('cfg-edge-validate').onclick = cfgValidate;
+  cfg$('cfg-edge-validate').onclick = cfgValidateEdge;
   cfg$('cfg-validate').onclick = cfgValidate;
   cfgLoad();
 </script>
@@ -7370,7 +7412,10 @@ class Handler(BaseHTTPRequestHandler):
         merged = _config_snapshot().get("values", {})
         if isinstance(merged, dict):
             merged.update({key: str(value).strip() for key, value in values.items()})
-        validation = _validate_runtime_config(merged)
+        scope = str(payload.get("scope", "full")).strip().lower() if isinstance(payload, dict) else "full"
+        if scope not in {"full", "edge"}:
+            scope = "full"
+        validation = _validate_runtime_config(merged, scope=scope)
         validation["environment_profile_status"] = _maybe_trigger_environment_profile_bootstrap(validation)
         self._json(HTTPStatus.OK, validation)
 
