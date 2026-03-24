@@ -35,22 +35,30 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - HA/SLA-hardened production software
 
 ## Running It
-There are three ways to run the project.
+There are three supported ways to run A.G.E.N.T. Smith.
 
 1. Host runtime
+- Runs the app directly from the local Python environment on the current machine.
+- Best for development, debugging, and fast iteration when you are changing code often.
+
 ```bash
 make dev
 ```
 
 2. Docker wrapper
-This runs against the local working tree.
+- Runs A.G.E.N.T. Smith in Docker, but still uses the local working tree.
+- Best when you want containerized execution without giving up live local code changes.
+
 ```bash
 make docker-build
 make docker-up
 ```
 
 3. Docker deployment image
-This is the clean deployment path.
+- Builds and runs the cleaner deployment-style version of A.G.E.N.T. Smith.
+- Uses isolated config and artifact volumes instead of your host runtime state.
+- This is the recommended path for a fresh install, a demo box, or a handoff to another machine.
+
 ```bash
 make docker-deploy-build
 make docker-deploy-up
@@ -170,9 +178,11 @@ export OLLAMA_MODEL_EVIDENCE_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruc
 export OLLAMA_MODEL_QUERY_REPAIR="deepseek-coder-v2:lite"
 ```
 
-Pull the default writer locally:
+Pull the default local model set:
 ```bash
+ollama pull hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
 ollama pull deepseek-coder-v2:lite
+ollama pull hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
 ```
 
 ## License
