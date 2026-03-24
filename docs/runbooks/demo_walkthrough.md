@@ -14,7 +14,7 @@ Show an end-to-end, read-only, agentic SOC flow with:
 8. offline LangGraph optimization loop for empirical workflow tuning
 
 ## Preconditions
-- Run from project root: `/home/joe/splunk-soc-agent`
+- Run from project root: `~/agtsmith`
 - Virtual environment activated:
 ```bash
 source .venv/bin/activate

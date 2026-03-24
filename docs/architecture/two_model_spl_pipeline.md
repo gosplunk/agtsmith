@@ -150,7 +150,7 @@ The project now also includes an offline LangGraph optimization harness:
 - compare score, support rate, intent match, and latency
 
 See:
-- [langgraph_eval_optimization.md](/home/joe/splunk-soc-agent/docs/architecture/langgraph_eval_optimization.md)
+- [langgraph_eval_optimization.md](langgraph_eval_optimization.md)
 
 ## Why This Split Helps
 

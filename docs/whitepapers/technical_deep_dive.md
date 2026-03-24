@@ -346,8 +346,8 @@ The current identity posture is also deliberately bounded:
 - no centralized audit pipeline yet
 
 ## 14. Read This Next
-- [project_one_page_white_paper.md](/home/joe/splunk-soc-agent/docs/whitepapers/project_one_page_white_paper.md)
-- [two_model_spl_pipeline.md](/home/joe/splunk-soc-agent/docs/architecture/two_model_spl_pipeline.md)
-- [langgraph_eval_optimization.md](/home/joe/splunk-soc-agent/docs/architecture/langgraph_eval_optimization.md)
-- [system_design.md](/home/joe/splunk-soc-agent/docs/architecture/system_design.md)
-- [initial_setup.md](/home/joe/splunk-soc-agent/docs/runbooks/initial_setup.md)
+- [project_one_page_white_paper.md](project_one_page_white_paper.md)
+- [two_model_spl_pipeline.md](../architecture/two_model_spl_pipeline.md)
+- [langgraph_eval_optimization.md](../architecture/langgraph_eval_optimization.md)
+- [system_design.md](../architecture/system_design.md)
+- [initial_setup.md](../runbooks/initial_setup.md)

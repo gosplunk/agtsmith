@@ -7,7 +7,7 @@
 
 ## Command
 ```bash
-cd ~/splunk-soc-agent
+cd ~/agtsmith
 make model-spl-quality-deep
 ```
 

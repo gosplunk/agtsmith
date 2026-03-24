@@ -19,12 +19,12 @@ The live runtime stays the same. The eval harness runs beside it and answers:
 
 ## Files
 
-- [langgraph_gold_seed_questions.json](/home/joe/splunk-soc-agent/benchmarks/langgraph_gold_seed_questions.json)
-- [langgraph_topology_experiments.json](/home/joe/splunk-soc-agent/benchmarks/langgraph_topology_experiments.json)
-- [build_langgraph_gold_corpus.py](/home/joe/splunk-soc-agent/scripts/build_langgraph_gold_corpus.py)
-- [generate_langgraph_eval_prompts.py](/home/joe/splunk-soc-agent/scripts/generate_langgraph_eval_prompts.py)
-- [run_langgraph_topology_eval.py](/home/joe/splunk-soc-agent/scripts/run_langgraph_topology_eval.py)
-- [optimize_langgraph_topology.py](/home/joe/splunk-soc-agent/scripts/optimize_langgraph_topology.py)
+- [langgraph_gold_seed_questions.json](../../benchmarks/langgraph_gold_seed_questions.json)
+- [langgraph_topology_experiments.json](../../benchmarks/langgraph_topology_experiments.json)
+- [build_langgraph_gold_corpus.py](../../scripts/build_langgraph_gold_corpus.py)
+- [generate_langgraph_eval_prompts.py](../../scripts/generate_langgraph_eval_prompts.py)
+- [run_langgraph_topology_eval.py](../../scripts/run_langgraph_topology_eval.py)
+- [optimize_langgraph_topology.py](../../scripts/optimize_langgraph_topology.py)
 
 ## Topology Flags
 

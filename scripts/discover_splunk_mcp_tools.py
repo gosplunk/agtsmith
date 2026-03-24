@@ -61,7 +61,7 @@ def main() -> int:
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {
-                "name": "splunk-soc-agent-lab",
+                "name": "agtsmith-lab",
                 "version": "0.1.0",
             },
         },
