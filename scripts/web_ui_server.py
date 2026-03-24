@@ -86,6 +86,17 @@ EXPECTED_MODEL_KEYS = [
     "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER",
     "OLLAMA_MODEL_FINAL_SUMMARY",
 ]
+DEFAULT_MODEL_ASSIGNMENTS = {
+    "OLLAMA_MODEL_QUERY_PLANNER": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
+    "OLLAMA_MODEL_QUERY_WRITER": "deepseek-coder-v2:lite",
+    "OLLAMA_MODEL_QUERY_REPAIR": "deepseek-coder-v2:lite",
+    "OLLAMA_MODEL_EVIDENCE_REVIEWER": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
+    "OLLAMA_MODEL_SECURITY_REVIEWER": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
+    "OLLAMA_MODEL_PEER_REVIEWER": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
+    "OLLAMA_MODEL_PEER_REVIEWER_2": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
+    "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER": "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest",
+    "OLLAMA_MODEL_FINAL_SUMMARY": "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest",
+}
 EDGE_CONFIG_KEYS = [
     "EDGE_LLM_ENABLED",
     "EDGE_LLM_HOST",
@@ -108,6 +119,27 @@ CONFIG_EDITABLE_KEYS = [
 DEFAULT_UI_PASSWORDS = {"changeme123!", "SplunkLab-Only-ChangeMe!"}
 PASSWORD_HASH_PREFIX = "pbkdf2_sha256:"
 LEGACY_PASSWORD_HASH_PREFIX = "pbkdf2_sha256$"
+
+
+def _default_expected_models() -> list[str]:
+    ordered: list[str] = []
+    for key in EXPECTED_MODEL_KEYS:
+        model = str(DEFAULT_MODEL_ASSIGNMENTS.get(key, "")).strip()
+        if model and model not in ordered:
+            ordered.append(model)
+    return ordered
+
+
+def _autofill_model_assignments(values: dict[str, str], available_models: list[str] | None = None) -> dict[str, str]:
+    updated = {str(key): str(value).strip() for key, value in values.items()}
+    installed = set(str(model).strip() for model in (available_models or []) if str(model).strip())
+    for key in EXPECTED_MODEL_KEYS:
+        if updated.get(key, "").strip():
+            continue
+        default_model = str(DEFAULT_MODEL_ASSIGNMENTS.get(key, "")).strip()
+        if default_model and default_model in installed:
+            updated[key] = default_model
+    return updated
 
 
 def _global_nav(active: str) -> str:
@@ -857,6 +889,7 @@ def _config_snapshot() -> dict[str, Any]:
         values["EDGE_LLM_ROLE"] = get_edge_llm_role()
     if not values.get("EDGE_LLM_TIMEOUT_SEC"):
         values["EDGE_LLM_TIMEOUT_SEC"] = get_edge_llm_timeout_sec()
+    expected_models = _default_expected_models()
     models = [values.get(key, "") for key in EXPECTED_MODEL_KEYS if values.get(key, "").strip()]
     unique_models: list[str] = []
     for model in models:
@@ -888,7 +921,9 @@ def _config_snapshot() -> dict[str, Any]:
         "environment_profile_refresh": _environment_profile_refresh_status(),
         "personalization": _personalization_status(),
         "values": values,
-        "ollama_pull_commands": [f"ollama pull {model}" for model in unique_models],
+        "expected_models": expected_models,
+        "ollama_pull_commands": [f"ollama pull {model}" for model in expected_models],
+        "assigned_model_pull_commands": [f"ollama pull {model}" for model in unique_models],
         "ollama_available_models": _discover_ollama_models(values.get("OLLAMA_HOST", get_ollama_host())),
         "edge_ollama_available_models": _discover_ollama_models(edge_host) if edge_enabled and edge_host else [],
         "splunk_mcp_config_json": json.dumps(splunk_mcp_config, indent=2),
@@ -948,6 +983,7 @@ def _validate_runtime_config(values: dict[str, str]) -> dict[str, Any]:
     summary = {"ok": 0, "warn": 0, "error": 0}
     available_models: list[str] = []
     edge_available_models: list[str] = []
+    expected_models = _default_expected_models()
 
     def add_result(name: str, status: str, detail: str, extra: dict[str, Any] | None = None) -> None:
         summary[status] += 1
@@ -965,7 +1001,7 @@ def _validate_runtime_config(values: dict[str, str]) -> dict[str, Any]:
         )
         available_models = installed
         add_result("ollama_api", "ok", f"Ollama reachable ({code}); discovered {len(installed)} model(s).", {"models": installed})
-        expected = [str(values.get(key, "")).strip() for key in EXPECTED_MODEL_KEYS if str(values.get(key, "")).strip()]
+        expected = list(expected_models)
         missing = [model for model in expected if model not in installed]
         if missing:
             add_result("ollama_expected_models", "warn", "Some expected models are not installed on the Ollama host.", {"missing_models": missing})
@@ -973,6 +1009,17 @@ def _validate_runtime_config(values: dict[str, str]) -> dict[str, Any]:
             add_result("ollama_expected_models", "ok", "All expected models are installed on the Ollama host.")
     except Exception as exc:
         add_result("ollama_api", "error", f"Could not reach Ollama API: {type(exc).__name__}: {exc}")
+
+    missing_assignments = [key for key in EXPECTED_MODEL_KEYS if not str(values.get(key, "")).strip()]
+    if missing_assignments:
+        add_result(
+            "model_assignments",
+            "error",
+            "One or more runtime roles do not have an assigned model. Save Configuration after validation to auto-fill supported defaults, or assign models manually.",
+            {"missing_assignments": missing_assignments},
+        )
+    else:
+        add_result("model_assignments", "ok", "All runtime roles currently have assigned models.")
 
     edge_enabled = str(values.get("EDGE_LLM_ENABLED", "0")).strip() == "1"
     edge_host = str(values.get("EDGE_LLM_HOST", "")).strip().rstrip("/")
@@ -1054,6 +1101,7 @@ def _validate_runtime_config(values: dict[str, str]) -> dict[str, Any]:
     return {
         "summary": summary,
         "checks": results,
+        "expected_models": expected_models,
         "ollama_available_models": available_models,
         "edge_ollama_available_models": edge_available_models,
     }
@@ -5666,10 +5714,11 @@ def _configure_page_body() -> str:
       background:linear-gradient(180deg,#0a1627,#07111f 78%);
       padding:14px;
       box-shadow:0 14px 26px rgba(2,6,23,.16), inset 0 1px 0 rgba(255,255,255,.03);
+      min-width:0;
     }
     .cfg-compare-card h4{margin:0 0 10px;font-size:13px;color:#f8fafc;letter-spacing:.02em;}
-    .cfg-compare-list{display:grid;gap:6px;}
-    .cfg-compare-item{border:1px solid #254059;border-radius:12px;background:#07111f;padding:9px 11px;color:#dbeafe;font-size:12px;line-height:1.5;overflow-wrap:anywhere;}
+    .cfg-compare-list{display:grid;gap:6px;min-width:0;}
+    .cfg-compare-item{border:1px solid #254059;border-radius:12px;background:#07111f;padding:9px 11px;color:#dbeafe;font-size:12px;line-height:1.5;overflow-wrap:anywhere;word-break:break-word;min-width:0;}
     .cfg-compare-item.ok{border-color:#166534;background:#062313;color:#dcfce7;}
     .cfg-compare-item.warn{border-color:#a16207;background:#2a1a06;color:#fde68a;}
     .cfg-personalize-card{border:1px solid #27415a;border-radius:16px;background:linear-gradient(180deg,#091423,#07111f);padding:16px;}
@@ -5947,22 +5996,25 @@ def _configure_page_body() -> str:
     ['cfg-model-continuation','cfg-model-continuation-picks'],
     ['cfg-model-summary','cfg-model-summary-picks']
   ];
-  function cfgExpectedModelsFromValues(values){
-    const raw = [
-      values.OLLAMA_MODEL_QUERY_PLANNER,
-      values.OLLAMA_MODEL_QUERY_WRITER,
-      values.OLLAMA_MODEL_QUERY_REPAIR,
-      values.OLLAMA_MODEL_EVIDENCE_REVIEWER,
-      values.OLLAMA_MODEL_SECURITY_REVIEWER,
-      values.OLLAMA_MODEL_PEER_REVIEWER,
-      values.OLLAMA_MODEL_PEER_REVIEWER_2,
-      values.OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER,
-      values.OLLAMA_MODEL_FINAL_SUMMARY
-    ].map((model) => String(model || '').trim()).filter(Boolean);
+  const cfgDefaultAssignments = {
+    OLLAMA_MODEL_QUERY_PLANNER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
+    OLLAMA_MODEL_QUERY_WRITER: 'deepseek-coder-v2:lite',
+    OLLAMA_MODEL_QUERY_REPAIR: 'deepseek-coder-v2:lite',
+    OLLAMA_MODEL_EVIDENCE_REVIEWER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
+    OLLAMA_MODEL_SECURITY_REVIEWER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
+    OLLAMA_MODEL_PEER_REVIEWER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
+    OLLAMA_MODEL_PEER_REVIEWER_2: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
+    OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER: 'hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest',
+    OLLAMA_MODEL_FINAL_SUMMARY: 'hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest'
+  };
+  function cfgExpectedModelsFromValues(values, explicitExpected){
+    const explicit = Array.isArray(explicitExpected) ? explicitExpected.filter(Boolean) : [];
+    if(explicit.length){ return explicit; }
+    const raw = Object.values(cfgDefaultAssignments).map((model) => String(model || '').trim()).filter(Boolean);
     return raw.filter((model, index) => raw.indexOf(model) === index);
   }
-  function cfgRenderModelCompare(values, installedModels){
-    const expected = cfgExpectedModelsFromValues(values || {});
+  function cfgRenderModelCompare(values, installedModels, explicitExpected){
+    const expected = cfgExpectedModelsFromValues(values || {}, explicitExpected);
     const installed = Array.isArray(installedModels) ? installedModels : [];
     const missing = expected.filter(model => !installed.includes(model));
     const renderList = (id, items, cls='') => {
@@ -5973,6 +6025,15 @@ def _configure_page_body() -> str:
     renderList('cfg-expected-list', expected);
     renderList('cfg-installed-list', installed, 'ok');
     renderList('cfg-missing-list', missing, missing.length ? 'warn' : 'ok');
+  }
+  function cfgAutoAssignDefaults(values, installedModels){
+    const assigned = {...values};
+    const installed = new Set(Array.isArray(installedModels) ? installedModels : []);
+    Object.entries(cfgDefaultAssignments).forEach(([key, model]) => {
+      if(String(assigned[key] || '').trim()){ return; }
+      if(installed.has(model)){ assigned[key] = model; }
+    });
+    return assigned;
   }
   function cfgRenderPersonalization(meta){
     const state = String(meta?.state || 'unknown');
@@ -6196,7 +6257,7 @@ def _configure_page_body() -> str:
     cfg$('cfg-model-continuation').value = values.OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER || '';
     cfg$('cfg-model-summary').value = values.OLLAMA_MODEL_FINAL_SUMMARY || '';
     cfgPopulateModelOptions(data.ollama_available_models || []);
-    cfgRenderModelCompare(values, data.ollama_available_models || []);
+    cfgRenderModelCompare(values, data.ollama_available_models || [], data.expected_models || []);
     cfg$('cfg-ollama-pulls').textContent = (data.ollama_pull_commands || []).join('\\n') || 'No model pull commands generated.';
     cfg$('cfg-mcp-json').textContent = data.splunk_mcp_config_json || '{}';
     cfg$('cfg-checks').textContent = [
@@ -6256,7 +6317,7 @@ def _configure_page_body() -> str:
       return;
     }
     if(Array.isArray(data.ollama_available_models)){ cfgPopulateModelOptions(data.ollama_available_models); }
-    cfgRenderModelCompare(cfgCollectPayload(), data.ollama_available_models || []);
+    cfgRenderModelCompare(cfgCollectPayload(), data.ollama_available_models || [], data.expected_models || []);
     cfgRenderValidation(data);
     if(data.environment_profile_status === 'in_progress'){
       cfg$('cfg-status').textContent = 'Validation complete. Data Domains initialization started.';
@@ -6271,10 +6332,22 @@ def _configure_page_body() -> str:
   }
   cfg$('cfg-save').onclick = async () => {
     cfg$('cfg-status').textContent = 'Saving...';
+    let payload = cfgCollectPayload();
+    const validationResp = await fetch('/api/config/validate', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({values: payload})
+    });
+    const validationData = await validationResp.json();
+    if(!validationResp.ok){
+      cfg$('cfg-status').textContent = validationData.error || `pre-save validation failed (${validationResp.status})`;
+      return;
+    }
+    payload = cfgAutoAssignDefaults(payload, validationData.ollama_available_models || []);
     const resp = await fetch('/api/config/runtime', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({values: cfgCollectPayload()})
+      body: JSON.stringify({values: payload})
     });
     const data = await resp.json();
     if(!resp.ok){
@@ -7255,6 +7328,9 @@ class Handler(BaseHTTPRequestHandler):
             for key in CONFIG_EDITABLE_KEYS
             if key in values
         }
+        ollama_host = str(updates.get("OLLAMA_HOST", "")).strip().rstrip("/") or get_ollama_host()
+        available_models = _discover_ollama_models(ollama_host)
+        updates = _autofill_model_assignments(updates, available_models)
         write_env_file(updates, UI_ENV_PATH)
         snapshot = _config_snapshot()
         validation = _validate_runtime_config(snapshot.get("values", {}) if isinstance(snapshot.get("values", {}), dict) else {})
