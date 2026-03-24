@@ -1,52 +1,60 @@
 # Contributing
 
-## Project Standard
-A.G.E.N.T. Smith is opinionated about three things:
-- explainable behavior
-- read-only guardrails around Splunk access
-- empirical improvement through benchmarks and evals
+Thanks for taking a look.
 
-Changes should preserve those properties.
+A.G.E.N.T. Smith is trying to solve a pretty specific problem: help analysts write and review better SPL without giving up the safety and traceability you would want around a real investigation workflow. That means good contributions tend to improve one of four things:
+- query quality
+- guardrails and validation
+- workflow clarity
+- measurement
 
-## Good Contributions
-Useful contributions include:
-- tighter SPL generation and validation
-- better LangGraph orchestration and topology evaluation
-- better docs and setup clarity
-- improved benchmark coverage
-- safer defaults
-- cleaner UI/UX for operator workflows
+## What Good Changes Look Like
+Useful changes include:
+- tighter SPL generation or repair
+- better reviewer behavior
+- clearer LangGraph topology and routing
+- stronger benchmarks or evals
+- better docs and setup guidance
+- UI improvements that make the system easier to operate
 
-## Before You Open A PR
-Please:
-1. keep changes focused
-2. explain the motivation and tradeoff clearly
-3. avoid unrelated formatting churn
-4. do not commit local secrets, tokens, or runtime artifacts
+## Ground Rules
+A few things matter here:
+- keep Splunk access read-only
+- prefer deterministic checks over trusting model output
+- avoid broad, unrelated cleanup in the same change
+- do not commit secrets, tokens, runtime artifacts, or local environment state
 
-## Development Notes
-Important local patterns:
-- live local config belongs in `config/ui.env` and should not be committed
+## Local Project Expectations
+- live local config belongs in `config/ui.env`
 - public examples belong in `config/ui.env.example`
 - runtime outputs belong under `artifacts/` and should stay untracked except for intentional placeholders
-- benchmark and eval changes should be accompanied by a short explanation of what improved and how it was measured
+- if you add references or docs to the runtime RAG path, they should actually be used
 
-## Validation Expectations
-If you change behavior, include the most relevant validation you ran, for example:
+## Validation
+If you change behavior, include the most relevant validation you ran.
+
+Examples:
 - `python3 -m py_compile ...`
 - `make spl-hardening-benchmark`
 - `make langgraph-topology-eval`
 - targeted live prompt checks
 - Docker smoke checks
 
-If you could not run a check, say so explicitly.
+If you could not run something important, say so.
 
-## Pull Request Guidance
-A good PR should state:
+## Pull Requests
+A good PR should make four things easy to understand:
 - what changed
 - why it changed
-- what was validated
-- any known limitations or follow-up work
+- how it was validated
+- what still needs follow-up, if anything
+
+## Style
+Keep the repo readable.
+- write directly
+- prefer clear names over clever ones
+- keep prompts and policy logic explicit
+- avoid AI-sounding filler in docs and comments
 
 ## License
-By contributing to this repository, you agree that your contributions will be licensed under the Apache License 2.0.
+By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
