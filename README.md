@@ -14,7 +14,7 @@ The default SPL path is a two-model pipeline:
    - default: `deepseek-coder-v2:lite`
    - turns the plan into bounded read-only SPL
 3. `Security Reviewer`
-   - default: Qwen
+   - default: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
    - critiques the writer output before deterministic validation
 
 If the reviewer approves the query cleanly, the controller can skip extra adjudication and move straight to validation.

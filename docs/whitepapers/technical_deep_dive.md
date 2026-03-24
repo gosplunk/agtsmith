@@ -79,6 +79,7 @@ Primary model roles:
 - `Planner / Reviewer`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
 - `SPL Writer`: `deepseek-coder-v2:lite`
 - `Query Repair`: `deepseek-coder-v2:lite`
+- `Final Summary / Agentic Summary`: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
 
 Current reasoning for that split:
 - Qwen is better at intent interpretation, critique, and review

@@ -4,8 +4,8 @@
 
 A.G.E.N.T. Smith now uses a two-model path for SPL generation:
 
-- `Planner / Reviewer`: Qwen reasoning model
-- `SPL Writer`: DeepSeek-Coder
+- `Planner / Reviewer`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
+- `SPL Writer`: `deepseek-coder-v2:lite`
 
 An optional helper layer can sit in front of that path:
 - `Edge Router / Splitter`: small LLM on an edge device for cheap question classification and cross-platform split hints
@@ -109,7 +109,7 @@ OLLAMA_MODEL_EVIDENCE_REVIEWER=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-G
 OLLAMA_MODEL_PEER_REVIEWER=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
 OLLAMA_MODEL_PEER_REVIEWER_2=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
 OLLAMA_MODEL_QUERY_REPAIR=deepseek-coder-v2:lite
-OLLAMA_MODEL_FINAL_SUMMARY=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
+OLLAMA_MODEL_FINAL_SUMMARY=hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
 ```
 
 Optional edge-helper variables supported now:

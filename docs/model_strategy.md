@@ -11,10 +11,18 @@
   - evidence reviewer
   - peer reviewer 1 when needed
   - peer reviewer 2 when needed
-  - final summary
 
-This model is used for reasoning-heavy stages where the system needs intent interpretation,
-search-strategy explanation, critique, and analyst-facing narrative.
+This model is used for reasoning-heavy stages where the system needs intent interpretation, search-strategy explanation, and critique.
+
+### Summary Model
+- Default:
+  - `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+- Responsibilities:
+  - final summary
+  - agentic summary
+  - continuation summary handoff
+
+This model is used for concise analyst-facing summaries and end-of-run narrative output.
 
 ### SPL Writer Model
 - Default:
@@ -84,7 +92,7 @@ export OLLAMA_MODEL_SECURITY_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruc
 export OLLAMA_MODEL_EVIDENCE_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
 export OLLAMA_MODEL_PEER_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
 export OLLAMA_MODEL_PEER_REVIEWER_2="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-export OLLAMA_MODEL_FINAL_SUMMARY="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+export OLLAMA_MODEL_FINAL_SUMMARY="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 export OLLAMA_MODEL_QUERY_REPAIR="deepseek-coder-v2:lite"
 export EDGE_LLM_ENABLED="0"
 export EDGE_LLM_HOST=""

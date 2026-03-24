@@ -164,9 +164,9 @@ A.G.E.N.T. Smith will show:
 Run the generated `ollama pull ...` commands on the Ollama host for anything missing, then re-run validation.
 
 Recommended two-model assignment:
-- `Planner` -> Qwen
-- `SPL Writer` -> DeepSeek-Coder
-- `Security Reviewer` -> Qwen
+- `Planner` -> `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
+- `SPL Writer` -> `deepseek-coder-v2:lite`
+- `Security Reviewer` -> `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
 
 Normal runtime path:
 - Planner -> SPL Writer -> Security Reviewer
