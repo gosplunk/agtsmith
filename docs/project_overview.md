@@ -7,6 +7,9 @@ This page is the reader's starting point. It does not try to explain the whole p
 If you want the shortest explanation of what A.G.E.N.T. Smith is, read:
 - [`docs/whitepapers/project_one_page_white_paper.md`](/docs/view?path=whitepapers/project_one_page_white_paper.md)
 
+If you are trying to stand the platform up for the first time, read:
+- [`docs/runbooks/initial_setup.md`](/docs/view?path=runbooks/initial_setup.md)
+
 If you want the technical explanation of how the runtime actually works, read:
 - [`docs/whitepapers/technical_deep_dive.md`](/docs/view?path=whitepapers/technical_deep_dive.md)
 

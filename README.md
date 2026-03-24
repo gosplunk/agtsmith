@@ -4,6 +4,13 @@ A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage
 
 This repository is published as a clean starting point. It ships with example configuration, not live environment secrets or local runtime state.
 
+## Start Here
+If you are trying to get the platform running for the first time, read the [Initial Setup Guide](docs/runbooks/initial_setup.md) alongside the quick start below.
+
+If you want the shortest explanation of the project before you install anything, start with:
+- [One-Page White Paper](docs/whitepapers/project_one_page_white_paper.md)
+- [Technical Deep Dive](docs/whitepapers/technical_deep_dive.md)
+
 ## Quick Start
 For a clean first run, use the deployment container:
 
@@ -17,6 +24,7 @@ make docker-deploy-up
 Then:
 - open `http://HOST_IP:8787/login`
 - complete first-run setup
+- follow the [Initial Setup Guide](docs/runbooks/initial_setup.md) if you need the full environment checklist
 - validate Ollama, Splunk Base, and Splunk MCP in `Control Center -> Configuration`
 - pull and assign any missing models
 - refresh Data Domains
@@ -182,10 +190,10 @@ make spl-hardening-benchmark-botsv3-inventory
 ## Docs Reading Order
 1. `docs/whitepapers/project_one_page_white_paper.md`
 2. `docs/whitepapers/technical_deep_dive.md`
-3. `docs/architecture/two_model_spl_pipeline.md`
-4. `docs/architecture/system_design.md`
-5. `docs/runbooks/initial_setup.md`
-6. `docs/runbooks/health_check.md`
+3. `docs/runbooks/initial_setup.md`
+4. `docs/runbooks/health_check.md`
+5. `docs/architecture/two_model_spl_pipeline.md`
+6. `docs/architecture/system_design.md`
 
 ## Default Model Assignments
 ```bash
