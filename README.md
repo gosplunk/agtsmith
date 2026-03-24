@@ -4,6 +4,24 @@ A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage
 
 This repository is published as a clean starting point. It ships with example configuration, not live environment secrets or local runtime state.
 
+## Quick Start
+For a clean first run, use the deployment container:
+
+```bash
+git clone https://github.com/gosplunk/agtsmith.git
+cd agtsmith
+make docker-deploy-build
+make docker-deploy-up
+```
+
+Then:
+- open `http://<host-ip>:8787/login`
+- complete first-run setup
+- validate Ollama, Splunk Base, and Splunk MCP in `Control Center -> Configuration`
+- pull and assign any missing models
+- refresh Data Domains
+- run the first investigation
+
 ## How It Works
 The default SPL path is a two-model pipeline:
 
