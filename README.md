@@ -15,7 +15,7 @@ make docker-deploy-up
 ```
 
 Then:
-- open `http://<host-ip>:8787/login`
+- open `http://HOST_IP:8787/login`
 - complete first-run setup
 - validate Ollama, Splunk Base, and Splunk MCP in `Control Center -> Configuration`
 - pull and assign any missing models
@@ -92,7 +92,7 @@ export AGTSMITH_GID=$(id -g)
 The recommended path is Docker-first.
 
 1. Start the deployment container.
-2. Open `http://<host-ip>:8787/login`.
+2. Open `http://HOST_IP:8787/login`.
 3. Complete first-run bootstrap if prompted.
 4. Open `Control Center`.
 5. Follow the Initial Setup Guide from the Configuration page.

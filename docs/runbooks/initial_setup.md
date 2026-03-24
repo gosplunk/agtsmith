@@ -6,7 +6,7 @@ The optional edge-helper model described in the architecture docs is not require
 
 ## Quick Start
 ```bash
-git clone <your-repo-url>
+git clone YOUR_REPO_URL
 cd agtsmith
 cp config/ui.env.example config/ui.env
 export AGTSMITH_UID=$(id -u)
@@ -17,7 +17,7 @@ make docker-deploy-up
 
 Then open:
 ```text
-http://<smith-host-ip>:8787/login
+http://SMITH_HOST_IP:8787/login
 ```
 
 If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential setup page before normal login.
@@ -31,16 +31,16 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
    - Quick check:
      ```bash
      ollama --version
-     curl http://<ollama-host>:11434/api/tags
+     curl http://OLLAMA_HOST:11434/api/tags
      ```
    - If the tags endpoint fails, Ollama is not reachable yet.
 
 2. **Splunk MCP server app installed on the Splunk side**
    - A.G.E.N.T. Smith expects a reachable MCP endpoint like:
-     - `https://<splunk-host>:8089/services/mcp`
+     - `https://SPLUNK_HOST:8089/services/mcp`
    - Quick check:
      ```bash
-     curl -k -i -H "Authorization: Bearer <token>" https://<splunk-host>:8089/services/mcp
+     curl -k -i -H "Authorization: Bearer TOKEN" https://SPLUNK_HOST:8089/services/mcp
      ```
    - A `405` response to a simple probe can still mean the endpoint is alive; the UI validator accounts for that.
 
@@ -60,8 +60,8 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
      - `8787` on the A.G.E.N.T. Smith host for the web UI
    - Quick checks:
      ```bash
-     curl http://<ollama-host>:11434/api/tags
-     curl -k https://<splunk-host>:8089
+     curl http://OLLAMA_HOST:11434/api/tags
+     curl -k https://SPLUNK_HOST:8089
      ```
 
 ### Dependency How-To Summary

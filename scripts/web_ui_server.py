@@ -4318,14 +4318,30 @@ def _render_markdown_simple(text: str) -> str:
     in_ol = False
 
     def render_inline(value: str) -> str:
-        escaped = html.escape(value)
-        escaped = re.sub(r"`([^`]+)`", lambda m: f"<code>{html.escape(m.group(1))}</code>", escaped)
+        placeholders: dict[str, str] = {}
+        token_index = 0
+
+        def stash(rendered: str) -> str:
+            nonlocal token_index
+            token = f"__INLINE_TOKEN_{token_index}__"
+            token_index += 1
+            placeholders[token] = rendered
+            return token
+
+        def _code_repl(match: re.Match[str]) -> str:
+            return stash(f"<code>{html.escape(match.group(1))}</code>")
+
         def _link_repl(match: re.Match[str]) -> str:
-            label = html.escape(match.group(1))
+            label = render_inline(match.group(1))
             href = html.escape(match.group(2), quote=True)
-            return f'<a href="{href}">{label}</a>'
-        escaped = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _link_repl, escaped)
-        return escaped
+            return stash(f'<a href="{href}">{label}</a>')
+
+        value = re.sub(r"`([^`]+)`", _code_repl, value)
+        value = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _link_repl, value)
+        rendered = html.escape(value)
+        for token, replacement in placeholders.items():
+            rendered = rendered.replace(token, replacement)
+        return rendered
 
     def close_lists() -> None:
         nonlocal in_ul, in_ol
