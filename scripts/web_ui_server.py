@@ -5920,7 +5920,7 @@ def _configure_page_body() -> str:
       <div class="cfg-row"><label for="cfg-edge-enabled">EDGE_LLM_ENABLED</label><div class="cfg-example">Use <code>0</code> to leave the edge helper out of the runtime entirely.</div><div class="cfg-select-wrap"><select id="cfg-edge-enabled"><option value="0">0</option><option value="1">1</option></select></div></div>
       <div class="cfg-row"><label for="cfg-edge-role">EDGE_LLM_ROLE</label><div class="cfg-example">Recommended: <code>edge_router_splitter</code></div><input id="cfg-edge-role" placeholder="edge_router_splitter" /></div>
       <div class="cfg-row"><label for="cfg-edge-host">EDGE_LLM_HOST</label><div class="cfg-example">Example URL: <code>http://192.168.1.70:11434</code></div><input id="cfg-edge-host" placeholder="http://192.168.1.70:11434" /></div>
-      <div class="cfg-row"><label for="cfg-edge-timeout">EDGE_LLM_TIMEOUT_SEC</label><div class="cfg-example">Short timeout for a cheap routing helper. Example: <code>20</code></div><input id="cfg-edge-timeout" placeholder="20" /></div>
+      <div class="cfg-row"><label for="cfg-edge-timeout">EDGE_LLM_TIMEOUT_SEC</label><div class="cfg-example">Short timeout for a cheap routing helper. Example: <code>60</code></div><input id="cfg-edge-timeout" placeholder="60" /></div>
       <div class="cfg-row wide"><label for="cfg-edge-model">EDGE_LLM_MODEL</label><div class="cfg-example">Small routing model name visible from the edge Ollama host. Example: <code>qwen2.5:1.5b</code></div><input id="cfg-edge-model" list="cfg-edge-models-list" placeholder="qwen2.5:1.5b" /></div>
       </div>
       <div class="cfg-note">
@@ -6042,7 +6042,7 @@ def _configure_page_body() -> str:
     cfg$('cfg-edge-host').value = payload.EDGE_LLM_HOST || '';
     cfg$('cfg-edge-model').value = payload.EDGE_LLM_MODEL || '';
     cfg$('cfg-edge-role').value = payload.EDGE_LLM_ROLE || 'edge_router_splitter';
-    cfg$('cfg-edge-timeout').value = payload.EDGE_LLM_TIMEOUT_SEC || '20';
+    cfg$('cfg-edge-timeout').value = payload.EDGE_LLM_TIMEOUT_SEC || '60';
     cfg$('cfg-model-planner').value = payload.OLLAMA_MODEL_QUERY_PLANNER || '';
     cfg$('cfg-model-query-writer').value = payload.OLLAMA_MODEL_QUERY_WRITER || '';
     cfg$('cfg-model-repair').value = payload.OLLAMA_MODEL_QUERY_REPAIR || '';

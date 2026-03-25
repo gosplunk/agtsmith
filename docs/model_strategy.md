@@ -98,7 +98,7 @@ export EDGE_LLM_ENABLED="0"
 export EDGE_LLM_HOST=""
 export EDGE_LLM_MODEL=""
 export EDGE_LLM_ROLE="edge_router_splitter"
-export EDGE_LLM_TIMEOUT_SEC="20"
+export EDGE_LLM_TIMEOUT_SEC="60"
 ```
 
 ## Local Commands

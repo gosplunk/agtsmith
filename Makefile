@@ -370,17 +370,20 @@ spl-hardening-benchmark-botsv3-inventory:
 env-profile-build:
 	@echo "[env-profile-build] rebuilding append-only environment profile from Splunk MCP"
 	@echo "[env-profile-build] focus_host=$(FOCUS_HOST)"
-	@.venv/bin/python scripts/build_environment_profile.py --snapshot --focus-host "$(FOCUS_HOST)"
+	@PYTHON_BIN=$$(if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi); \
+	$$PYTHON_BIN scripts/build_environment_profile.py --snapshot --focus-host "$(FOCUS_HOST)"
 	@echo "[env-profile-build] complete"
 
 env-profile-check:
 	@echo "[env-profile-check] checking profile freshness"
-	@.venv/bin/python scripts/check_environment_profile_freshness.py --max-age-minutes 11520
+	@PYTHON_BIN=$$(if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi); \
+	$$PYTHON_BIN scripts/check_environment_profile_freshness.py --max-age-minutes 11520
 	@echo "[env-profile-check] complete"
 
 spl-skillpack-refresh:
 	@echo "[spl-skillpack-refresh] building SPL skillpack"
-	@.venv/bin/python scripts/build_spl_skillpack.py
+	@PYTHON_BIN=$$(if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi); \
+	$$PYTHON_BIN scripts/build_spl_skillpack.py
 	@echo "[spl-skillpack-refresh] complete"
 
 env-profile-refresh: env-profile-build env-profile-check spl-skillpack-refresh

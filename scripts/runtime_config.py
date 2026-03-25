@@ -11,7 +11,7 @@ DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 DEFAULT_SPLUNK_MCP_URL = "https://127.0.0.1:8089/services/mcp"
 DEFAULT_SPLUNK_BASE_URL = "https://127.0.0.1:8089"
 DEFAULT_EDGE_LLM_ROLE = "edge_router_splitter"
-DEFAULT_EDGE_LLM_TIMEOUT_SEC = "20"
+DEFAULT_EDGE_LLM_TIMEOUT_SEC = "60"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 UI_ENV_PATH = PROJECT_ROOT / "config" / "ui.env"
