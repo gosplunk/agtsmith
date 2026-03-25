@@ -13,6 +13,8 @@ sudo usermod -aG docker $USER
 newgrp docker
 ```
 
+`$USER` is the current shell username. You do not need to replace it manually.
+
 Then:
 ```bash
 git clone YOUR_REPO_URL
@@ -48,6 +50,7 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
      sudo usermod -aG docker $USER
      newgrp docker
      ```
+   - `$USER` auto-expands to the username of the current shell session.
    - Quick check:
      ```bash
      git --version

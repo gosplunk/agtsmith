@@ -21,6 +21,8 @@ sudo usermod -aG docker $USER
 newgrp docker
 ```
 
+`$USER` is the current shell username. You do not need to replace it manually.
+
 Then:
 
 ```bash
