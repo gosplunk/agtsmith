@@ -8,7 +8,7 @@ The optional edge-helper model described in the architecture docs is not require
 Install the required host tools first if this is a fresh Linux machine:
 ```bash
 sudo apt-get update
-sudo apt-get install -y git make docker.io docker-compose-plugin
+sudo apt-get install -y git curl make docker.io docker-compose-plugin
 sudo usermod -aG docker $USER
 newgrp docker
 ```
@@ -19,7 +19,6 @@ Then:
 ```bash
 git clone YOUR_REPO_URL
 cd agtsmith
-cp config/ui.env.example config/ui.env
 export AGTSMITH_UID=$(id -u)
 export AGTSMITH_GID=$(id -g)
 make docker-deploy-build
@@ -40,13 +39,14 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
 1. **Host tools installed on the A.G.E.N.T. Smith machine**
    - Required for the setup path shown in this repo:
      - `git`
+     - `curl`
      - `make`
      - Docker Engine
      - Docker Compose plugin
    - Quick install on Debian / Ubuntu / Raspberry Pi OS:
      ```bash
      sudo apt-get update
-     sudo apt-get install -y git make docker.io docker-compose-plugin
+     sudo apt-get install -y git curl make docker.io docker-compose-plugin
      sudo usermod -aG docker $USER
      newgrp docker
      ```
@@ -54,6 +54,7 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
    - Quick check:
      ```bash
      git --version
+     curl --version
      make --version
      docker --version
      docker compose version

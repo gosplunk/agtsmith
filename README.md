@@ -16,7 +16,7 @@ For a clean first run, use the deployment container:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git make docker.io docker-compose-plugin
+sudo apt-get install -y git curl make docker.io docker-compose-plugin
 sudo usermod -aG docker $USER
 newgrp docker
 ```
@@ -160,10 +160,12 @@ For the two-model SPL path:
 - `OLLAMA_MODEL_QUERY_REPAIR` can use the same coding model as the writer
 - `EDGE_LLM_ENABLED=1` is only for the optional edge helper path
 
-To start from the example file:
+If you are running the host/manual path and want to start from the example file:
 ```bash
 cp config/ui.env.example config/ui.env
 ```
+
+For the recommended Docker deployment path, this is not required. The clean deploy flow uses first-run setup and Docker volumes instead.
 
 ## Benchmarks And Evals
 The project includes two main feedback loops.
