@@ -235,9 +235,11 @@ Do not move the primary planner, SPL writer, or reviewer roles into this slot.
 Open `Step 5: Personalize SPL With Environmental Awareness` and click `Refresh Data Domains`.
 
 What happens now:
-- on first setup, A.G.E.N.T. Smith performs a one-click bulk enrichment pass across all missing sourcetypes
-- the same run automatically produces the environment-aware SPL personalization layer
-- later refreshes fall back to incremental maintenance
+- A.G.E.N.T. Smith inventories the live Splunk environment through MCP
+- it records accessible indexes, sourcetypes, tag inventory, and a bounded field inventory for the sourcetypes it has seen
+- the same run automatically rebuilds the environment-aware SPL guidance layer used by query writing, validation, and repair
+- on first setup, this is the only button you normally need
+- later, run it again only when the Splunk environment changes materially or after reconnecting to a different MCP target
 
 This is the same workflow as:
 ```bash

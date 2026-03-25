@@ -5964,7 +5964,7 @@ def _configure_page_body() -> str:
           <div class="cfg-personalize-status">
             <div>
               <h3 style="margin-top:0;">Refresh Data Domains</h3>
-              <p class="cfg-help">This runs the same <code>make env-profile-refresh</code> workflow from the web UI. Use it when you want to rebuild environment awareness after Splunk data changes or after the initial MCP connection is established.</p>
+              <p class="cfg-help">This scans Splunk through MCP and rebuilds the local environment profile: accessible indexes, sourcetypes, tag inventory, and a bounded field inventory for the sources the system has seen. On first setup, this is the main button you should run after runtime validation succeeds.</p>
             </div>
             <span id="cfg-env-refresh-state" class="cfg-badge">state=unknown</span>
           </div>
@@ -5983,19 +5983,20 @@ def _configure_page_body() -> str:
           </div>
           <div class="cfg-personalize-meta">
             <div id="cfg-env-refresh-path" class="cfg-note">Refresh log path will appear here.</div>
+            <div class="cfg-note">Use this again later only when your Splunk data changes materially: new indexes, new sourcetypes, new tags, or after reconnecting MCP to a different environment.</div>
           </div>
         </div>
         <div class="cfg-personalize-card" style="margin-top:14px;">
           <div class="cfg-personalize-status">
             <div>
               <h3 style="margin-top:0;">Environment-Aware SPL Personalization</h3>
-              <p class="cfg-help">This step builds the personalized SPL guidance layer that combines shipped RAG with the live environment profile. On first setup, it is created automatically when Data Domains completes successfully. Use this button later to rebuild personalization after environment changes.</p>
+              <p class="cfg-help">This rebuilds the environment-aware SPL guidance layer from the profile above. It turns the discovered indexes, sourcetypes, fields, and tags into the local skillpack used by query writing, validation, and repair. On first setup, a successful Data Domains refresh already does this automatically, so you usually do not need to press this separately.</p>
             </div>
             <span id="cfg-personalize-state" class="cfg-badge">state=unknown</span>
           </div>
           <div id="cfg-personalize-detail" class="cfg-personalize-copy">Waiting for configuration load.</div>
           <div class="cfg-actions">
-            <button id="cfg-personalize">Build Personalization</button>
+            <button id="cfg-personalize">Rebuild Personalization Only</button>
             <span id="cfg-personalize-status" class="cfg-status">Not started.</span>
           </div>
           <div class="cfg-progress-wrap">
@@ -6008,7 +6009,7 @@ def _configure_page_body() -> str:
           </div>
           <div class="cfg-personalize-meta">
             <div id="cfg-personalize-path" class="cfg-note">Skillpack path will appear after personalization exists.</div>
-            <div class="cfg-note">What this does: refreshes the environment profile once, rebuilds the SPL skillpack, and updates the environment-aware RAG used by query writing, validation, and repair. Initial Data Domains refresh already creates this automatically.</div>
+            <div class="cfg-note">Use this when the profile already exists but you want to regenerate the guidance layer again. On first setup, just run <strong>Refresh Data Domains</strong> and let it complete.</div>
           </div>
         </div>
       </div>
@@ -6107,11 +6108,11 @@ def _configure_page_body() -> str:
     const blocked = state === 'blocked' || state === 'in_progress';
     btn.disabled = blocked;
     if(state === 'in_progress'){
-      btn.textContent = 'Personalization Running...';
+      btn.textContent = 'Rebuilding Personalization...';
     } else if (state === 'ready'){
       btn.textContent = 'Rebuild Personalization';
     } else {
-      btn.textContent = 'Build Personalization';
+      btn.textContent = 'Rebuild Personalization Only';
     }
   }
   let cfgPersonalizePoll = null;
@@ -6125,7 +6126,7 @@ def _configure_page_body() -> str:
     cfgRenderPersonalization(data.personalization || {});
     const state = String(data.personalization?.state || 'unknown');
     if(state === 'in_progress'){
-      cfg$('cfg-personalize-status').textContent = data.personalization?.detail || 'Building personalization...';
+      cfg$('cfg-personalize-status').textContent = data.personalization?.detail || 'Rebuilding personalization...';
       if(!cfgPersonalizePoll){
         cfgPersonalizePoll = window.setInterval(cfgPollPersonalization, 1200);
       }
@@ -6469,7 +6470,7 @@ def _configure_page_body() -> str:
     await cfgValidate();
   };
   cfg$('cfg-personalize').onclick = async () => {
-    cfg$('cfg-personalize-status').textContent = 'Starting personalization...';
+    cfg$('cfg-personalize-status').textContent = 'Starting personalization rebuild...';
     const resp = await fetch('/api/config/personalize', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
