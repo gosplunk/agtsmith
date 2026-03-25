@@ -1041,8 +1041,6 @@ def _validate_runtime_config(values: dict[str, str], scope: str = "full") -> dic
     if edge_enabled:
         if not edge_host:
             add_result("edge_helper", "error", "Edge helper is enabled but EDGE_LLM_HOST is empty.")
-        elif not edge_model:
-            add_result("edge_helper", "error", "Edge helper is enabled but EDGE_LLM_MODEL is empty.")
         else:
             try:
                 code, payload = _http_json(f"{edge_host}/api/tags")
@@ -1053,7 +1051,14 @@ def _validate_runtime_config(values: dict[str, str], scope: str = "full") -> dic
                     if isinstance(item, dict) and str(item.get("name", "")).strip()
                 )
                 edge_available_models = installed
-                if edge_model in installed:
+                if not edge_model:
+                    add_result(
+                        "edge_helper",
+                        "warn",
+                        f"Edge helper reachable ({code}); assign one of the discovered models before saving the helper as enabled.",
+                        {"models": installed},
+                    )
+                elif edge_model in installed:
                     add_result(
                         "edge_helper",
                         "ok",
