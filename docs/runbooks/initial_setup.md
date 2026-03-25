@@ -5,6 +5,15 @@ This is the primary startup path for a new deployment. The goal is simple: launc
 The optional edge-helper model described in the architecture docs is not required for first-day setup. The baseline deployment path still assumes one primary Ollama inference host. If you add a small edge device later, treat it as an optional routing/helper layer rather than a prerequisite. The Configuration page now supports that explicitly with an enable/disable toggle.
 
 ## Quick Start
+Install the required host tools first if this is a fresh Linux machine:
+```bash
+sudo apt-get update
+sudo apt-get install -y git make docker.io docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+Then:
 ```bash
 git clone YOUR_REPO_URL
 cd agtsmith
@@ -26,7 +35,28 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
 <summary><strong>Pre-Flight Check</strong> — open this before you start if the environment is still being prepared</summary>
 
 ### Required Dependencies
-1. **Ollama installed on the inference host**
+1. **Host tools installed on the A.G.E.N.T. Smith machine**
+   - Required for the setup path shown in this repo:
+     - `git`
+     - `make`
+     - Docker Engine
+     - Docker Compose plugin
+   - Quick install on Debian / Ubuntu / Raspberry Pi OS:
+     ```bash
+     sudo apt-get update
+     sudo apt-get install -y git make docker.io docker-compose-plugin
+     sudo usermod -aG docker $USER
+     newgrp docker
+     ```
+   - Quick check:
+     ```bash
+     git --version
+     make --version
+     docker --version
+     docker compose version
+     ```
+
+2. **Ollama installed on the inference host**
    - Official site: [ollama.com/download](https://ollama.com/download)
    - Quick check:
      ```bash
@@ -35,7 +65,7 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
      ```
    - If the tags endpoint fails, Ollama is not reachable yet.
 
-2. **Splunk MCP server app installed on the Splunk side**
+3. **Splunk MCP server app installed on the Splunk side**
    - A.G.E.N.T. Smith expects a reachable MCP endpoint like:
      - `https://SPLUNK_HOST:8089/services/mcp`
    - Quick check:
@@ -44,7 +74,7 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
      ```
    - A `405` response to a simple probe can still mean the endpoint is alive; the UI validator accounts for that.
 
-3. **Expected Ollama models pulled**
+4. **Expected Ollama models pulled**
    - You can pull models manually on the Ollama host:
      ```bash
      ollama pull deepseek-coder-v2:lite
@@ -53,7 +83,7 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
      ```
    - The Configuration page will also generate the exact pull commands for the models currently assigned to each role.
 
-4. **Required ports open between hosts**
+5. **Required ports open between hosts**
    - Common minimum ports:
      - `11434` to the Ollama host
      - `8089` to the Splunk management + MCP endpoint
@@ -65,6 +95,11 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
      ```
 
 ### Dependency How-To Summary
+- **Prepare the A.G.E.N.T. Smith host**
+  - Install `git`, `make`, Docker Engine, and the Docker Compose plugin.
+  - Add your user to the `docker` group if you do not want to run every project command with `sudo`.
+  - Confirm `docker compose version` works before cloning the repo.
+
 - **Install Ollama**
   - Install from the official Ollama installer for the target OS.
   - Start the Ollama service.

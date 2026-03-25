@@ -15,6 +15,15 @@ If you want the shortest explanation of the project before you install anything,
 For a clean first run, use the deployment container:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y git make docker.io docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+Then:
+
+```bash
 git clone https://github.com/gosplunk/agtsmith.git
 cd agtsmith
 make docker-deploy-build
