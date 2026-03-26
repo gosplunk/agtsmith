@@ -142,6 +142,188 @@ def _autofill_model_assignments(values: dict[str, str], available_models: list[s
     return updated
 
 
+DEPENDENCY_COMMANDS: list[tuple[str, list[str], str]] = [
+    ("git", ["git", "--version"], "git --version"),
+    ("curl", ["curl", "--version"], "curl --version"),
+    ("make", ["make", "--version"], "make --version"),
+    ("docker", ["docker", "--version"], "docker --version"),
+    ("docker_compose", ["docker", "compose", "version"], "docker compose version"),
+]
+
+
+def _collect_dependency_status() -> dict[str, Any]:
+    running_in_docker = Path("/.dockerenv").exists()
+    checks: list[dict[str, str]] = []
+    all_ok = True
+    for key, argv, display in DEPENDENCY_COMMANDS:
+        if running_in_docker and key in {"docker", "docker_compose"}:
+            checks.append(
+                {
+                    "key": key,
+                    "command": display,
+                    "state": "host_only",
+                    "detail": "host-level prerequisite; not expected inside the app container",
+                }
+            )
+            continue
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=6, check=False)
+            raw_output = (proc.stdout or proc.stderr or "").strip()
+            first_line = raw_output.splitlines()[0].strip() if raw_output else ""
+            ok = proc.returncode == 0
+            all_ok = all_ok and ok
+            checks.append(
+                {
+                    "key": key,
+                    "command": display,
+                    "state": "ok" if ok else "error",
+                    "detail": first_line or (f"{display} returned exit code {proc.returncode}" if not ok else "available"),
+                }
+            )
+        except FileNotFoundError:
+            all_ok = False
+            checks.append(
+                {
+                    "key": key,
+                    "command": display,
+                    "state": "error",
+                    "detail": "command not found",
+                }
+            )
+        except Exception as exc:
+            all_ok = False
+            checks.append(
+                {
+                    "key": key,
+                    "command": display,
+                    "state": "error",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            )
+    return {
+        "scope_note": "This reflects what the current A.G.E.N.T. Smith runtime can see. When the app is running in Docker, host-only tools such as Docker Engine and Docker Compose are marked separately instead of failing red.",
+        "overall_state": "ok" if all_ok else "error",
+        "checks": checks,
+    }
+
+
+def _mcp_probe(values: dict[str, str]) -> dict[str, Any]:
+    splunk_mcp = str(values.get("SPLUNK_MCP_URL", "")).strip()
+    token = str(values.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
+    if not splunk_mcp:
+        return {
+            "status": "error",
+            "detail": "SPLUNK_MCP_URL is empty.",
+            "tool": "splunk_get_indexes",
+            "rows_returned": 0,
+        }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    init_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "agtsmith-config-probe", "version": "1.0"},
+        },
+    }
+    tool_payload = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "splunk_get_indexes",
+            "arguments": {},
+        },
+    }
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                splunk_mcp,
+                data=json.dumps(init_payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            ),
+            timeout=12.0,
+            context=ssl._create_unverified_context(),
+        ) as init_resp:
+            init_status = getattr(init_resp, "status", 200)
+            init_body = init_resp.read().decode("utf-8", errors="replace")
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                splunk_mcp,
+                data=json.dumps(tool_payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            ),
+            timeout=20.0,
+            context=ssl._create_unverified_context(),
+        ) as tool_resp:
+            tool_status = getattr(tool_resp, "status", 200)
+            tool_body_raw = tool_resp.read().decode("utf-8", errors="replace")
+        try:
+            tool_body = json.loads(tool_body_raw)
+        except Exception:
+            return {
+                "status": "error",
+                "detail": f"MCP probe returned non-JSON response after initialize HTTP {init_status} / tool HTTP {tool_status}.",
+                "tool": "splunk_get_indexes",
+                "rows_returned": 0,
+                "raw_excerpt": tool_body_raw[:300],
+            }
+        if not isinstance(tool_body, dict):
+            return {
+                "status": "error",
+                "detail": "MCP probe returned an unexpected response shape.",
+                "tool": "splunk_get_indexes",
+                "rows_returned": 0,
+            }
+        if "error" in tool_body:
+            return {
+                "status": "error",
+                "detail": f"MCP JSON-RPC error: {tool_body['error']}",
+                "tool": "splunk_get_indexes",
+                "rows_returned": 0,
+            }
+        result = tool_body.get("result", {}) if isinstance(tool_body, dict) else {}
+        structured = result.get("structuredContent", {}) if isinstance(result, dict) else {}
+        rows = structured.get("results", []) if isinstance(structured, dict) else []
+        total_rows = int(structured.get("total_rows", len(rows))) if isinstance(structured, dict) else len(rows)
+        return {
+            "status": "ok",
+            "detail": f"MCP tool call succeeded against {splunk_mcp}.",
+            "tool": "splunk_get_indexes",
+            "rows_returned": total_rows,
+            "http_status": tool_status,
+        }
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        return {
+            "status": "error",
+            "detail": f"MCP probe failed with HTTP {exc.code}.",
+            "tool": "splunk_get_indexes",
+            "rows_returned": 0,
+            "raw_excerpt": body[:300],
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "detail": f"{type(exc).__name__}: {exc}",
+            "tool": "splunk_get_indexes",
+            "rows_returned": 0,
+        }
+
+
 def _global_nav(active: str) -> str:
     items = [
         ("/mcp", "Splunk MCP Chat", "MCP", "mcp"),
@@ -5752,6 +5934,22 @@ def _configure_page_body() -> str:
     .cfg-personalize-status{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;}
     .cfg-personalize-copy{color:#dbeafe;font-size:13px;line-height:1.6;}
     .cfg-personalize-meta{margin-top:10px;display:grid;gap:8px;}
+    .cfg-deps-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:14px;}
+    .cfg-deps-grid > *{min-width:0;}
+    .cfg-dep-card{
+      border:1px solid #2a4a64;border-radius:16px;background:linear-gradient(180deg,#0a1627,#07111f 80%);
+      padding:14px;box-shadow:0 14px 26px rgba(2,6,23,.16), inset 0 1px 0 rgba(255,255,255,.03);
+    }
+    .cfg-dep-card.ok{border-color:#166534;background:linear-gradient(180deg,#0a2514,#07160d 82%);}
+    .cfg-dep-card.host_only{border-color:#7c5b12;background:linear-gradient(180deg,#241808,#151008 82%);}
+    .cfg-dep-card.error{border-color:#7f1d1d;background:linear-gradient(180deg,#240d0d,#13090b 82%);}
+    .cfg-dep-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;}
+    .cfg-dep-name{font-size:13px;font-weight:800;color:#f8fafc;letter-spacing:.02em;}
+    .cfg-dep-dot{width:10px;height:10px;border-radius:999px;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,.14);}
+    .cfg-dep-card.ok .cfg-dep-dot{background:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.14);}
+    .cfg-dep-card.host_only .cfg-dep-dot{background:#f59e0b;box-shadow:0 0 0 4px rgba(245,158,11,.14);}
+    .cfg-dep-cmd{font-size:11px;color:#93c5fd;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.45;overflow-wrap:anywhere;word-break:break-word;}
+    .cfg-dep-detail{margin-top:8px;font-size:12px;color:#dbeafe;line-height:1.5;overflow-wrap:anywhere;word-break:break-word;}
     .cfg-progress-wrap{display:grid;gap:8px;margin-top:12px;}
     .cfg-progress-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;}
     .cfg-progress-track{width:100%;height:12px;border-radius:999px;border:1px solid #26435c;background:#07111f;overflow:hidden;}
@@ -5785,7 +5983,7 @@ def _configure_page_body() -> str:
       box-shadow:0 16px 30px rgba(8,23,37,.34), inset 0 1px 0 rgba(255,255,255,.06);
     }
     @media (max-width: 1120px){.cfg-grid{grid-template-columns:1fr;}.cfg-hero{grid-template-columns:1fr;}}
-    @media (max-width: 980px){.cfg-form-grid,.cfg-subgrid,.cfg-status-board,.cfg-model-grid,.cfg-compare{grid-template-columns:1fr;}}
+    @media (max-width: 980px){.cfg-form-grid,.cfg-subgrid,.cfg-status-board,.cfg-model-grid,.cfg-compare,.cfg-deps-grid{grid-template-columns:1fr;}}
   </style>
   <h1>Configuration</h1>
   <p class="muted">Central runtime setup for A.G.E.N.T. Smith, including Splunk MCP, the primary Ollama host, optional edge-helper routing, UI auth, tasker-role assignments, and repeatable deployment guidance for both host and Docker runtimes.</p>
@@ -5822,6 +6020,12 @@ def _configure_page_body() -> str:
         <div class="cfg-linkline" style="margin:0;">
           <a id="cfg-setup-link-inline" class="cfg-linkbtn" href="/docs/view?path=runbooks/initial_setup.md">Open Initial Setup Guide</a>
         </div>
+        <h3 style="margin:16px 0 6px;">Dependency Checker</h3>
+        <p class="cfg-help">This checks whether the current runtime can see the basic setup tools used in the install guide. Green means the command is available here. Red means it is missing here. Amber means it is a host-only prerequisite and is not expected inside the app container.</p>
+        <div id="cfg-deps-note" class="cfg-note">Checking runtime dependencies...</div>
+        <div id="cfg-deps-results" class="cfg-deps-grid">
+          <div class="cfg-note">Dependency status will appear here.</div>
+        </div>
       </div>
     </div>
     <details class="cfg-step">
@@ -5846,6 +6050,7 @@ def _configure_page_body() -> str:
       <div class="cfg-actions">
         <button id="cfg-save">Save Configuration</button>
         <button id="cfg-validate" class="btn-secondary">Validate Current Config</button>
+        <button id="cfg-mcp-probe" class="btn-secondary">Test MCP Query</button>
         <span id="cfg-status" class="cfg-status">Loading current values...</span>
       </div>
       <div class="cfg-note">
@@ -5856,6 +6061,13 @@ def _configure_page_body() -> str:
       <div id="cfg-validation-summary" class="cfg-badges"></div>
       <div id="cfg-validation-results" class="cfg-validate-grid">
         <div class="cfg-note">No validation has been run yet.</div>
+      </div>
+      <div style="margin-top:12px;">
+        <h3 style="margin:0 0 6px;">MCP Query Probe</h3>
+        <p class="cfg-help">This runs a real bounded MCP tool call using the current draft values, without requiring a save first. It is meant to answer a simple question: will the configured MCP endpoint actually execute a live request right now?</p>
+        <div id="cfg-mcp-probe-results" class="cfg-validate-grid">
+          <div class="cfg-note">No MCP probe has been run yet.</div>
+        </div>
       </div>
      </div>
      </div>
@@ -6021,6 +6233,29 @@ def _configure_page_body() -> str:
 <script>
   const cfg$ = (id) => document.getElementById(id);
   function cfgEscape(v){return String(v ?? '');}
+  function cfgRenderDependencies(payload){
+    const data = payload || {};
+    cfg$('cfg-deps-note').textContent = data.scope_note || 'No dependency scope note available.';
+    const checks = Array.isArray(data.checks) ? data.checks : [];
+    if(!checks.length){
+      cfg$('cfg-deps-results').innerHTML = '<div class="cfg-note">No dependency results available.</div>';
+      return;
+    }
+    cfg$('cfg-deps-results').innerHTML = checks.map((item) => {
+      const state = String(item.state || 'error');
+      const stateLabel = state === 'ok' ? 'green' : (state === 'host_only' ? 'host only' : 'red');
+      return `
+        <div class="cfg-dep-card ${state}">
+          <div class="cfg-dep-head">
+            <div class="cfg-dep-name">${cfgEscape(item.key)}</div>
+            <span class="cfg-dep-dot" title="${cfgEscape(stateLabel)}"></span>
+          </div>
+          <div class="cfg-dep-cmd">${cfgEscape(item.command || '')}</div>
+          <div class="cfg-dep-detail">${cfgEscape(item.detail || '')}</div>
+        </div>
+      `;
+    }).join('');
+  }
   const cfgModelPairs = [
     ['cfg-model-planner','cfg-model-planner-picks'],
     ['cfg-model-query-writer','cfg-model-query-writer-picks'],
@@ -6342,6 +6577,25 @@ def _configure_page_body() -> str:
       `;
     }).join('');
   }
+  function cfgRenderMcpProbe(data){
+    const payload = data || {};
+    const status = String(payload.status || 'error');
+    const extras = [];
+    if(payload.tool){ extras.push(`tool: ${payload.tool}`); }
+    if(typeof payload.rows_returned !== 'undefined'){ extras.push(`rows_returned: ${payload.rows_returned}`); }
+    if(payload.http_status){ extras.push(`http_status: ${payload.http_status}`); }
+    if(payload.raw_excerpt){ extras.push(`excerpt: ${payload.raw_excerpt}`); }
+    cfg$('cfg-mcp-probe-results').innerHTML = `
+      <div class="cfg-check ${cfgEscape(status)}">
+        <div class="cfg-check-head">
+          <div class="cfg-check-name">mcp_query_probe</div>
+          <span class="cfg-badge">${cfgEscape(status)}</span>
+        </div>
+        <div class="cfg-check-detail">${cfgEscape(payload.detail || 'No MCP probe result available.')}</div>
+        ${extras.length ? `<div class="cfg-check-meta">${cfgEscape(extras.join('\\n'))}</div>` : ''}
+      </div>
+    `;
+  }
   function cfgRender(data){
     const values = data.values || {};
     cfgApplyPayload(values);
@@ -6374,6 +6628,17 @@ def _configure_page_body() -> str:
     cfgRenderPersonalization(data.personalization || {});
   }
   async function cfgLoad(){
+    try{
+      const depResp = await fetch('/api/config/dependencies');
+      const depData = await depResp.json();
+      if(depResp.ok){
+        cfgRenderDependencies(depData);
+      } else {
+        cfg$('cfg-deps-note').textContent = depData.error || `dependency check failed (${depResp.status})`;
+      }
+    } catch(err){
+      cfg$('cfg-deps-note').textContent = `dependency check failed: ${err}`;
+    }
     const resp = await fetch('/api/config/runtime');
     const data = await resp.json();
     if(!resp.ok){ cfg$('cfg-status').textContent = data.error || `load failed (${resp.status})`; return; }
@@ -6441,6 +6706,28 @@ def _configure_page_body() -> str:
     cfg$('cfg-edge-checks').textContent = data.connectivity_checks?.edge_ollama_tags || 'Edge helper disabled or not configured.';
     cfg$('cfg-edge-status').textContent = 'Edge helper validation complete.';
   }
+  async function cfgProbeMcp(){
+    const draft = cfgCollectPayload();
+    cfg$('cfg-status').textContent = 'Running live MCP probe...';
+    const resp = await fetch('/api/config/mcp-probe', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({values: draft})
+    });
+    const data = await resp.json();
+    if(!resp.ok){
+      cfgApplyPayload(draft);
+      cfgRenderMcpProbe({
+        status: 'error',
+        detail: data.error || `MCP probe failed (${resp.status})`
+      });
+      cfg$('cfg-status').textContent = data.error || `MCP probe failed (${resp.status})`;
+      return;
+    }
+    cfgApplyPayload(draft);
+    cfgRenderMcpProbe(data);
+    cfg$('cfg-status').textContent = data.detail || 'MCP probe complete.';
+  }
   cfg$('cfg-save').onclick = async () => {
     cfg$('cfg-status').textContent = 'Saving...';
     let payload = cfgCollectPayload();
@@ -6503,6 +6790,7 @@ def _configure_page_body() -> str:
   };
   cfg$('cfg-edge-validate').onclick = cfgValidateEdge;
   cfg$('cfg-validate').onclick = cfgValidate;
+  cfg$('cfg-mcp-probe').onclick = cfgProbeMcp;
   cfgLoad();
 </script>
 """
@@ -7402,6 +7690,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(HTTPStatus.OK, _config_snapshot())
 
+    def _api_config_dependencies_get(self) -> None:
+        if not self._require_ops_role({}):
+            return
+        self._json(HTTPStatus.OK, _collect_dependency_status())
+
+    def _api_config_mcp_probe_post(self) -> None:
+        if not self._require_ops_role({}):
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except Exception:
+            length = 0
+        raw = self.rfile.read(length)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        values = payload.get("values", {}) if isinstance(payload, dict) else {}
+        if not isinstance(values, dict):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "values must be an object"})
+            return
+        merged = _config_snapshot().get("values", {})
+        if isinstance(merged, dict):
+            merged.update({key: str(value).strip() for key, value in values.items()})
+        self._json(HTTPStatus.OK, _mcp_probe(merged if isinstance(merged, dict) else {}))
+
     def _api_config_validate_post(self) -> None:
         if not self._require_ops_role({}):
             return
@@ -7937,6 +8248,12 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/config/runtime":
             self._api_config_runtime_get()
             return
+        if parsed.path == "/api/config/dependencies":
+            self._api_config_dependencies_get()
+            return
+        if parsed.path == "/api/config/mcp-probe":
+            self.send_error(HTTPStatus.METHOD_NOT_ALLOWED, "POST required")
+            return
         if parsed.path == "/api/config/users":
             self._api_config_users_get()
             return
@@ -8123,6 +8440,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._api_config_validate_post()
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        if parsed.path == "/api/config/mcp-probe":
+            if not self._require_auth(api_mode=True):
+                return
+            try:
+                self._api_config_mcp_probe_post()
             except Exception as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
             return
