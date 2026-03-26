@@ -1,5 +1,7 @@
 # A.G.E.N.T. Smith
 
+Current release: `v1.0.0`
+
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
 This repository is published as a clean starting point. It ships with example configuration, not live environment secrets or local runtime state.
@@ -10,6 +12,7 @@ If you are trying to get the platform running for the first time, read the [Init
 If you want the shortest explanation of the project before you install anything, start with:
 - [One-Page White Paper](docs/whitepapers/project_one_page_white_paper.md)
 - [Technical Deep Dive](docs/whitepapers/technical_deep_dive.md)
+- [Changelog](CHANGELOG.md)
 
 ## Quick Start
 For a clean first run, use the deployment container:

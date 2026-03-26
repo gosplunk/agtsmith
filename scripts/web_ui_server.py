@@ -58,6 +58,7 @@ from runtime_config import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DOCS_ROOT = PROJECT_ROOT / "docs"
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
+VERSION_PATH = PROJECT_ROOT / "VERSION"
 ENV_PROFILE_PATH = ARTIFACTS_ROOT / "environment" / "environment_profile_latest.json"
 ENV_PROFILE_BOOTSTRAP_LOCK = ARTIFACTS_ROOT / "environment" / ".bootstrap.lock"
 ENV_PROFILE_REFRESH_LOCK = ARTIFACTS_ROOT / "environment" / ".refresh.lock"
@@ -119,6 +120,18 @@ CONFIG_EDITABLE_KEYS = [
 DEFAULT_UI_PASSWORDS = {"changeme123!", "SplunkLab-Only-ChangeMe!"}
 PASSWORD_HASH_PREFIX = "pbkdf2_sha256:"
 LEGACY_PASSWORD_HASH_PREFIX = "pbkdf2_sha256$"
+
+
+def _load_app_version() -> str:
+    try:
+        raw = VERSION_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return "0.0.0-dev"
+    return raw or "0.0.0-dev"
+
+
+APP_VERSION = _load_app_version()
+APP_VERSION_LABEL = APP_VERSION if APP_VERSION.startswith("v") else f"v{APP_VERSION}"
 
 
 def _default_expected_models() -> list[str]:
@@ -4283,6 +4296,23 @@ DOCS_SHELL_HTML = """<!doctype html>
       background:linear-gradient(135deg,#22c55e,#16a34a);
       color:#03230f;
     }}
+    .shell-footer {{
+      display:flex;
+      justify-content:flex-end;
+      margin-top:14px;
+      color:#8ca3b8;
+      font-size:12px;
+    }}
+    .shell-version {{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:8px 12px;
+      border:1px solid rgba(42,68,92,.72);
+      border-radius:999px;
+      background:linear-gradient(180deg, rgba(6,16,28,.82), rgba(4,11,20,.72));
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+    }}
     @media (max-width: 980px) {{
       .layout {{ grid-template-columns: 1fr; gap:14px; }}
       .docs-sidebar {{
@@ -4313,6 +4343,7 @@ DOCS_SHELL_HTML = """<!doctype html>
   <div class=\"wrap\">
     {nav}
     {body}
+    <div class=\"shell-footer\"><span class=\"shell-version\">A.G.E.N.T. Smith {app_version}</span></div>
   </div>
   {onboarding_modal}
   <script type="module">
@@ -5990,6 +6021,10 @@ def _configure_page_body() -> str:
   <div class="cfg-shell">
   <div class="cfg-hero">
     <div class="cfg-hero-card">
+      <div class="statline" style="margin:0 0 10px;">
+        <span class="badge">Release {html.escape(APP_VERSION_LABEL)}</span>
+        <span class="badge">Stable branch</span>
+      </div>
       <h2 class="cfg-hero-title">AGENT Smith runtime control center</h2>
       <p class="cfg-hero-copy">Use this page to point A.G.E.N.T. Smith at the right primary Ollama and Splunk services, optionally include a small edge helper for routing, assign model roles, validate live dependencies, and bring the platform online in the right order for either host or Docker deployment.</p>
       <div id="cfg-runtime" class="cfg-badges"></div>
@@ -7321,7 +7356,7 @@ def _mcp_page_body() -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "SOCWebUI/0.3"
+    server_version = f"SOCWebUI/{APP_VERSION}"
 
     def _json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -7347,6 +7382,7 @@ class Handler(BaseHTTPRequestHandler):
             onboarding_user=html.escape(str((user or {}).get("username", ""))),
             onboarding_role=html.escape(str((user or {}).get("role", ""))),
             onboarding_modal=_admin_onboarding_modal(user),
+            app_version=html.escape(APP_VERSION_LABEL),
         ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -7408,7 +7444,9 @@ class Handler(BaseHTTPRequestHandler):
             ".login-card{width:min(520px,92vw);border:1px solid #284154;background:linear-gradient(165deg,#091727,#07111f);"
             "border-radius:18px;padding:22px;box-shadow:0 20px 44px rgba(0,0,0,.45);}"
             ".login-brand{display:flex;align-items:center;gap:10px;margin-bottom:8px;}"
+            ".login-brand-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;}"
             ".login-dot{width:11px;height:11px;border-radius:999px;background:#22c55e;box-shadow:0 0 14px rgba(34,197,94,.7);}"
+            ".login-version{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;border:1px solid #294560;background:#0b2130;color:#bde6ff;font-size:12px;font-weight:800;}"
             ".login-title{margin:0;font-size:27px;line-height:1.15;letter-spacing:.2px;}"
             ".login-sub{margin:4px 0 14px;color:#9fb4cc;font-size:13px;line-height:1.45;}"
             ".login-form label{display:block;font-size:13px;color:#d7e6f5;margin:10px 0 6px;}"
@@ -7424,7 +7462,10 @@ class Handler(BaseHTTPRequestHandler):
             "</style>"
             "<div class=\"login-shell\">"
             "<div class=\"login-card\">"
+            "<div class=\"login-brand-row\">"
             "<div class=\"login-brand\"><span class=\"login-dot\"></span><span class=\"badge\">Lab-Only</span></div>"
+            f"<span class=\"login-version\">{html.escape(APP_VERSION_LABEL)}</span>"
+            "</div>"
             "<h1 class=\"login-title\">SOC Analyst Console Login</h1>"
             "<p class=\"login-sub\">Authenticate to access investigation tools, docs, and Splunk-connected workflows on this LAN host.</p>"
             f"{error_html}"
