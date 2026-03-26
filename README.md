@@ -200,6 +200,16 @@ make spl-hardening-benchmark-botsv3
 make spl-hardening-benchmark-botsv3-inventory
 ```
 
+## Roadmap
+Near-term work is focused on making the current investigation loop stronger, not turning the project into a different product.
+
+- Better mixed-platform handling for prompts that span Windows and Linux in one question
+- Broader LangGraph topology eval coverage so routing and review changes are measured before they become defaults
+- Stronger Linux query quality and repair behavior, especially around auth, sudo/su, and audit-style searches
+- More explicit runtime observability so operators can see what was validated, what actually ran, and why a branch was skipped
+- A practical edge-helper path for cheap routing and split-query hints without moving the main planner/writer/reviewer flow off the primary inference host
+- Continued documentation cleanup so first-time installs and operator workflows are easier to follow without hidden assumptions
+
 ## Docs Reading Order
 1. `docs/whitepapers/project_one_page_white_paper.md`
 2. `docs/whitepapers/technical_deep_dive.md`
