@@ -204,10 +204,14 @@ make spl-hardening-benchmark-botsv3-inventory
 Near-term work is focused on making the current investigation loop stronger, not turning the project into a different product.
 
 - Better mixed-platform handling for prompts that span Windows and Linux in one question
+- Deeper multi-step investigations with stronger bounded continuation, clearer pivot logic, and better evidence review
 - Broader LangGraph topology eval coverage so routing and review changes are measured before they become defaults
 - Stronger Linux query quality and repair behavior, especially around auth, sudo/su, and audit-style searches
 - More explicit runtime observability so operators can see what was validated, what actually ran, and why a branch was skipped
+- Stronger authentication, session controls, and operator access boundaries
+- HTTPS-ready deployment guidance and reverse-proxy support for safer multi-user access
 - A practical edge-helper path for cheap routing and split-query hints without moving the main planner/writer/reviewer flow off the primary inference host
+- Optional Splunk SOAR integration for downstream handoff or controlled action workflows, without changing the project’s default read-only posture
 - Continued documentation cleanup so first-time installs and operator workflows are easier to follow without hidden assumptions
 
 ## Docs Reading Order
