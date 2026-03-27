@@ -98,15 +98,21 @@ def _dynamic_query_for_question(template: QueryTemplate, question: str) -> str:
     if "auth_failure" in activities and platforms == {"windows", "linux"}:
         return (
             "search ("
-            "(index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) "
-            "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\")) "
+            "(index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+            "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\" OR \"FAILED SU\")) "
             "OR "
             "((index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
             "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\"))"
             ") "
+            "| rex field=_raw \"(?i)Failed password for (?:invalid user )?(?<failed_user>[^ ]+)\" "
+            "| rex field=_raw \"(?i)user=(?<pam_user>[^\\s;]+)\" "
+            "| rex field=_raw \"(?i)from (?<failed_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<failed_port>\\d+)\" "
+            "| rex field=_raw \"(?i)rhost=(?<failed_rhost>[^\\s;]+)\" "
             "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,rhost,ip) "
-            "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,account) "
-            "| stats count by index host sourcetype user_name src_ip port | sort - count"
+            "| eval src_ip=coalesce(src_ip,failed_src_ip,failed_rhost,\"local\") "
+            "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,account,failed_user,pam_user) "
+            "| eval port=coalesce(port,failed_port) "
+            "| stats count by index host source sourcetype user_name src_ip port | sort - count"
         )
     if template.intent == "linux_privilege_escalation":
         query = template.query
@@ -177,12 +183,46 @@ def _apply_host_scope(query: str, question: str) -> str:
     return query.replace("search ", f"search {host_clause}", 1)
 
 
+def _extract_explicit_user(question: str) -> str:
+    q = (question or "").strip()
+    if not q:
+        return ""
+    patterns = (
+        r"\buser\s+([A-Za-z0-9_.-]+)\b",
+        r"\busername\s+([A-Za-z0-9_.-]+)\b",
+        r"\baccount\s+([A-Za-z0-9_.-]+)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, q, flags=re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip()
+            if candidate and candidate.lower() not in {"any", "all", "unknown"}:
+                return candidate
+    return ""
+
+
+def _apply_user_scope(query: str, question: str) -> str:
+    user_name = _extract_explicit_user(question)
+    if not user_name:
+        return query
+    if '| search user_name="' in query.lower() or '| search user="' in query.lower():
+        return query
+    if "user_name" in query:
+        return query.replace("| stats", f'| search user_name="{user_name}" | stats', 1)
+    if " count by host user " in query or " by host user " in query:
+        return query.replace("| stats", f'| search user="{user_name}" | stats', 1)
+    if " count by host process_name actor " in query or " actor " in query:
+        return query.replace("| stats", f'| search actor="{user_name}" | stats', 1)
+    return query
+
+
 def template_to_query_args(template: QueryTemplate, question: str = "") -> dict[str, Any]:
     query = template.query
     if question:
         query = _dynamic_query_for_question(template, question)
         query = _apply_dataset_scope(query, question)
         query = _apply_host_scope(query, question)
+        query = _apply_user_scope(query, question)
         earliest_time, latest_time = infer_time_window(
             question,
             default_earliest=template.earliest_time,

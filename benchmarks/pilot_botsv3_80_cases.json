@@ -1,0 +1,2529 @@
+[
+  {
+    "id": "botsv3_apache_top_ips_all_time",
+    "family": "apache_access_top_ips",
+    "question": "Across the full BOTSv3 dataset, show the top web client IPs in access_combined.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=access_combined",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "clientip",
+      "status",
+      "method",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_apache_user_agents_all_time",
+    "family": "apache_suspicious_user_agents",
+    "question": "Across the full BOTSv3 dataset, show suspicious web user agents and client IPs.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=access_combined",
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_linux_sudo_activity_all_time",
+    "family": "linux_privilege_escalation_activity",
+    "question": "Across the full BOTSv3 dataset, show sudo and su activity in linux_secure with process type, actor, target user, and commands.",
+    "expected_intent": "linux_privilege_escalation_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "linux_secure",
+      "process_name",
+      "actor",
+      "target_user",
+      "table"
+    ],
+    "forbidden_query_terms": [
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "host",
+      "process_name",
+      "outcome",
+      "actor"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_cloudtrail_activity_all_time",
+    "family": "aws_cloudtrail_activity",
+    "question": "Across the full BOTSv3 dataset, show top CloudTrail API activity.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "eventSource",
+      "eventName",
+      "principal",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "eventSource",
+      "eventName",
+      "principal",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_cloudtrail_sources_all_time",
+    "family": "aws_cloudtrail_activity",
+    "question": "Across the full BOTSv3 dataset, show suspicious CloudTrail activity sources.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "sourceIPAddress",
+      "principal",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "sourceIPAddress",
+      "eventSource",
+      "eventName",
+      "principal",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_cloudtrail_event_service_all_time",
+    "family": "aws_cloudtrail_activity",
+    "question": "Across the full BOTSv3 dataset, investigate CloudTrail activity by event name and service.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "eventSource",
+      "eventName",
+      "principal",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "eventSource",
+      "eventName",
+      "principal",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_cisco_asa_flows_all_time",
+    "family": "cisco_asa_network_flows",
+    "question": "Across the full BOTSv3 dataset, show top Cisco ASA blocked and allowed flows.",
+    "expected_intent": "cisco_asa_network_flows",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=cisco:asa"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=cisco:asa",
+      "action",
+      "src_ip",
+      "dest_ip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "action",
+      "src_ip",
+      "dest_ip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_top_indexes_all_time",
+    "family": "top_indexes",
+    "question": "Across the full BOTSv3 dataset, show the busiest index.",
+    "expected_intent": "top_indexes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=botsv3",
+      "stats",
+      "by index"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "index",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_stream_http_all_time",
+    "family": "stream_http_activity",
+    "question": "Across the full BOTSv3 dataset, show top HTTP methods, status codes, destination sites, and client IPs from stream:http.",
+    "expected_intent": "stream_http_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=stream:http"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=stream:http",
+      "spath",
+      "http_method",
+      "status",
+      "site",
+      "src_ip"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=access_combined",
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "http_method",
+      "status",
+      "site",
+      "src_ip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_osquery_process_all_time",
+    "family": "osquery_process_activity",
+    "question": "Across the full BOTSv3 dataset, investigate osquery process monitoring results and show added processes by host, path, and cmdline.",
+    "expected_intent": "osquery_process_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=osquery:results"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=osquery:results",
+      "spath",
+      "hostidentifier",
+      "path",
+      "cmdline"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=osquery:processes"
+    ],
+    "required_result_fields": [
+      "hostIdentifier",
+      "action",
+      "path",
+      "cmdline",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_vpc_flow_all_time",
+    "family": "aws_vpc_flow_activity",
+    "question": "Across the full BOTSv3 dataset, show top accepted and rejected AWS VPC flows by source IP, destination IP, destination port, and action.",
+    "expected_intent": "aws_vpc_flow_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudwatchlogs:vpcflow"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudwatchlogs:vpcflow",
+      "rex",
+      "action",
+      "src_ip",
+      "dest_ip",
+      "dest_port"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=aws:cloudtrail",
+      "eventsource=vpc.amazonaws.com"
+    ],
+    "required_result_fields": [
+      "action",
+      "src_ip",
+      "dest_ip",
+      "dest_port",
+      "transport",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_aad_signin_all_time",
+    "family": "aad_signin_activity",
+    "question": "Across the full BOTSv3 dataset, show Azure AD sign-in activity by user, IP address, app, and login status.",
+    "expected_intent": "aad_signin_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:aad:signin"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:aad:signin",
+      "spath",
+      "userprincipalname",
+      "ipaddress",
+      "appdisplayname",
+      "loginstatus"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=azure:ad:signins"
+    ],
+    "required_result_fields": [
+      "userPrincipalName",
+      "ipAddress",
+      "appDisplayName",
+      "loginStatus",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_stream_dns_all_time",
+    "family": "stream_dns_activity",
+    "question": "Across the full BOTSv3 dataset, show DNS activity from stream:dns by query name, reply code, source IP, and destination IP.",
+    "expected_intent": "stream_dns_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=stream:dns"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=stream:dns",
+      "spath",
+      "reply_code",
+      "src_ip",
+      "dest_ip"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "query",
+      "reply_code",
+      "src_ip",
+      "dest_ip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_o365_management_all_time",
+    "family": "o365_management_activity",
+    "question": "Across the full BOTSv3 dataset, show Office 365 management activity by user, operation, workload, and client IP.",
+    "expected_intent": "o365_management_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:o365:management"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:o365:management",
+      "spath",
+      "userid",
+      "operation",
+      "workload",
+      "clientip"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=ms:aad:signin"
+    ],
+    "required_result_fields": [
+      "UserId",
+      "Operation",
+      "Workload",
+      "ClientIP",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_windows_process_all_time",
+    "family": "windows_process_activity",
+    "question": "Across the full BOTSv3 dataset, show Windows process creation activity with image, command line, user, and parent image.",
+    "expected_intent": "windows_process_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=xmlwineventlog"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=xmlwineventlog",
+      "Image",
+      "CommandLine",
+      "ParentImage",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "Computer",
+      "Image",
+      "CommandLine",
+      "User",
+      "ParentImage",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "botsv3_linux_audit_all_time",
+    "family": "linux_audit_activity",
+    "question": "Across the full BOTSv3 dataset, show Linux audit activity by host, audit type, operation, and result.",
+    "expected_intent": "linux_audit_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=linux_audit"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=linux_audit",
+      "audit_type",
+      "audit_op",
+      "audit_res",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "audit_type",
+      "audit_op",
+      "audit_res",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_access_combined",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype access_combined by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=access_combined",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_alternatives",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype alternatives by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=alternatives"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=alternatives",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_amazon_ssm_agent",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype amazon-ssm-agent by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=amazon-ssm-agent"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=amazon-ssm-agent",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_amazon_ssm_agent_too_small",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype amazon-ssm-agent-too_small by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=amazon-ssm-agent-too_small"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=amazon-ssm-agent-too_small",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_apache_error",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype apache_error by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=apache_error"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=apache_error",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_cloudtrail",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:cloudtrail by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_cloudwatch",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:cloudwatch by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudwatch"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudwatch",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_cloudwatch_guardduty",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:cloudwatch:guardduty by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudwatch:guardduty"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudwatch:guardduty",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_cloudwatchlogs",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:cloudwatchlogs by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudwatchlogs"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudwatchlogs",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_cloudwatchlogs_vpcflow",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:cloudwatchlogs:vpcflow by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudwatchlogs:vpcflow"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudwatchlogs:vpcflow",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_config_rule",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:config:rule by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:config:rule"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:config:rule",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_description",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:description by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:description"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:description",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_elb_accesslogs",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:elb:accesslogs by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:elb:accesslogs"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:elb:accesslogs",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_rds_audit",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:rds:audit by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:rds:audit"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:rds:audit",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_rds_error",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:rds:error by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:rds:error"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:rds:error",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_aws_s3_accesslogs",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype aws:s3:accesslogs by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:s3:accesslogs"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:s3:accesslogs",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_bandwidth",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype bandwidth by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=bandwidth"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=bandwidth",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_bash_history",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype bash_history by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=bash_history"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=bash_history",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_bootstrap",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype bootstrap by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=bootstrap"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=bootstrap",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_cisco_asa",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype cisco:asa by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=cisco:asa"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=cisco:asa",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_cloud_init",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype cloud-init by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=cloud-init"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=cloud-init",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_cloud_init_output",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype cloud-init-output by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=cloud-init-output"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=cloud-init-output",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_code42_api",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype code42:api by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=code42:api"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=code42:api",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_code42_computer",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype code42:computer by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=code42:computer"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=code42:computer",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_code42_org",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype code42:org by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=code42:org"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=code42:org",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_code42_security",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype code42:security by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=code42:security"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=code42:security",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_code42_user",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype code42:user by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=code42:user"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=code42:user",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_config_file",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype config_file by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=config_file"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=config_file",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_cpu",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype cpu by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=cpu"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=cpu",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_cron_too_small",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype cron-too_small by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=cron-too_small"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=cron-too_small",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_df",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype df by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=df"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=df",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_dmesg",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype dmesg by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=dmesg"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=dmesg",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_dpkg",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype dpkg by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=dpkg"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=dpkg",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_error_too_small",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype error-too_small by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=error-too_small"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=error-too_small",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_errors",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype errors by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=errors"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=errors",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_errors_too_small",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype errors-too_small by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=errors-too_small"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=errors-too_small",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_ess_content_importer",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype ess_content_importer by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ess_content_importer"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ess_content_importer",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_hardware",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype hardware by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=hardware"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=hardware",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_history_2",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype history-2 by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=history-2"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=history-2",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_interfaces",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype interfaces by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=interfaces"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=interfaces",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_iostat",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype iostat by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=iostat"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=iostat",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_lastlog",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype lastlog by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=lastlog"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=lastlog",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_linux_audit",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype linux_audit by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=linux_audit"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=linux_audit",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_linux_secure",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype linux_secure by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=linux_secure",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_localhost_5",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype localhost-5 by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=localhost-5"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=localhost-5",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_lsof",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype lsof by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=lsof"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=lsof",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_maillog_too_small",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype maillog-too_small by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=maillog-too_small"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=maillog-too_small",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_ms_aad_audit",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype ms:aad:audit by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:aad:audit"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:aad:audit",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_ms_aad_signin",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype ms:aad:signin by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:aad:signin"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:aad:signin",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_ms_o365_management",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype ms:o365:management by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:o365:management"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:o365:management",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_ms_o365_reporting_messagetrace",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype ms:o365:reporting:messagetrace by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:o365:reporting:messagetrace"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:o365:reporting:messagetrace",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_netstat",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype netstat by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=netstat"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=netstat",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_o365_management_activity",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype o365:management:activity by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=o365:management:activity"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=o365:management:activity",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_openports",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype openPorts by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=openPorts"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=openPorts",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_osquery_info",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype osquery:info by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=osquery:info"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=osquery:info",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_osquery_results",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype osquery:results by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=osquery:results"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=osquery:results",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_osquery_warning",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype osquery:warning by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=osquery:warning"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=osquery:warning",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_out_3",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype out-3 by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=out-3"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=out-3",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_package",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype package by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=package"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=package",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_perfmonmk_process",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype PerfmonMk:Process by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=PerfmonMk:Process"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=PerfmonMk:Process",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_protocol",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype protocol by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=protocol"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=protocol",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_ps",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype ps by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ps"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ps",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_script_getendpointinfo",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype Script:GetEndpointInfo by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=Script:GetEndpointInfo"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=Script:GetEndpointInfo",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  },
+  {
+    "id": "pilot_botsv3_inventory_script_installedapps",
+    "family": "botsv3_named_sourcetype_overview",
+    "question": "Across the full BOTSv3 dataset, show an overview of sourcetype Script:InstalledApps by host and source.",
+    "expected_intent": "botsv3_named_sourcetype_overview",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=Script:InstalledApps"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=Script:InstalledApps",
+      "stats",
+      "host",
+      "source"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "source",
+      "sourcetype",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now"
+  }
+]

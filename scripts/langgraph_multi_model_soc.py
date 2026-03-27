@@ -538,13 +538,18 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
             and "linux" in q_lower
         ):
             args["query"] = (
-                "search index=linux (sourcetype=auth.log OR sourcetype=auth-4) "
-                "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\") "
+                "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+                "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\" OR \"FAILED SU\") "
                 "| eval platform=\"linux\" "
-                "| eval src_ip=coalesce(src_ip,rhost,src,ip) "
-                "| eval user_name=coalesce(user,username,account) "
+                "| rex field=_raw \"(?i)Failed password for (?:invalid user )?(?<failed_user>[^ ]+)\" "
+                "| rex field=_raw \"(?i)user=(?<pam_user>[^\\s;]+)\" "
+                "| rex field=_raw \"(?i)from (?<failed_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<failed_port>\\d+)\" "
+                "| rex field=_raw \"(?i)rhost=(?<failed_rhost>[^\\s;]+)\" "
+                "| eval src_ip=coalesce(src_ip,failed_src_ip,failed_rhost,rhost,src,ip,\"local\") "
+                "| eval user_name=coalesce(user,username,account,failed_user,pam_user) "
                 "| eval auth_port=coalesce(port,lport) "
-                "| append [ search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+                "| append [ search index=windows sourcetype=XmlWinEventLog "
+                "(Channel=Security OR source=\"XmlWinEventLog:Security\") "
                 "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
                 "| eval platform=\"windows\" "
                 "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
@@ -555,6 +560,31 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
                 "| sort - count"
             )
             normalized["intent"] = "failed_login_activity"
+        first_seen_priv_esc = any(
+            tok in q_lower
+            for tok in (
+                "first time sudo",
+                "first seen sudo",
+                "first time su",
+                "first seen privilege escalation",
+                "first privilege escalation",
+                "newly observed sudo",
+                "newly observed sudo or su",
+                "first observed sudo",
+            )
+        )
+        if first_seen_priv_esc:
+            args["query"] = (
+                "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+                "(\"session opened for user root by\" OR \"COMMAND=\" OR \"pam_unix(sudo:session)\" OR "
+                "\"pam_unix(su:session)\" OR \"sudo:\" OR \"su:\") "
+                "| eval user_name=coalesce(user, account, uid, user_name) "
+                "| eval src_ip=coalesce(rhost, src, src_ip, ip) "
+                "| stats earliest(_time) as first_seen latest(_time) as last_seen count by host user_name tty src_ip "
+                "| convert ctime(first_seen) ctime(last_seen) "
+                "| sort 0 first_seen"
+            )
+            normalized["intent"] = "linux_privilege_escalation_first_seen"
         if any(tok in q_lower for tok in ("sysmon network", "network connections", "event id 3", "sysmon event 3")):
             target_index = "index=botsv3" if "botsv3" in q_lower else "index=windows_sysmon"
             args["query"] = (
@@ -589,7 +619,7 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
             normalized["intent"] = "windows_credential_access_activity"
         if any(tok in q_lower for tok in ("linux session activity", "session opened", "session closed", "cron session", "pam_unix session")):
             args["query"] = (
-                "search index=linux (sourcetype=auth.log OR sourcetype=auth-4) "
+                "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
                 "(\"session opened for user\" OR \"session closed for user\" OR \"pam_unix(cron:session)\") "
                 "| rex field=_raw \"(?i)session (?<session_state>opened|closed) for user (?<session_user>[A-Za-z0-9_.-]+)\" "
                 "| rex field=_raw \"(?i)tty=(?<tty>[^\\s;]+)\" "
@@ -602,7 +632,7 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
             normalized["intent"] = "linux_session_activity"
         if any(tok in q_lower for tok in ("failed sudo", "sudo attempts", "sudo failure", "failed privilege escalation", "failed su", "su failed")):
             query = (
-                "search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) "
+                "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
                 "((\"pam_unix(sudo:auth): authentication failure\" OR \"pam_unix(su:auth): authentication failure\" OR \"conversation failed\") "
                 "OR ((\"sudo:\" OR \"su:\") (\"authentication failure\" OR \"incorrect password\" OR \"incorrect password attempts\" OR \"failed\"))) "
                 "| rex field=_raw \"\\s(?<process_name>sudo|su)(?:\\[[^\\]]+\\])?:\" "
@@ -630,9 +660,9 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
                 )
             args["query"] = query
             normalized["intent"] = "linux_privilege_escalation"
-        if any(tok in q_lower for tok in ("sudo behavior", "sudo activity", "su behavior", "su activity", "root session", "sudo sessions")):
+        if (not first_seen_priv_esc) and any(tok in q_lower for tok in ("sudo behavior", "sudo activity", "su behavior", "su activity", "root session", "sudo sessions")):
             args["query"] = (
-                "search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) "
+                "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
                 "(\"sudo:\" OR \"su:\" OR \"pam_unix(sudo:session)\" OR \"pam_unix(su:session)\" OR \"COMMAND=\" OR "
                 "\"session opened for user root by\" OR \"incorrect password\" OR \"authentication failure\") "
                 "| rex field=_raw \"\\s(?<process_name>sudo|su)(?:\\[[^\\]]+\\])?:\" "
@@ -721,6 +751,7 @@ def _enforce_question_alignment(question: str, plan: dict[str, Any]) -> dict[str
         "linux_auth_failures",
         "windows_auth_failures",
         "windows_process_activity",
+        "osquery_process_activity",
         "windows_sysmon_network_activity",
         "windows_sysmon_dns_activity",
         "windows_credential_access_activity",
@@ -732,6 +763,8 @@ def _enforce_question_alignment(question: str, plan: dict[str, Any]) -> dict[str
         "apache_404_spike",
         "apache_suspicious_user_agents",
         "stream_http_activity",
+        "botsv3_named_sourcetype_overview",
+        "top_indexes",
         "aws_vpc_flow_activity",
         "aad_signin_activity",
         "stream_dns_activity",
@@ -1407,6 +1440,7 @@ def evidence_review_node(state: MultiModelState) -> MultiModelState:
     structured = splunk_data.get("structured", {}) if isinstance(splunk_data, dict) else {}
     rows = structured.get("results", []) if isinstance(structured, dict) else []
     total_rows = structured.get("total_rows") if isinstance(structured, dict) else None
+    platform_coverage = _derive_platform_coverage(plan, rows if isinstance(rows, list) else [])
 
     system = (
         "You are an SOC evidence reviewer. Review executed query evidence only. "
@@ -1418,6 +1452,7 @@ def evidence_review_node(state: MultiModelState) -> MultiModelState:
         "intent": plan.get("intent", ""),
         "selected_tool": plan.get("selected_tool", ""),
         "query_args": plan.get("tool_args", {}),
+        "platform_coverage": platform_coverage,
         "rows_returned": len(rows) if isinstance(rows, list) else 0,
         "total_rows": total_rows,
         "sample_rows": rows[:25] if isinstance(rows, list) else [],
@@ -1482,6 +1517,57 @@ def _clean_summary_text(text: str) -> str:
     return cleaned.strip()
 
 
+def _derive_platform_coverage(plan: dict[str, Any], rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    tool_args = plan.get("tool_args", {}) if isinstance(plan.get("tool_args", {}), dict) else {}
+    query = str(tool_args.get("query", "")).lower()
+    rows_list = rows if isinstance(rows, list) else []
+    row_platforms = {
+        str(row.get("platform", "")).strip().lower()
+        for row in rows_list
+        if isinstance(row, dict) and str(row.get("platform", "")).strip()
+    }
+    query_platforms: set[str] = set()
+    if 'eval platform="linux"' in query or "index=linux" in query or 'source="/var/log/auth.log"' in query or 'source="/var/log/secure"' in query:
+        query_platforms.add("linux")
+    if 'eval platform="windows"' in query or "index=windows" in query or "index=windows_sysmon" in query or "eventcode=4625" in query:
+        query_platforms.add("windows")
+    return {
+        "query_platforms": sorted(query_platforms),
+        "row_platforms": sorted(row_platforms),
+        "platforms": sorted(query_platforms | row_platforms),
+        "cross_platform_query": len(query_platforms) > 1,
+        "cross_platform_results": len(row_platforms) > 1,
+    }
+
+
+def _enforce_platform_coverage_in_summary(summary: str, coverage: dict[str, Any]) -> str:
+    text = summary.strip()
+    query_platforms = set(coverage.get("query_platforms", []) if isinstance(coverage, dict) else [])
+    row_platforms = set(coverage.get("row_platforms", []) if isinstance(coverage, dict) else [])
+    lower = text.lower()
+    if {"linux", "windows"}.issubset(query_platforms) and ("linux" not in lower or "windows" not in lower):
+        lines = text.splitlines()
+        insert_line = "- **What was queried**: A cross-platform failed-login search across both Linux authentication logs and Windows Security logon-failure events in the last 24 hours."
+        if lines and "what was queried" in lines[0].lower():
+            lines[0] = insert_line
+        else:
+            lines.insert(0, insert_line)
+        text = "\n".join(lines).strip()
+    if {"linux", "windows"}.issubset(query_platforms) and row_platforms == {"linux"} and "windows was queried but returned no matching" not in lower:
+        lines = text.splitlines()
+        note = "- **Coverage note**: Windows Security logon failures were queried as part of the cross-platform search, but no matching Windows failed-logon rows were returned in this time window."
+        insert_at = 1 if lines else 0
+        lines.insert(insert_at, note)
+        text = "\n".join(lines).strip()
+    if {"linux", "windows"}.issubset(query_platforms) and row_platforms == {"windows"} and "linux was queried but returned no matching" not in lower:
+        lines = text.splitlines()
+        note = "- **Coverage note**: Linux authentication logs were queried as part of the cross-platform search, but no matching Linux failed-login rows were returned in this time window."
+        insert_at = 1 if lines else 0
+        lines.insert(insert_at, note)
+        text = "\n".join(lines).strip()
+    return text
+
+
 def _summarize_with_timeout(question: str, splunk_data: dict[str, Any], *, model: str, think: bool) -> str:
     with httpx.Client(timeout=SUMMARY_TIMEOUT_SECONDS) as client:
         rows = splunk_data.get("structured", {}).get("results", [])
@@ -1540,6 +1626,7 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
 
     rows = splunk_data.get("structured", {}).get("results", []) if isinstance(splunk_data, dict) else []
     total_rows = splunk_data.get("structured", {}).get("total_rows") if isinstance(splunk_data, dict) else None
+    platform_coverage = _derive_platform_coverage(plan, rows if isinstance(rows, list) else [])
 
     reviewer_conf = _float01((state.get("reviewer_output", {}) or {}).get("confidence", 0.5), default=0.5)
     evidence_conf = _float01((state.get("evidence_review_output", {}) or {}).get("confidence", 0.5), default=0.5)
@@ -1550,6 +1637,7 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
 
     evidence = {
         "query_or_args": plan.get("tool_args", {}),
+        "platform_coverage": platform_coverage,
         "time_window": {
             "earliest_time": (plan.get("tool_args", {}) or {}).get("earliest_time"),
             "latest_time": (plan.get("tool_args", {}) or {}).get("latest_time"),
@@ -1681,6 +1769,7 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
         "rows_returned": len(rows) if isinstance(rows, list) else 0,
         "total_rows": total_rows,
         "final_confidence": final_conf,
+        "platform_coverage": platform_coverage,
         "confidence_components": {
             "planner": plan_conf,
             "security_reviewer": reviewer_conf,
@@ -1738,11 +1827,13 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
         try:
             summary_prompt = (
                 "Produce SOC analyst output in 5-7 bullets. Include: what was asked, what query/tool was executed, "
-                "top findings, confidence rationale, and concrete next checks.\n"
+                "top findings, confidence rationale, and concrete next checks. "
+                "If platform_coverage.query_platforms includes both linux and windows, explicitly say the executed search was cross-platform and mention both Linux and Windows in the first bullet.\n"
                 f"MODEL_PIPELINE_OUTPUT:\n{json.dumps(output, indent=2)}"
             )
             summary = _summarize_with_timeout(summary_prompt, splunk_data, model=MODEL_FINAL_SUMMARY, think=False)
             summary = _clean_summary_text(summary)
+            summary = _enforce_platform_coverage_in_summary(summary, platform_coverage)
             ok, _reason = _is_summary_quality_ok(summary)
             if not ok:
                 raise RuntimeError("summary_quality_gate_failed")

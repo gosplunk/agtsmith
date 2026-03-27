@@ -26,11 +26,15 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         intent="failed_login_activity",
         keywords=("failed login", "failed authentication", "authentication failure"),
         query=(
-            "search index=linux (sourcetype=auth.log OR sourcetype=auth-4) "
-            "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\") "
+            "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+            "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\" OR \"FAILED SU\") "
             "| eval platform=\"linux\" "
-            "| eval src_ip=coalesce(src_ip,rhost,src,ip) "
-            "| eval user_name=coalesce(user,username,account) "
+            "| rex field=_raw \"(?i)Failed password for (?:invalid user )?(?<failed_user>[^ ]+)\" "
+            "| rex field=_raw \"(?i)user=(?<pam_user>[^\\s;]+)\" "
+            "| rex field=_raw \"(?i)from (?<failed_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<failed_port>\\d+)\" "
+            "| rex field=_raw \"(?i)rhost=(?<failed_rhost>[^\\s;]+)\" "
+            "| eval src_ip=coalesce(src_ip,failed_src_ip,failed_rhost,rhost,src,ip,\"local\") "
+            "| eval user_name=coalesce(user,username,account,failed_user,pam_user) "
             "| eval auth_port=coalesce(port,lport) "
             "| append [ search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
             "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
@@ -56,8 +60,15 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "secure log",
         ),
         query=(
-            "search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) "
-            "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\") "
+            "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+            "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\" OR \"FAILED SU\") "
+            "| rex field=_raw \"(?i)Failed password for (?:invalid user )?(?<user>[^ ]+)\" "
+            "| rex field=_raw \"(?i)user=(?<pam_user>[^\\s;]+)\" "
+            "| rex field=_raw \"(?i)from (?<failed_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<failed_port>\\d+)\" "
+            "| rex field=_raw \"(?i)rhost=(?<rhost>[^\\s;]+)\" "
+            "| eval user=coalesce(user,pam_user,username,account) "
+            "| eval src_ip=coalesce(src_ip,failed_src_ip,rhost,src,ip,\"local\") "
+            "| eval port=coalesce(port,failed_port,lport) "
             "| stats count by host user src_ip port | sort - count"
         ),
         tags=("linux", "auth_failure", "summary"),
@@ -74,11 +85,12 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "failed logon windows",
         ),
         query=(
-            "search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+            "search index=windows sourcetype=XmlWinEventLog "
+            "(Channel=Security OR source=\"XmlWinEventLog:Security\") "
             "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
             "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
             "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,Caller_User_Name) "
-            "| table _time index host Computer Channel EventCode EventID user_name src_ip "
+            "| table _time index host Computer Channel EventCode EventID user_name src_ip LogonType FailureReason SubStatus "
             "TargetUserName SubjectUserName Account_Name Caller_User_Name Source_Network_Address IpAddress"
         ),
         tags=("windows", "auth_failure", "summary"),
@@ -181,7 +193,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "su failed",
         ),
         query=(
-            "search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) "
+            "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
             "((\"pam_unix(sudo:auth): authentication failure\" OR \"pam_unix(su:auth): authentication failure\" OR \"conversation failed\") "
             "OR ((\"sudo:\" OR \"su:\") (\"authentication failure\" OR \"incorrect password\" OR \"incorrect password attempts\" OR \"failed\"))) "
             "| rex field=_raw \"\\s(?<process_name>sudo|su)(?:\\[[^\\]]+\\])?:\" "
@@ -215,7 +227,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "non-sudoer",
         ),
         query=(
-            "search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) "
+            "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
             "(\"sudo:\" OR \"su:\" OR \"pam_unix(sudo:session)\" OR \"pam_unix(su:session)\" OR \"COMMAND=\" OR "
             "\"session opened for user root by\" OR \"incorrect password\" OR \"authentication failure\") "
             "| rex field=_raw \"\\s(?<process_name>sudo|su)(?:\\[[^\\]]+\\])?:\" "
@@ -255,7 +267,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "pam_unix session",
         ),
         query=(
-            "search index=linux (sourcetype=auth.log OR sourcetype=auth-4) "
+            "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
             "(\"session opened for user\" OR \"session closed for user\" OR \"pam_unix(cron:session)\") "
             "| rex field=_raw \"(?i)session (?<session_state>opened|closed) for user (?<session_user>[A-Za-z0-9_.-]+)\" "
             "| rex field=_raw \"(?i)tty=(?<tty>[^\\s;]+)\" "
@@ -298,7 +310,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "first time su",
         ),
         query=(
-            "search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) "
+            "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
             "(\"session opened for user root by\" OR \"COMMAND=\" OR \"pam_unix(sudo:session)\" OR "
             "\"pam_unix(su:session)\" OR \"sudo:\" OR \"su:\") "
             "| eval user_name=coalesce(user, account, uid, user_name) "

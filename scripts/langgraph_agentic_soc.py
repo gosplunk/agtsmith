@@ -464,9 +464,9 @@ def _query_aligned_with_intent(intent: str, query: str) -> tuple[bool, str]:
             "failed password",
             "authentication failure",
         ),
-        "linux_auth_failures": ("sourcetype=linux_secure", "failed password", "authentication failure"),
+        "linux_auth_failures": ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "failed password", "authentication failure"),
         "windows_auth_failures": ("sourcetype=xmlwineventlog", "eventcode=4625", "an account failed to log on"),
-        "linux_privilege_escalation": ("sourcetype=linux_secure", "sudo", " su", "privilege"),
+        "linux_privilege_escalation": ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sudo", " su", "privilege"),
         "linux_privilege_escalation_first_seen": (
             "index=linux",
             "earliest(_time)",

@@ -66,6 +66,16 @@ KNOWN_SOURCETYPE_SEMANTICS: dict[str, dict[str, Any]] = {
         "confidence": "high",
         "sources": [SRC_PRETRAINED, SRC_UNIX_ADDON],
     },
+    "auth-too_small": {
+        "description": "Linux authentication log stream ingested from /var/log/auth.log with a truncated parser variant.",
+        "use_cases": ["linux_auth_failures", "linux_privilege_escalation"],
+        "field_aliases": {
+            "src_ip": ["src", "rhost", "ip", "clientip"],
+            "username": ["user", "account", "uid"],
+        },
+        "confidence": "high",
+        "sources": [SRC_ADDON_NAMING, SRC_UNIX_ADDON],
+    },
     "syslog": {
         "description": "Generic syslog events from Linux/Unix services.",
         "use_cases": ["linux_system_health", "service_error_detection", "timeline_context"],
@@ -371,7 +381,7 @@ def build_environment_context(
 
     apache_mode = any(tok in q for tok in ("apache", "access_combined", "http", "web", "404", "user agent", "client ip"))
     windows_mode = any(tok in q for tok in ("windows", "eventcode", "xmlwineventlog", "security log", "4625"))
-    linux_mode = any(tok in q for tok in ("linux", "rpi5", "sudo", "ssh", "auth.log", "syslog", "linux_secure"))
+    linux_mode = any(tok in q for tok in ("linux", "rpi5", "sudo", "ssh", "auth.log", "auth-too_small", "/var/log/auth.log", "syslog", "linux_secure"))
     failed_auth_mode = any(tok in q for tok in ("failed", "login", "auth", "authentication", "password"))
 
     scored: list[tuple[int, dict[str, Any]]] = []
@@ -395,7 +405,7 @@ def build_environment_context(
                 score += 6
             if windows_mode and ("xmlwineventlog" in st_l or "wineventlog" in st_l or "security" in st_l):
                 score += 6
-            if linux_mode and any(tok in st_l for tok in ("auth.log", "linux_secure", "syslog", "sudo", "ufw")):
+            if linux_mode and any(tok in st_l for tok in ("auth.log", "auth-too_small", "linux_secure", "syslog", "sudo", "ufw")):
                 score += 4
 
         idx_l = idx.lower()
@@ -472,7 +482,7 @@ def build_environment_context(
             if not st_name:
                 continue
             reverse_map.setdefault(st_name, []).append(idx)
-    key_sourcetypes = ("access_combined", "XmlWinEventLog", "auth.log", "linux_secure", "auth-4", "apache_error")
+    key_sourcetypes = ("access_combined", "XmlWinEventLog", "auth.log", "auth-too_small", "linux_secure", "apache_error")
     bindings: list[str] = []
     for st in key_sourcetypes:
         idxs = reverse_map.get(st, [])

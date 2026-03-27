@@ -20,9 +20,9 @@ AUTHORING_GUIDANCE: tuple[dict[str, Any], ...] = (
         "intent": "linux_auth_failures",
         "match_tokens": ("linux", "failed", "login", "ssh", "invalid user", "authentication failure"),
         "preferred_index": "linux",
-        "preferred_sourcetypes": ["auth.log", "auth-4"],
+        "preferred_sourcetypes": ["auth-too_small", "linux_secure", "syslog"],
         "preferred_fields": ["host", "user", "src_ip", "port"],
-        "preferred_query_shape": "search index=linux (...) | stats count by host user src_ip port | sort - count",
+        "preferred_query_shape": "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") (...) | stats count by host user src_ip port | sort - count",
         "anti_patterns": [
             "do not use match(...(?<capture>...)) as extraction",
             "do not invent eval parsing when user/src_ip/port are already extracted",
@@ -81,9 +81,9 @@ AUTHORING_GUIDANCE: tuple[dict[str, Any], ...] = (
         "intent": "linux_privilege_escalation_first_seen",
         "match_tokens": ("linux", "first time", "first seen", "privilege escalation", "sudo", "su"),
         "preferred_index": "linux",
-        "preferred_sourcetypes": ["auth.log", "auth-4", "linux_secure"],
+        "preferred_sourcetypes": ["auth-too_small", "linux_secure", "syslog"],
         "preferred_fields": ["host", "user_name", "tty", "src_ip", "first_seen"],
-        "preferred_query_shape": "search index=linux (...) | stats earliest(_time) as first_seen latest(_time) as last_seen count by host user_name tty src_ip",
+        "preferred_query_shape": "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") (...) | stats earliest(_time) as first_seen latest(_time) as last_seen count by host user_name tty src_ip",
         "anti_patterns": [
             "do not answer first-seen questions with plain count-only stats",
             "do not use failure-only strings for successful privilege-escalation questions",

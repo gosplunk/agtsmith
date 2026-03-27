@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from environment_profile import build_environment_context, build_tag_context
+from local_learning import approved_learning_records
 from question_intelligence import build_question_profile_text, infer_question_dimensions
 
 RAG_SOURCES: tuple[str, ...] = (
@@ -42,8 +43,8 @@ FORBIDDEN_SNIPPET_TERMS = (
 
 QUESTION_HINTS: dict[str, tuple[str, ...]] = {
     "failed_login": ("failed", "authentication", "user", "stats", "auth"),
-    "linux_auth": ("linux", "linux_secure", "failed password", "auth", "stats"),
-    "linux_priv": ("linux_secure", "sudo", "su", "failed", "stats"),
+    "linux_auth": ("linux", "/var/log/auth.log", "auth-too_small", "failed password", "auth", "stats"),
+    "linux_priv": ("/var/log/auth.log", "auth-too_small", "sudo", "su", "failed", "stats"),
     "apache_access": ("access_combined", "clientip", "status", "web", "stats"),
     "apache_404": ("access_combined", "404", "timechart", "status", "web"),
     "powershell": ("eventcode=4688", "powershell", "process_command_line", "encodedcommand"),
@@ -233,6 +234,46 @@ def _build_authoring_guidance(question: str, *, max_chars: int = 1200) -> str:
     return text
 
 
+def _build_local_learning_context(question: str, *, max_chars: int = 700) -> str:
+    q = (question or "").lower()
+    tokens = {t for t in re.findall(r"[a-z0-9_]{3,}", q)}
+    rows = approved_learning_records()
+    if not rows:
+        return ""
+    scored: list[tuple[int, dict]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        score = 0
+        intent = str(row.get("intent", "")).strip().lower()
+        if intent and intent in q:
+            score += 8
+        reason = str(row.get("reason", "")).lower()
+        proposal = row.get("proposal")
+        proposal_text = json.dumps(proposal, sort_keys=True) if isinstance(proposal, (dict, list)) else str(proposal or "")
+        blob = f"{intent} {reason} {proposal_text}".lower()
+        for tok in tokens:
+            if tok in blob:
+                score += 1
+        if score > 0:
+            scored.append((score, row))
+    if not scored:
+        return ""
+    scored.sort(key=lambda x: x[0], reverse=True)
+    lines = ["[LOCAL_LEARNING_APPROVED]", "Use these approved local hints only when they agree with discovered environment facts."]
+    for score, row in scored[:4]:
+        lines.append(
+            f"- intent={row.get('intent','')} kind={row.get('kind','')} relevance={score} proposal={json.dumps(row.get('proposal', ''), sort_keys=True)}"
+        )
+        reason = str(row.get("reason", "")).strip()
+        if reason:
+            lines.append(f"  reason={reason}")
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars]
+    return text
+
+
 def _question_hints(question: str) -> list[str]:
     q = question.lower()
     hints = {"search", "stats"}
@@ -327,6 +368,7 @@ def build_spl_rag_context(question: str, *, max_sources: int = 3, max_chars: int
     tag_ctx = build_tag_context(question, max_chars=max(300, int(max_chars * 0.35)))
     skill_ctx = _build_skillpack_context(question, max_chars=max(300, int(max_chars * 0.35)))
     authoring_ctx = _build_authoring_guidance(question, max_chars=max(320, int(max_chars * 0.35)))
+    local_learning_ctx = _build_local_learning_context(question, max_chars=max(260, int(max_chars * 0.25)))
     question_profile = build_question_profile_text(question)
     reserve = len(constraints) + 2
     if env_ctx:
@@ -337,6 +379,8 @@ def build_spl_rag_context(question: str, *, max_sources: int = 3, max_chars: int
         reserve += len(skill_ctx) + 2
     if authoring_ctx:
         reserve += len(authoring_ctx) + 2
+    if local_learning_ctx:
+        reserve += len(local_learning_ctx) + 2
     if question_profile:
         reserve += len(question_profile) + 2
     budget = max(200, max_chars - reserve)
@@ -350,6 +394,7 @@ def build_spl_rag_context(question: str, *, max_sources: int = 3, max_chars: int
         tag_ctx.strip(),
         skill_ctx.strip(),
         authoring_ctx.strip(),
+        local_learning_ctx.strip(),
         constraints.strip(),
     ]
     return "\n\n".join(seg for seg in segments if seg).strip()

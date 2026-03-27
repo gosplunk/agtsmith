@@ -14,7 +14,7 @@ def infer_question_dimensions(question: str) -> dict[str, Any]:
     platforms: list[str] = []
     if any(tok in q for tok in ("windows", "wineventlog", "xmlwineventlog", "eventcode", "event id", "sysmon")):
         platforms.append("windows")
-    if any(tok in q for tok in ("linux", "ubuntu", "rpi5", "auth.log", "auth-4", "linux_secure", "sudo", "su ", " ssh", "ssh ")):
+    if any(tok in q for tok in ("linux", "ubuntu", "rpi5", "auth.log", "auth-4", "auth-too_small", "linux_secure", "/var/log/auth.log", "sudo", "su ", " ssh", "ssh ")):
         platforms.append("linux")
     if any(tok in q for tok in ("apache", "access_combined", "http", "web", "404", "user agent", "useragent")):
         platforms.append("web")
@@ -262,6 +262,13 @@ def score_template_for_question(template: Any, question: str) -> tuple[int, list
         if intent == "aad_signin_activity":
             score -= 12
             reasons.append("o365_management_penalty:avoid_aad_signin")
+    if "cloudtrail" in q and any(tok in q for tok in ("event name", "service", "eventname", "eventsource")):
+        if intent == "aws_cloudtrail_activity":
+            score += 20
+            reasons.append("cloudtrail_event_service_bonus")
+        if intent in {"inventory", "metadata_inventory", "top_indexes"}:
+            score -= 15
+            reasons.append("cloudtrail_event_service_penalty:avoid_metadata_inventory")
 
     return score, reasons
 

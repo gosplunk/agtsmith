@@ -19,16 +19,16 @@ search index=* NOT index=_* (eventtype=failed_login OR info=failed OR action=fai
 ```
 
 ## Linux Failed Login
-Use extracted `auth.log` fields when available. Keep bounded `rex` fallbacks in the query so `auth-4` and `linux_secure` remain usable if their field extraction lags behind `auth.log`.
+Use the live auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. Keep bounded `rex` fallbacks in the query so `auth-too_small`, `linux_secure`, or other parser variants still remain usable when field extraction is uneven.
 ```spl
-search index=linux (sourcetype=auth.log OR sourcetype=linux_secure OR sourcetype=auth-4) ("Failed password" OR "authentication failure" OR "Invalid user" OR "Connection closed by invalid user")
+search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("Failed password" OR "authentication failure" OR "Invalid user" OR "Connection closed by invalid user" OR "FAILED SU")
 | stats count by host user src_ip port
 | sort - count
 ```
 
 ## Linux Failed Sudo / Privilege Escalation
 ```spl
-search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) ("pam_unix(sudo:auth): authentication failure" OR (("sudo:" OR "su:") ("authentication failure" OR "incorrect password" OR "failed")))
+search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("pam_unix(sudo:auth): authentication failure" OR (("sudo:" OR "su:") ("authentication failure" OR "incorrect password" OR "failed")))
 | rex field=_raw "(?i)logname=(?<logname_user>[^\s;]+)"
 | rex field=_raw "(?i)ruser=(?<ruser>[^\s;]+)"
 | rex field=_raw "(?i)\buser=(?<auth_user>[^\s;]+)"
@@ -44,7 +44,7 @@ search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux
 ## Linux Sudo / Su Behavior Evidence
 Use this when the analyst asks for sudo/su behavior or activity in general. This preserves both successful and unsuccessful evidence rows instead of forcing the question into a failures-only summary.
 ```spl
-search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) ("sudo:" OR "su:" OR "pam_unix(sudo:session)" OR "pam_unix(su:session)" OR "COMMAND=" OR "session opened for user root by" OR "incorrect password" OR "authentication failure")
+search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("sudo:" OR "su:" OR "pam_unix(sudo:session)" OR "pam_unix(su:session)" OR "COMMAND=" OR "session opened for user root by" OR "incorrect password" OR "authentication failure")
 | rex field=_raw "\s(?<process_name>sudo|su)(?:\[[^\]]+\])?:"
 | rex field=_raw "(?i)sudo:\s+(?<sudo_actor>[A-Za-z0-9_.-]+)\s+:"
 | rex field=_raw "(?i)by\s+(?<session_actor>[A-Za-z0-9_.-]+)\(uid="
@@ -66,7 +66,7 @@ search host IN (pidx1,pidx3) index=linux ...
 ## Linux First-Seen Privilege Escalation
 Use this when the analyst is asking for newly observed or first-time sudo/su activity, not just failed escalation attempts.
 ```spl
-search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) ("session opened for user root by" OR "COMMAND=" OR "pam_unix(sudo:session)" OR "pam_unix(su:session)" OR "sudo:" OR "su:")
+search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("session opened for user root by" OR "COMMAND=" OR "pam_unix(sudo:session)" OR "pam_unix(su:session)" OR "sudo:" OR "su:")
 | eval user_name=coalesce(user,account,uid,user_name)
 | eval src_ip=coalesce(rhost,src,src_ip,ip)
 | stats earliest(_time) as first_seen latest(_time) as last_seen count by host user_name tty src_ip
@@ -128,7 +128,7 @@ search index=windows sourcetype=XmlWinEventLog (EventID=5379 OR EventCode=5379 O
 ## Linux Session Activity
 Use this for PAM/cron session evidence when the analyst wants session-open/session-close behavior rather than failed SSH counts.
 ```spl
-search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) ("session opened for user" OR "session closed for user" OR "pam_unix(cron:session)")
+search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("session opened for user" OR "session closed for user" OR "pam_unix(cron:session)")
 | rex field=_raw "(?i)session (?<session_state>opened|closed) for user (?<session_user>[A-Za-z0-9_.-]+)"
 | stats count by host sourcetype session_state session_user
 | sort - count

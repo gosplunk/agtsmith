@@ -14,12 +14,12 @@ This playbook exists to help the query-writing model prefer simple, dataset-grou
 
 ## Linux Auth Failures
 - Preferred index: `index=linux`
-- Preferred sourcetypes: `auth.log`, `auth-4`
+- Prefer the live Linux auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. If extracted sourcetypes are present, `auth-too_small` and `linux_secure` are acceptable.
 - Preferred fields: `host`, `user`, `src_ip`, `port`
 - Default query shape:
 
 ```spl
-search index=linux (sourcetype=auth.log OR sourcetype=auth-4) ("Failed password" OR "authentication failure" OR "Invalid user")
+search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("Failed password" OR "authentication failure" OR "Invalid user" OR "FAILED SU")
 | stats count by host user src_ip port
 | sort - count
 ```
@@ -128,13 +128,13 @@ search index=windows sourcetype=XmlWinEventLog (EventID=5379 OR EventCode=5379 O
 
 ## Linux Session Activity
 - Preferred index: `index=linux`
-- Preferred sourcetypes: `auth.log`, `auth-4`, `linux_secure`
+- Prefer the live Linux auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. If extracted sourcetypes are present, `auth-too_small` and `linux_secure` are acceptable.
 - Preferred signals: `session opened for user`, `session closed for user`, `pam_unix(cron:session)`
 - Preferred fields: `host`, `session_state`, `session_user`
 - Default query shape:
 
 ```spl
-search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) ("session opened for user" OR "session closed for user" OR "pam_unix(cron:session)")
+search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("session opened for user" OR "session closed for user" OR "pam_unix(cron:session)")
 | rex field=_raw "(?i)session (?<session_state>opened|closed) for user (?<session_user>[A-Za-z0-9_.-]+)"
 | stats count by host sourcetype session_state session_user
 | sort - count
@@ -167,13 +167,13 @@ search index=<linux_audit_index> sourcetype=linux_audit
 
 ## Linux Privilege Escalation First Seen
 - Preferred index: `index=linux`
-- Preferred sourcetypes: `auth.log`, `auth-4`, `linux_secure`
+- Prefer the live Linux auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. If extracted sourcetypes are present, `auth-too_small` and `linux_secure` are acceptable.
 - Preferred signals: `"session opened for user root by"`, `"COMMAND="`, `"pam_unix(sudo:session)"`, `"pam_unix(su:session)"`, `"sudo:"`, `"su:"`
 - Required shape: `earliest(_time) as first_seen`
 - Default query shape:
 
 ```spl
-search index=linux (sourcetype=auth.log OR sourcetype=auth-4 OR sourcetype=linux_secure) ("session opened for user root by" OR "COMMAND=" OR "pam_unix(sudo:session)" OR "pam_unix(su:session)" OR "sudo:" OR "su:")
+search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("session opened for user root by" OR "COMMAND=" OR "pam_unix(sudo:session)" OR "pam_unix(su:session)" OR "sudo:" OR "su:")
 | eval user_name=coalesce(user,account,uid,user_name)
 | eval src_ip=coalesce(rhost,src,src_ip,ip)
 | stats earliest(_time) as first_seen latest(_time) as last_seen count by host user_name tty src_ip

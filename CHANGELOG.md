@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.0
+
+- added guarded local learning with a dedicated Control Center page, pending/approved/stale state, and model-driven candidate generation
+- improved Linux auth, Windows auth, Apache, and cross-platform failed-login investigation quality
+- added async local-learning status, progress, and run-log visibility in the UI
+- improved Investigation UI sample-result rendering so it matches working MCP query behavior more reliably
+- added pilot benchmark pack generation and a full-pipeline hardening benchmark runner
+- validated core live-environment and BOTSv3 benchmark slices to pilot-ready quality locally
+
+## v1.0.1
+
+- local guarded Linux-auth grounding improvements
+- local working clone on 8788 for learning and personalization design
+
 ## v1.0.0
 
 - first public release of A.G.E.N.T. Smith

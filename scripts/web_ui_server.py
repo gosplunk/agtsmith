@@ -30,6 +30,12 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from langgraph_agentic_soc import run_agentic_investigation
 from langgraph_multi_model_soc import describe_multi_model_graph, run_multi_model_soc
+from local_learning import (
+    ensure_learning_registry,
+    generate_self_learn_candidates,
+    learning_registry_summary,
+    set_learning_record_status,
+)
 from minimal_question_to_answer import run_splunk_query_args
 from ollama_log_stream import (
     RemoteLogSourceRegistry,
@@ -68,6 +74,9 @@ SPL_SKILLPACK_PATH = ARTIFACTS_ROOT / "knowledge" / "spl_skillpack_latest.json"
 PERSONALIZATION_LOCK = ARTIFACTS_ROOT / "knowledge" / ".personalization.lock"
 PERSONALIZATION_LOG = ARTIFACTS_ROOT / "knowledge" / "personalization_web.log"
 PERSONALIZATION_STATE = ARTIFACTS_ROOT / "knowledge" / "personalization_status.json"
+LOCAL_LEARNING_LOCK = ARTIFACTS_ROOT / "learning" / ".learning.lock"
+LOCAL_LEARNING_LOG = ARTIFACTS_ROOT / "learning" / "local_learning_web.log"
+LOCAL_LEARNING_STATE = ARTIFACTS_ROOT / "learning" / "local_learning_status.json"
 AUDIT_ROOT = ARTIFACTS_ROOT / "audit"
 QUERY_AUDIT_LOG = AUDIT_ROOT / "query_runs.jsonl"
 LOG_SOURCE_REGISTRY = RemoteLogSourceRegistry()
@@ -159,26 +168,13 @@ DEPENDENCY_COMMANDS: list[tuple[str, list[str], str]] = [
     ("git", ["git", "--version"], "git --version"),
     ("curl", ["curl", "--version"], "curl --version"),
     ("make", ["make", "--version"], "make --version"),
-    ("docker", ["docker", "--version"], "docker --version"),
-    ("docker_compose", ["docker", "compose", "version"], "docker compose version"),
 ]
 
 
 def _collect_dependency_status() -> dict[str, Any]:
-    running_in_docker = Path("/.dockerenv").exists()
     checks: list[dict[str, str]] = []
     all_ok = True
     for key, argv, display in DEPENDENCY_COMMANDS:
-        if running_in_docker and key in {"docker", "docker_compose"}:
-            checks.append(
-                {
-                    "key": key,
-                    "command": display,
-                    "state": "host_only",
-                    "detail": "host-level prerequisite; not expected inside the app container",
-                }
-            )
-            continue
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=6, check=False)
             raw_output = (proc.stdout or proc.stderr or "").strip()
@@ -214,7 +210,7 @@ def _collect_dependency_status() -> dict[str, Any]:
                 }
             )
     return {
-        "scope_note": "This reflects what the current A.G.E.N.T. Smith runtime can see. When the app is running in Docker, host-only tools such as Docker Engine and Docker Compose are marked separately instead of failing red.",
+        "scope_note": "This reflects what the current A.G.E.N.T. Smith runtime can directly see and execute.",
         "overall_state": "ok" if all_ok else "error",
         "checks": checks,
     }
@@ -355,6 +351,7 @@ def _global_nav(active: str) -> str:
                 ("/langgraph-graph", "LangGraph Graph", "Canonical workflow, active topology, and run path"),
                 ("/docs", "Docs", "Whitepapers, guides, and references"),
                 ("/configure", "Configuration", "Endpoints, models, validation"),
+                ("/learning", "Local Learning", "Guarded airgapped learning review"),
                 ("/users", "Users", "Local users and audit trail"),
             ]
             item_links = "".join(
@@ -391,6 +388,7 @@ def _control_subnav(active: str) -> str:
         ("/langgraph-graph", "LangGraph Graph"),
         ("/docs", "Docs"),
         ("/configure", "Configuration"),
+        ("/learning", "Local Learning"),
         ("/users", "Users"),
     ]
     links: list[str] = []
@@ -715,6 +713,22 @@ def _environment_profile_refresh_in_progress() -> bool:
     return True
 
 
+def _local_learning_in_progress() -> bool:
+    if not LOCAL_LEARNING_LOCK.exists():
+        return False
+    try:
+        age = time.time() - LOCAL_LEARNING_LOCK.stat().st_mtime
+    except Exception:
+        return False
+    if age > 60 * 60:
+        try:
+            LOCAL_LEARNING_LOCK.unlink()
+        except Exception:
+            pass
+        return False
+    return True
+
+
 def _runtime_mode_label() -> str:
     if not _running_in_container():
         return "host_runtime"
@@ -796,6 +810,46 @@ def _personalization_status() -> dict[str, Any]:
         "phase": "idle",
         "output": "",
         "log_path": display_path(PERSONALIZATION_LOG),
+    }
+
+
+def _local_learning_status() -> dict[str, Any]:
+    path = ensure_learning_registry()
+    summary = learning_registry_summary()
+    state = _read_json(LOCAL_LEARNING_STATE)
+    if state:
+        if LOCAL_LEARNING_LOG.exists():
+            try:
+                state["log_path"] = display_path(LOCAL_LEARNING_LOG)
+                state["output"] = LOCAL_LEARNING_LOG.read_text(encoding="utf-8")[-12000:]
+            except Exception:
+                pass
+        state.setdefault("path", display_path(path))
+        state.update(summary)
+        return state
+    counts = summary.get("counts", {}) if isinstance(summary, dict) else {}
+    approved = int(counts.get("approved", 0) or 0)
+    if approved > 0:
+        detail = (
+            "Guarded local learning is active for this install. "
+            "Approved records can influence SPL planning and review through the local learning context; "
+            "pending, rejected, and stale records do not affect runtime behavior."
+        )
+    else:
+        detail = (
+            "Guarded local learning is initialized for this install. "
+            "Approved records can influence SPL planning and review through the local learning context; "
+            "pending, rejected, and stale records do not affect runtime behavior."
+        )
+    return {
+        "state": "ready",
+        "detail": detail,
+        "path": display_path(path),
+        "progress_pct": 0,
+        "phase": "idle",
+        "log_path": display_path(LOCAL_LEARNING_LOG),
+        "output": "",
+        **summary,
     }
 
 
@@ -952,6 +1006,70 @@ def _set_personalization_state(state: str, detail: str, progress_pct: int, phase
     if returncode is not None:
         payload["returncode"] = int(returncode)
     _write_json(PERSONALIZATION_STATE, payload)
+
+
+def _set_local_learning_state(state: str, detail: str, progress_pct: int, phase: str, returncode: int | None = None, **extra: Any) -> None:
+    payload: dict[str, Any] = {
+        "state": state,
+        "detail": detail,
+        "progress_pct": max(0, min(100, int(progress_pct))),
+        "phase": phase,
+        "updated_epoch": int(time.time()),
+    }
+    if returncode is not None:
+        payload["returncode"] = int(returncode)
+    payload.update(extra)
+    _write_json(LOCAL_LEARNING_STATE, payload)
+
+
+def _run_local_learning_refresh() -> None:
+    LOCAL_LEARNING_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        LOCAL_LEARNING_LOCK.write_text(str(int(time.time())), encoding="utf-8")
+    except Exception:
+        return
+    try:
+        LOCAL_LEARNING_LOG.write_text("", encoding="utf-8")
+    except Exception:
+        pass
+    _set_local_learning_state("in_progress", "Starting guarded local learning run...", 5, "starting")
+
+    def _progress(detail: str, pct: int, phase: str) -> None:
+        _set_local_learning_state("in_progress", detail, pct, phase)
+
+    def _log(line: str) -> None:
+        try:
+            with LOCAL_LEARNING_LOG.open("a", encoding="utf-8") as handle:
+                handle.write(f"{line.rstrip()}\n")
+        except Exception:
+            pass
+
+    try:
+        result = generate_self_learn_candidates(progress_cb=_progress, log_cb=_log)
+        detail = (
+            f"Guarded local learning complete. "
+            f"created={int(result.get('created', 0))} "
+            f"stale_marked={int(result.get('stale_marked', 0))} "
+            f"considered={int(result.get('considered', 0))}"
+        )
+        _set_local_learning_state(
+            "ready",
+            detail,
+            100,
+            "complete",
+            returncode=0,
+            created=int(result.get("created", 0)),
+            stale_marked=int(result.get("stale_marked", 0)),
+            considered=int(result.get("considered", 0)),
+        )
+    except Exception as exc:
+        _log(f"[learning] exception: {exc}")
+        _set_local_learning_state("error", f"Guarded local learning failed: {exc}", 100, "failed")
+    finally:
+        try:
+            LOCAL_LEARNING_LOCK.unlink()
+        except Exception:
+            pass
 
 
 def _phase_progress_for_line(line: str) -> tuple[int, str, str] | None:
@@ -1115,6 +1233,7 @@ def _config_snapshot() -> dict[str, Any]:
         "environment_profile_status": _environment_profile_bootstrap_state(),
         "environment_profile_refresh": _environment_profile_refresh_status(),
         "personalization": _personalization_status(),
+        "local_learning": _local_learning_status(),
         "values": values,
         "expected_models": expected_models,
         "ollama_pull_commands": [f"ollama pull {model}" for model in expected_models],
@@ -2340,6 +2459,7 @@ APP_HTML = """<!doctype html>
           <a class=\"nav-submenu-item\" href=\"/architecture\"><span class=\"nav-submenu-title\">Architecture</span><span class=\"nav-submenu-copy\">System flow and trust boundaries</span></a>
           <a class=\"nav-submenu-item\" href=\"/docs\"><span class=\"nav-submenu-title\">Docs</span><span class=\"nav-submenu-copy\">Whitepapers, guides, and references</span></a>
           <a class=\"nav-submenu-item\" href=\"/configure\"><span class=\"nav-submenu-title\">Configuration</span><span class=\"nav-submenu-copy\">Endpoints, models, validation</span></a>
+          <a class=\"nav-submenu-item\" href=\"/learning\"><span class=\"nav-submenu-title\">Local Learning</span><span class=\"nav-submenu-copy\">Guarded airgapped learning review</span></a>
           <a class=\"nav-submenu-item\" href=\"/users\"><span class=\"nav-submenu-title\">Users</span><span class=\"nav-submenu-copy\">Local users and audit trail</span></a>
         </div>
       </div>
@@ -2818,16 +2938,34 @@ APP_HTML = """<!doctype html>
       }
       $('spl-details').textContent = splDetails;
       $('spl-query').textContent = spl;
-      const previewRowsRaw = Array.isArray(result?.spl_results_preview) ? result.spl_results_preview : [];
+      const previewRowsRaw =
+        (Array.isArray(result?.__ui_sample_rows) && result.__ui_sample_rows.length
+          ? result.__ui_sample_rows
+          : (
+            Array.isArray(result?.spl_results_preview) && result.spl_results_preview.length
+              ? result.spl_results_preview
+              : (
+                Array.isArray(result?.evidence?.top_entities)
+                  ? result.evidence.top_entities
+                  : []
+              )
+          ));
       const previewRows = previewRowsRaw.filter((row) => row && typeof row === 'object').slice(0, 50);
       const latestSplRun = splRuns.length ? (splRuns[splRuns.length - 1] || {}) : {};
       const latestRowsReturned = latestSplRun.rows_returned;
+      const resultRowsReturned = typeof result?.rows_returned === 'number'
+        ? result.rows_returned
+        : (typeof latestRowsReturned === 'number' ? latestRowsReturned : null);
       $('spl-results').textContent = previewRows.length
         ? JSON.stringify(previewRows, null, 2)
         : (
-          latestRowsReturned === 0
+          resultRowsReturned === 0
             ? '(This SPL returned 0 rows for the selected time range and filters)'
-            : '(No SPL result rows were captured for this run)'
+            : (
+              (resultRowsReturned ?? 0) > 0
+                ? `(This SPL returned ${String(resultRowsReturned)} row(s), but no preview rows were captured for this run)`
+                : '(No SPL result rows were captured for this run)'
+            )
         );
       if (spl && !spl.startsWith('(No splunk_run_query')) {
         const earliest =
@@ -3228,6 +3366,9 @@ APP_HTML = """<!doctype html>
           stopRunProgress(false);
         } else {
           lastAskResult = data.result || {};
+          if (Array.isArray(data.sample_rows)) {
+            lastAskResult.__ui_sample_rows = data.sample_rows;
+          }
           $('status').textContent = 'Complete';
           $('summary').innerHTML = renderSummaryText(data.result?.summary || '');
           renderModelDecisions(data.result || {});
@@ -5965,22 +6106,32 @@ def _configure_page_body() -> str:
     .cfg-personalize-status{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;}
     .cfg-personalize-copy{color:#dbeafe;font-size:13px;line-height:1.6;}
     .cfg-personalize-meta{margin-top:10px;display:grid;gap:8px;}
-    .cfg-deps-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:14px;}
+    .cfg-advanced{margin-top:14px;border:1px solid #27415a;border-radius:16px;background:linear-gradient(180deg,#091423,#07111f);}
+    .cfg-advanced > summary{cursor:pointer;list-style:none;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;gap:12px;}
+    .cfg-advanced > summary::-webkit-details-marker{display:none;}
+    .cfg-advanced-title{font-size:15px;font-weight:800;color:#f8fafc;}
+    .cfg-advanced-copy{color:#9fb4cc;font-size:12px;line-height:1.5;margin-top:4px;}
+    .cfg-advanced-toggle{color:#9fb4cc;font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;}
+    .cfg-advanced[open] .cfg-advanced-toggle::after{content:"Hide";}
+    .cfg-advanced:not([open]) .cfg-advanced-toggle::after{content:"Show";}
+    .cfg-advanced-body{padding:0 16px 16px;border-top:1px solid #213246;}
+    .cfg-deps-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:14px;align-items:stretch;}
     .cfg-deps-grid > *{min-width:0;}
     .cfg-dep-card{
       border:1px solid #2a4a64;border-radius:16px;background:linear-gradient(180deg,#0a1627,#07111f 80%);
-      padding:14px;box-shadow:0 14px 26px rgba(2,6,23,.16), inset 0 1px 0 rgba(255,255,255,.03);
+      padding:12px 13px;box-shadow:0 14px 26px rgba(2,6,23,.16), inset 0 1px 0 rgba(255,255,255,.03);
+      display:grid;gap:6px;align-content:start;
     }
     .cfg-dep-card.ok{border-color:#166534;background:linear-gradient(180deg,#0a2514,#07160d 82%);}
     .cfg-dep-card.host_only{border-color:#7c5b12;background:linear-gradient(180deg,#241808,#151008 82%);}
     .cfg-dep-card.error{border-color:#7f1d1d;background:linear-gradient(180deg,#240d0d,#13090b 82%);}
-    .cfg-dep-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;}
-    .cfg-dep-name{font-size:13px;font-weight:800;color:#f8fafc;letter-spacing:.02em;}
+    .cfg-dep-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:2px;}
+    .cfg-dep-name{font-size:13px;font-weight:800;color:#f8fafc;letter-spacing:.02em;text-transform:uppercase;}
     .cfg-dep-dot{width:10px;height:10px;border-radius:999px;background:#ef4444;box-shadow:0 0 0 4px rgba(239,68,68,.14);}
     .cfg-dep-card.ok .cfg-dep-dot{background:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.14);}
     .cfg-dep-card.host_only .cfg-dep-dot{background:#f59e0b;box-shadow:0 0 0 4px rgba(245,158,11,.14);}
-    .cfg-dep-cmd{font-size:11px;color:#93c5fd;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.45;overflow-wrap:anywhere;word-break:break-word;}
-    .cfg-dep-detail{margin-top:8px;font-size:12px;color:#dbeafe;line-height:1.5;overflow-wrap:anywhere;word-break:break-word;}
+    .cfg-dep-cmd{font-size:11px;color:#93c5fd;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.35;overflow-wrap:anywhere;word-break:break-word;}
+    .cfg-dep-detail{font-size:12px;color:#dbeafe;line-height:1.45;overflow-wrap:anywhere;word-break:break-word;}
     .cfg-progress-wrap{display:grid;gap:8px;margin-top:12px;}
     .cfg-progress-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;}
     .cfg-progress-track{width:100%;height:12px;border-radius:999px;border:1px solid #26435c;background:#07111f;overflow:hidden;}
@@ -6013,7 +6164,7 @@ def _configure_page_body() -> str:
     .cfg-shell .btn-secondary:hover{
       box-shadow:0 16px 30px rgba(8,23,37,.34), inset 0 1px 0 rgba(255,255,255,.06);
     }
-    @media (max-width: 1120px){.cfg-grid{grid-template-columns:1fr;}.cfg-hero{grid-template-columns:1fr;}}
+    @media (max-width: 1120px){.cfg-grid{grid-template-columns:1fr;}.cfg-hero{grid-template-columns:1fr;}.cfg-deps-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
     @media (max-width: 980px){.cfg-form-grid,.cfg-subgrid,.cfg-status-board,.cfg-model-grid,.cfg-compare,.cfg-deps-grid{grid-template-columns:1fr;}}
   </style>
   <h1>Configuration</h1>
@@ -6174,6 +6325,7 @@ def _configure_page_body() -> str:
         If enabled, validation checks the edge endpoint, confirms the assigned model is installed, and lists the models currently visible from the edge Ollama host. If disabled, the checker records that the helper is intentionally excluded.
       </div>
       <div class="cfg-actions">
+        <button id="cfg-edge-save">Save Edge Helper</button>
         <button id="cfg-edge-validate" class="btn-secondary">Validate Edge Helper</button>
         <span id="cfg-edge-status" class="cfg-status">No edge validation has been run yet.</span>
       </div>
@@ -6233,31 +6385,59 @@ def _configure_page_body() -> str:
             <div class="cfg-note">Use this again later only when your Splunk data changes materially: new indexes, new sourcetypes, new tags, or after reconnecting MCP to a different environment.</div>
           </div>
         </div>
-        <div class="cfg-personalize-card" style="margin-top:14px;">
-          <div class="cfg-personalize-status">
+        <details class="cfg-advanced">
+          <summary>
             <div>
-              <h3 style="margin-top:0;">Environment-Aware SPL Personalization</h3>
-              <p class="cfg-help">This rebuilds the environment-aware SPL guidance layer from the profile above. It turns the discovered indexes, sourcetypes, fields, and tags into the local skillpack used by query writing, validation, and repair. On first setup, a successful Data Domains refresh already does this automatically, so you usually do not need to press this separately.</p>
+              <div class="cfg-advanced-title">Advanced: Rebuild Personalization Only</div>
+              <div class="cfg-advanced-copy">Most users do not need this. A successful Data Domains refresh already rebuilds the environment-aware skillpack automatically.</div>
             </div>
-            <span id="cfg-personalize-state" class="cfg-badge">state=unknown</span>
-          </div>
-          <div id="cfg-personalize-detail" class="cfg-personalize-copy">Waiting for configuration load.</div>
-          <div class="cfg-actions">
-            <button id="cfg-personalize">Rebuild Personalization Only</button>
-            <span id="cfg-personalize-status" class="cfg-status">Not started.</span>
-          </div>
-          <div class="cfg-progress-wrap">
-            <div class="cfg-progress-head">
-              <span id="cfg-personalize-phase" class="cfg-note" style="margin-top:0;">phase=idle</span>
-              <span id="cfg-personalize-pct" class="cfg-badge">0%</span>
+            <span class="cfg-advanced-toggle"></span>
+          </summary>
+          <div class="cfg-advanced-body">
+            <div class="cfg-personalize-status">
+              <div>
+                <h3 style="margin-top:16px;">Environment-Aware SPL Personalization</h3>
+                <p class="cfg-help">This rebuilds the environment-aware SPL guidance layer from the current profile only. Use it when Data Domains already exist and you want to regenerate the local skillpack again without re-scanning Splunk.</p>
+              </div>
+              <span id="cfg-personalize-state" class="cfg-badge">state=unknown</span>
             </div>
-            <div class="cfg-progress-track"><div id="cfg-personalize-bar" class="cfg-progress-bar"></div></div>
-            <pre id="cfg-personalize-log" class="cfg-pre cfg-progress-log">No personalization output yet.</pre>
+            <div id="cfg-personalize-detail" class="cfg-personalize-copy">Waiting for configuration load.</div>
+            <div class="cfg-actions">
+              <button id="cfg-personalize" class="btn-secondary">Rebuild Personalization Only</button>
+              <span id="cfg-personalize-status" class="cfg-status">Not started.</span>
+            </div>
+            <div class="cfg-progress-wrap">
+              <div class="cfg-progress-head">
+                <span id="cfg-personalize-phase" class="cfg-note" style="margin-top:0;">phase=idle</span>
+                <span id="cfg-personalize-pct" class="cfg-badge">0%</span>
+              </div>
+              <div class="cfg-progress-track"><div id="cfg-personalize-bar" class="cfg-progress-bar"></div></div>
+              <pre id="cfg-personalize-log" class="cfg-pre cfg-progress-log">No personalization output yet.</pre>
+            </div>
+            <div class="cfg-personalize-meta">
+              <div id="cfg-personalize-path" class="cfg-note">Skillpack path will appear after personalization exists.</div>
+              <div class="cfg-note">If you are setting up the platform for the first time, do not use this button. Run <strong>Refresh Data Domains</strong> and let that complete.</div>
+            </div>
           </div>
-          <div class="cfg-personalize-meta">
-            <div id="cfg-personalize-path" class="cfg-note">Skillpack path will appear after personalization exists.</div>
-            <div class="cfg-note">Use this when the profile already exists but you want to regenerate the guidance layer again. On first setup, just run <strong>Refresh Data Domains</strong> and let it complete.</div>
-          </div>
+        </details>
+      </div>
+      </div>
+    </details>
+    <details class="cfg-step">
+      <summary>
+        <div class="cfg-step-label">
+          <span class="cfg-step-num">6</span>
+          <div class="cfg-step-title">Guarded Local Learning</div>
+        </div>
+        <span class="cfg-step-toggle"></span>
+      </summary>
+      <div class="cfg-step-body">
+      <div class="cfg-panel" style="padding:0;border:0;background:transparent;box-shadow:none;">
+        <p class="cfg-help">Guarded Local Learning now has its own Control Center page so you can review pending suggestions, approve or reject them, and keep the local-learning history separate from endpoint setup.</p>
+        <div class="cfg-note">Design rule: shipped logic stays deterministic; local learning stays airgapped, typed, reviewable, and reversible.</div>
+        <div class="cfg-actions" style="margin-top:12px;">
+          <a class="btn-secondary" href="/learning" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center;">Open Local Learning</a>
+          <span class="cfg-status">Use this after Data Domains exist and you have some real investigations to learn from.</span>
         </div>
       </div>
       </div>
@@ -6451,6 +6631,7 @@ def _configure_page_body() -> str:
     }
     if(state === 'ready'){
       cfg$('cfg-env-refresh-status').textContent = data.refresh?.detail || 'Data Domains refresh complete.';
+      await cfgPollPersonalization();
     } else if(state === 'error'){
       cfg$('cfg-env-refresh-status').textContent = data.refresh?.detail || 'Data Domains refresh failed.';
     }
@@ -6667,7 +6848,7 @@ def _configure_page_body() -> str:
       const depResp = await fetch('/api/config/dependencies');
       const depData = await depResp.json();
       if(depResp.ok){
-        cfgRenderDependencies(depData);
+      cfgRenderDependencies(depData);
       } else {
         cfg$('cfg-deps-note').textContent = depData.error || `dependency check failed (${depResp.status})`;
       }
@@ -6763,18 +6944,31 @@ def _configure_page_body() -> str:
     cfgRenderMcpProbe(data);
     cfg$('cfg-status').textContent = data.detail || 'MCP probe complete.';
   }
-  cfg$('cfg-save').onclick = async () => {
-    cfg$('cfg-status').textContent = 'Saving...';
+  async function cfgSave(mode='full'){
+    const edgeOnly = mode === 'edge';
+    cfg$('cfg-status').textContent = edgeOnly ? 'Saving edge helper...' : 'Saving...';
+    if(edgeOnly){
+      cfg$('cfg-edge-status').textContent = 'Saving edge helper...';
+    }
     let payload = cfgCollectPayload();
     const validationResp = await fetch('/api/config/validate', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({values: payload})
+      body: JSON.stringify(edgeOnly ? {values: payload, scope: 'edge'} : {values: payload})
     });
     const validationData = await validationResp.json();
     if(!validationResp.ok){
-      cfg$('cfg-status').textContent = validationData.error || `pre-save validation failed (${validationResp.status})`;
+      const detail = validationData.error || `pre-save validation failed (${validationResp.status})`;
+      cfg$('cfg-status').textContent = detail;
+      if(edgeOnly){
+        cfg$('cfg-edge-status').textContent = detail;
+      }
       return;
+    }
+    if(edgeOnly){
+      cfgRenderEdgeModelOptions(validationData.edge_ollama_available_models || []);
+      cfgRenderEdgeValidation(validationData);
+      cfg$('cfg-edge-checks').textContent = validationData.connectivity_checks?.edge_ollama_tags || 'Edge helper disabled or not configured.';
     }
     payload = cfgAutoAssignDefaults(payload, validationData.ollama_available_models || []);
     const resp = await fetch('/api/config/runtime', {
@@ -6784,13 +6978,21 @@ def _configure_page_body() -> str:
     });
     const data = await resp.json();
     if(!resp.ok){
-      cfg$('cfg-status').textContent = data.error || `save failed (${resp.status})`;
+      const detail = data.error || `save failed (${resp.status})`;
+      cfg$('cfg-status').textContent = detail;
+      if(edgeOnly){
+        cfg$('cfg-edge-status').textContent = detail;
+      }
       return;
     }
     cfgRender(data);
-    cfg$('cfg-status').textContent = 'Saved to config/ui.env.';
+    cfg$('cfg-status').textContent = edgeOnly ? 'Saved edge helper settings to config/ui.env.' : 'Saved to config/ui.env.';
+    if(edgeOnly){
+      cfg$('cfg-edge-status').textContent = 'Edge helper saved to config/ui.env.';
+    }
     await cfgValidate();
-  };
+  }
+  cfg$('cfg-save').onclick = async () => { await cfgSave('full'); };
   cfg$('cfg-personalize').onclick = async () => {
     cfg$('cfg-personalize-status').textContent = 'Starting personalization rebuild...';
     const resp = await fetch('/api/config/personalize', {
@@ -6823,12 +7025,13 @@ def _configure_page_body() -> str:
     cfg$('cfg-env-refresh-status').textContent = data.detail || 'Data Domains refresh started.';
     await cfgPollEnvRefresh();
   };
+  cfg$('cfg-edge-save').onclick = async () => { await cfgSave('edge'); };
   cfg$('cfg-edge-validate').onclick = cfgValidateEdge;
   cfg$('cfg-validate').onclick = cfgValidate;
   cfg$('cfg-mcp-probe').onclick = cfgProbeMcp;
   cfgLoad();
 </script>
-"""
+""".replace("{html.escape(APP_VERSION_LABEL)}", html.escape(APP_VERSION_LABEL))
 
 
 def _users_page_body() -> str:
@@ -7028,6 +7231,215 @@ def _users_page_body() -> str:
     users$('users-update').onclick = () => submitUserAction('update');
     users$('users-delete').onclick = () => submitUserAction('delete');
     loadUsersPage();
+  </script>
+</div>
+"""
+
+
+def _learning_page_body() -> str:
+    return """
+<div class="card">
+  <style>
+    .learning-shell{display:grid;gap:16px;}
+    .learning-hero{border:1px solid #244660;border-radius:18px;background:linear-gradient(160deg,#08182a,#091726 52%,#0a1d17);padding:18px;}
+    .learning-hero h1{margin:0 0 8px;font-size:28px;line-height:1.05;}
+    .learning-hero p{margin:0;color:#a8c0d8;font-size:14px;line-height:1.65;}
+    .learning-grid{display:grid;grid-template-columns:minmax(340px,.9fr) minmax(420px,1.1fr);gap:16px;}
+    .learning-panel{border:1px solid #23445f;border-radius:18px;background:linear-gradient(180deg,#081525,#06111d);padding:18px;}
+    .learning-panel h2{margin:0 0 10px;font-size:18px;}
+    .learning-help{margin:0 0 12px;color:#9fb4cc;font-size:13px;line-height:1.55;}
+    .learning-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;}
+    .learning-actions button,.learning-actions a{appearance:none;border:0;border-radius:14px;padding:12px 16px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#03230f;font-weight:900;cursor:pointer;font-size:14px;text-decoration:none;}
+    .learning-actions .btn-secondary{background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;border:1px solid #315a79;}
+    .learning-status{color:#9fb4cc;font-size:13px;}
+    .learning-badges{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;}
+    .learning-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid #294560;background:#0b2130;color:#dbeafe;font-size:12px;font-weight:800;}
+    .learning-notes{display:grid;gap:6px;color:#9fb4cc;font-size:12px;}
+    .learning-list{display:grid;gap:10px;}
+    .learning-item{border:1px solid #27415a;border-radius:12px;background:#081729;padding:12px;}
+    .learning-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;}
+    .learning-item-name{font-weight:800;color:#f8fafc;}
+    .learning-item-meta{color:#9fb4cc;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;}
+    .learning-item-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}
+    .learning-item-btn{appearance:none;border:1px solid #315a79;border-radius:10px;padding:8px 10px;background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;font-weight:800;cursor:pointer;font-size:12px;letter-spacing:.02em;}
+    .learning-item-btn:hover{border-color:#60a5fa;transform:translateY(-1px);}
+    .learning-history{border:1px solid #27415a;border-radius:14px;background:#081729;padding:0;overflow:hidden;}
+    .learning-history summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;}
+    .learning-history summary::-webkit-details-marker{display:none;}
+    .learning-history-title{font-weight:800;color:#f8fafc;}
+    .learning-history-copy{color:#9fb4cc;font-size:12px;line-height:1.45;}
+    .learning-history-body{padding:0 16px 16px;}
+    .learning-progress-wrap{margin-top:14px;border:1px solid #26435c;border-radius:12px;background:#07111f;padding:10px;}
+    .learning-progress-head{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:12px;color:#c7d8eb;margin-bottom:6px;}
+    .learning-progress-track{width:100%;height:10px;border-radius:999px;border:1px solid #1f2937;background:#0b2130;overflow:hidden;}
+    .learning-progress-bar{width:0%;height:100%;border-radius:999px;background:linear-gradient(90deg,#22c55e,#10b981);transition:width .2s ease;}
+    .learning-progress-log{margin-top:8px;max-height:200px;overflow:auto;white-space:pre-wrap;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;line-height:1.45;color:#dbeafe;background:#030b17;border:1px solid #26435c;border-radius:10px;padding:10px;}
+    @media (max-width: 980px){.learning-grid{grid-template-columns:1fr;}}
+  </style>
+  <div class="learning-shell">
+    <div class="learning-hero">
+      <h1>Guarded Local Learning</h1>
+      <p>Review airgapped, typed learning suggestions created from this environment’s Data Domains and recent investigations. Nothing becomes active until you approve it. Approved hints are layered under the environment profile and can improve future SPL planning and review for this install only.</p>
+    </div>
+    <div class="learning-grid">
+      <section class="learning-panel">
+        <h2>Learning Control</h2>
+        <p class="learning-help">Use <strong>Run Self Learn</strong> after Data Domains exist and you have some real investigations to learn from. This creates pending suggestions only. It does not rewrite code, expand permissions, or bypass deterministic validation.</p>
+        <div id="learning-summary" class="learning-badges"></div>
+        <div class="learning-actions">
+          <button id="learning-run">Run Self Learn</button>
+          <a class="btn-secondary" href="/configure">Back to Configuration</a>
+          <span id="learning-status" class="learning-status">Not started.</span>
+        </div>
+        <div class="learning-progress-wrap">
+          <div class="learning-progress-head">
+            <span id="learning-phase">phase=idle</span>
+            <span id="learning-pct" class="learning-badge">0%</span>
+          </div>
+          <div class="learning-progress-track"><div id="learning-bar" class="learning-progress-bar"></div></div>
+          <pre id="learning-log" class="learning-progress-log">No learning output yet.</pre>
+        </div>
+        <div class="learning-notes" style="margin-top:12px;">
+          <div id="learning-detail">Loading local learning registry...</div>
+          <div id="learning-path">Registry path will appear here.</div>
+          <div>Allowed learning kinds: preferred_sources, preferred_fields, preferred_filters, post_result_pivot_hint</div>
+        </div>
+      </section>
+      <section class="learning-panel">
+        <h2>Pending Suggestions</h2>
+        <p class="learning-help">Pending suggestions should be approved only when the reasoning and evidence look correct for this environment. Approved items can influence local SPL planning and review. Rejected or stale items stay local and do not affect runtime behavior.</p>
+        <div id="learning-pending" class="learning-list"><div class="learning-item"><div class="learning-item-meta">No pending learning records.</div></div></div>
+        <details class="learning-history" style="margin-top:14px;">
+          <summary>
+            <div>
+              <div class="learning-history-title">Show Approved, Rejected, and Stale Learning</div>
+              <div class="learning-history-copy">Historical local-learning records stay here for review without taking over the main pending workflow.</div>
+            </div>
+            <span class="learning-badge" id="learning-history-count">history=0</span>
+          </summary>
+          <div class="learning-history-body">
+            <div id="learning-history-list" class="learning-list"><div class="learning-item"><div class="learning-item-meta">No historical learning records yet.</div></div></div>
+          </div>
+        </details>
+      </section>
+    </div>
+  </div>
+  <script>
+    const learning$ = (id) => document.getElementById(id);
+    function learningEscape(v){ return String(v ?? ''); }
+    function renderLearningPage(payload){
+      const data = payload || {};
+      const counts = data.counts || {};
+      const latest = Array.isArray(data.latest) ? data.latest : [];
+      const pending = latest.filter((item) => String(item?.status || '') === 'pending');
+      const history = latest.filter((item) => String(item?.status || '') !== 'pending');
+      learning$('learning-summary').innerHTML = [
+        `pending=${Number(counts.pending || 0)}`,
+        `approved=${Number(counts.approved || 0)}`,
+        `rejected=${Number(counts.rejected || 0)}`,
+        `stale=${Number(counts.stale || 0)}`
+      ].map((v) => `<span class="learning-badge">${learningEscape(v)}</span>`).join('');
+      learning$('learning-detail').textContent = data.detail || 'No local learning detail available.';
+      learning$('learning-path').textContent = data.path ? `Registry path: ${data.path}` : 'Registry path will appear here.';
+      const pct = Math.max(0, Math.min(100, Number(data.progress_pct || 0)));
+      learning$('learning-phase').textContent = `phase=${learningEscape(data.phase || 'idle')}`;
+      learning$('learning-pct').textContent = `${Math.round(pct)}%`;
+      learning$('learning-bar').style.width = `${pct}%`;
+      learning$('learning-log').textContent = data.output || 'No learning output yet.';
+      learning$('learning-history-count').textContent = `history=${history.length}`;
+      const renderItem = (item) => `
+        <div class="learning-item">
+          <div class="learning-item-head">
+            <div class="learning-item-name">${learningEscape(item.intent || 'unknown_intent')}</div>
+            <span class="learning-badge">status=${learningEscape(item.status || 'pending')}</span>
+          </div>
+          <div class="learning-item-meta">kind=${learningEscape(item.kind || 'unknown')}</div>
+          <div class="learning-item-meta">proposal=${learningEscape(JSON.stringify(item.proposal || {}))}</div>
+          <div class="learning-item-meta">${learningEscape(item.reason || '')}</div>
+          ${item.supporting_question ? `<div class="learning-item-meta">question=${learningEscape(item.supporting_question)}</div>` : ''}
+          <div class="learning-item-meta">created_at=${learningEscape(item.created_at || '')}</div>
+          ${String(item.status || '') === 'pending' ? `<div class="learning-item-actions"><button class="learning-item-btn" data-action="approve" data-id="${learningEscape(item.id || '')}">Approve</button><button class="learning-item-btn" data-action="reject" data-id="${learningEscape(item.id || '')}">Reject</button></div>` : ''}
+        </div>
+      `;
+      learning$('learning-pending').innerHTML = pending.length ? pending.map(renderItem).join('') : '<div class="learning-item"><div class="learning-item-meta">No pending learning records.</div></div>';
+      learning$('learning-history-list').innerHTML = history.length ? history.map(renderItem).join('') : '<div class="learning-item"><div class="learning-item-meta">No historical learning records yet.</div></div>';
+      document.querySelectorAll('[data-action][data-id]').forEach((btn) => {
+        btn.onclick = async () => {
+          const action = String(btn.getAttribute('data-action') || '').trim();
+          const id = String(btn.getAttribute('data-id') || '').trim();
+          learning$('learning-status').textContent = `${action} ${id}...`;
+          const resp = await fetch('/api/config/local-learning', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({action, id})
+          });
+          const data = await resp.json();
+          if(!resp.ok){
+            learning$('learning-status').textContent = data.error || `local learning update failed (${resp.status})`;
+            return;
+          }
+          renderLearningPage(data.local_learning || {});
+          learning$('learning-status').textContent = data.detail || `record ${action}d`;
+        };
+      });
+    }
+    async function loadLearningPage(){
+      const resp = await fetch('/api/config/local-learning');
+      const data = await resp.json();
+      if(!resp.ok){
+        learning$('learning-status').textContent = data.error || `load failed (${resp.status})`;
+        return;
+      }
+      renderLearningPage(data.local_learning || {});
+      learning$('learning-status').textContent = 'Loaded local learning registry.';
+      if(String(data.local_learning?.state || '') === 'in_progress'){
+        await pollLearningPage();
+      }
+    }
+    let learningPoll = null;
+    async function pollLearningPage(){
+      const resp = await fetch('/api/config/local-learning');
+      const data = await resp.json();
+      if(!resp.ok){
+        learning$('learning-status').textContent = data.error || `load failed (${resp.status})`;
+        return;
+      }
+      renderLearningPage(data.local_learning || {});
+      const state = String(data.local_learning?.state || 'ready');
+      if(state === 'in_progress'){
+        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning is running...';
+        if(!learningPoll){
+          learningPoll = window.setInterval(pollLearningPage, 1200);
+        }
+        return;
+      }
+      if(learningPoll){
+        window.clearInterval(learningPoll);
+        learningPoll = null;
+      }
+      if(state === 'ready'){
+        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning complete.';
+      } else if(state === 'error'){
+        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning failed.';
+      }
+    }
+    learning$('learning-run').onclick = async () => {
+      learning$('learning-status').textContent = 'Starting guarded local learning...';
+      const resp = await fetch('/api/config/local-learning', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({action:'self_learn'})
+      });
+      const data = await resp.json();
+      if(!resp.ok){
+        learning$('learning-status').textContent = data.error || `self learn failed (${resp.status})`;
+        return;
+      }
+      renderLearningPage(data.local_learning || {});
+      learning$('learning-status').textContent = data.detail || 'Guarded local learning started.';
+      await pollLearningPage();
+    };
+    loadLearningPage();
   </script>
 </div>
 """
@@ -7951,6 +8363,65 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(HTTPStatus.OK, {"personalization": _personalization_status()})
 
+    def _api_config_local_learning_get(self) -> None:
+        if not self._require_ops_role({}):
+            return
+        self._json(HTTPStatus.OK, {"local_learning": _local_learning_status()})
+
+    def _api_config_local_learning_post(self) -> None:
+        if not self._require_ops_role({}):
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except Exception:
+            length = 0
+        raw = self.rfile.read(length)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        if not isinstance(payload, dict):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "payload must be an object"})
+            return
+        action = str(payload.get("action", "")).strip().lower()
+        if action == "self_learn":
+            if _local_learning_in_progress():
+                self._json(
+                    HTTPStatus.ACCEPTED,
+                    {
+                        "status": "in_progress",
+                        "detail": "Guarded local learning is already running.",
+                        "local_learning": _local_learning_status(),
+                    },
+                )
+                return
+            threading.Thread(target=_run_local_learning_refresh, daemon=True).start()
+            self._json(
+                HTTPStatus.ACCEPTED,
+                {
+                    "status": "started",
+                    "detail": "Guarded local learning started.",
+                    "local_learning": _local_learning_status(),
+                },
+            )
+            return
+        if action in {"approve", "reject", "stale"}:
+            record_id = str(payload.get("id", "")).strip()
+            if not record_id:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "id is required"})
+                return
+            ok = set_learning_record_status(record_id, action)
+            if not ok:
+                self._json(HTTPStatus.NOT_FOUND, {"error": "record not found"})
+                return
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "status": "ok",
+                    "detail": f"Learning record {record_id} set to {action}.",
+                    "local_learning": _local_learning_status(),
+                },
+            )
+            return
+        self._json(HTTPStatus.BAD_REQUEST, {"error": "unsupported action"})
+
     def _api_config_env_refresh_get(self) -> None:
         if not self._require_ops_role({}):
             return
@@ -8310,6 +8781,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/config/personalize":
             self._api_config_personalize_get()
             return
+        if parsed.path == "/api/config/local-learning":
+            self._api_config_local_learning_get()
+            return
         if parsed.path == "/api/config/validate":
             self.send_error(HTTPStatus.METHOD_NOT_ALLOWED, "POST required")
             return
@@ -8421,6 +8895,12 @@ class Handler(BaseHTTPRequestHandler):
             self._html(HTTPStatus.OK, _configure_page_body(), title="Configuration", nav_active="control")
             return
 
+        if parsed.path == "/learning":
+            if not self._require_ops_page():
+                return
+            self._html(HTTPStatus.OK, _learning_page_body(), title="Guarded Local Learning", nav_active="control")
+            return
+
         if parsed.path == "/users":
             if not self._require_admin_page():
                 return
@@ -8500,6 +8980,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
             return
+        if parsed.path == "/api/config/local-learning":
+            if not self._require_auth(api_mode=True):
+                return
+            try:
+                self._api_config_local_learning_post()
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            return
         if parsed.path == "/api/config/env-refresh":
             if not self._require_auth(api_mode=True):
                 return
@@ -8560,18 +9048,50 @@ class Handler(BaseHTTPRequestHandler):
                     session_id=session_id,
                     write_artifact=write_artifact,
                 )
+            result_body = result.get("result", {}) if isinstance(result, dict) else {}
+            if not isinstance(result_body, dict):
+                result_body = {}
             user = self._authenticated_user() or {}
-            selected_tool = str(result.get("selected_tool", "")).strip()
-            selected_spl_details = result.get("selected_spl_details", [])
+            selected_tool = str(result_body.get("selected_tool", "")).strip()
+            selected_spl_details = result_body.get("selected_spl_details", [])
             if not isinstance(selected_spl_details, list):
                 selected_spl_details = []
             latest_spl = selected_spl_details[-1] if selected_spl_details and isinstance(selected_spl_details[-1], dict) else {}
             executed_query = ""
-            query_args = result.get("query_args", {}) if isinstance(result.get("query_args"), dict) else {}
+            query_args = result_body.get("query_args", {}) if isinstance(result_body.get("query_args"), dict) else {}
             if str(latest_spl.get("query", "")).strip():
                 executed_query = str(latest_spl.get("query", "")).strip()
             elif str(query_args.get("query", "")).strip():
                 executed_query = str(query_args.get("query", "")).strip()
+            sample_rows: list[dict[str, Any]] = []
+            sample_source = "none"
+            sample_error = ""
+            if selected_tool == "splunk_run_query" and str(query_args.get("query", "")).strip():
+                rerun_args = dict(query_args)
+                try:
+                    row_limit = int(rerun_args.get("row_limit", 25))
+                except Exception:
+                    row_limit = 25
+                rerun_args["row_limit"] = max(1, min(50, row_limit))
+                try:
+                    rerun = run_splunk_query_args(
+                        rerun_args,
+                        intent=str(result_body.get("intent", "investigation_ui")).strip() or "investigation_ui",
+                        summary_hint="investigation ui sample rows",
+                    )
+                    rows = rerun.get("structured", {}).get("results", []) if isinstance(rerun, dict) else []
+                    if isinstance(rows, list):
+                        sample_rows = [r for r in rows if isinstance(r, dict)][:25]
+                        sample_source = "splunk_run_query_rerun"
+                except Exception as exc:
+                    sample_error = f"{type(exc).__name__}: {exc}"
+
+            if not sample_rows:
+                evidence = result_body.get("evidence", {}) if isinstance(result_body.get("evidence"), dict) else {}
+                top = evidence.get("top_entities", []) if isinstance(evidence.get("top_entities"), list) else []
+                sample_rows = [r for r in top if isinstance(r, dict)]
+                if sample_rows:
+                    sample_source = "pipeline_evidence_top_entities"
             _append_query_audit(
                 {
                     "ts_epoch": int(time.time()),
@@ -8580,13 +9100,18 @@ class Handler(BaseHTTPRequestHandler):
                     "pipeline": pipeline,
                     "question": question,
                     "selected_tool": selected_tool,
-                    "intent": result.get("intent"),
-                    "rows_returned": result.get("rows_returned"),
-                    "total_rows": result.get("total_rows"),
+                    "intent": result_body.get("intent"),
+                    "rows_returned": result_body.get("rows_returned"),
+                    "total_rows": result_body.get("total_rows"),
                     "query": executed_query,
                     "session_id": session_id,
                 }
             )
+            if isinstance(result, dict):
+                result = dict(result)
+                result["sample_rows"] = sample_rows
+                result["sample_rows_source"] = sample_source
+                result["sample_rows_error"] = sample_error
             self._json(200, result)
         except Exception as exc:
             self._json(500, {"error": f"{type(exc).__name__}: {exc}"})

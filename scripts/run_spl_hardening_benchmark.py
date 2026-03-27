@@ -16,7 +16,7 @@ from typing import Any
 
 from botsv3_catalog import BOTSV3_SOURCETYPES
 from intent_field_contracts import validate_query_for_intent
-from langgraph_multi_model_soc import planner_node, writer_node
+from langgraph_multi_model_soc import planner_node, run_multi_model_soc, writer_node
 from minimal_question_to_answer import map_question_to_template, run_splunk_query_args, template_to_query_args
 from query_policy import validate_query_args
 
@@ -335,6 +335,7 @@ def main() -> int:
     parser.add_argument("--family", action="append", default=[], help="Restrict to one or more benchmark families")
     parser.add_argument("--case-id", action="append", default=[], help="Restrict to one or more specific case ids")
     parser.add_argument("--use-planner", action="store_true", help="Use the live planner path instead of deterministic template routing")
+    parser.add_argument("--use-full-pipeline", action="store_true", help="Use the full run_multi_model_soc pipeline")
     args = parser.parse_args()
 
     cases = _load_cases(Path(args.cases))
@@ -367,32 +368,58 @@ def main() -> int:
 
     for idx, case in enumerate(cases, start=1):
         print(f"[benchmark] {idx}/{len(cases)} case={case.id}")
-        if args.use_planner:
+        if args.use_full_pipeline:
+            payload = run_multi_model_soc(case.question, write_artifact=False)
+            result = payload.get("result", {}) if isinstance(payload, dict) else {}
+            plan = result.get("final_adjudication", {}) if isinstance(result.get("final_adjudication", {}), dict) else {}
+            actual_intent = str(result.get("intent", plan.get("selected_intent", ""))).strip() or "unknown"
+            actual_tool = str(result.get("selected_tool", plan.get("selected_tool", ""))).strip()
+            query_args = result.get("query_args", plan.get("selected_args", {}))
+            if not isinstance(query_args, dict):
+                query_args = {}
+            if actual_tool == "splunk_get_indexes":
+                query_args = {}
+            summary_hint = str(result.get("search_strategy_summary", "")).strip() or "Summarize key findings and suggest a next investigative check."
+            structured = {
+                "results": result.get("spl_results_preview", []),
+                "total_rows": result.get("rows_returned", 0),
+            }
+            error = ""
+            validation_reason = str(result.get("validation_reason", "")).strip()
+            policy_ok = validation_reason.startswith("plan_valid")
+            policy_reason = str(result.get("validation_reason", ""))
+            if not policy_ok:
+                error = policy_reason or "validation_failed"
+        elif args.use_planner:
             planner_state = planner_node({"question": case.question})
             writer_state = writer_node({"question": case.question, "planner_output": planner_state.get("planner_output", {})})
             writer_output = writer_state.get("writer_output", {}) or {}
             actual_intent = str(writer_output.get("intent", "")).strip() or "unknown"
             query_args = writer_output.get("tool_args", {}) if isinstance(writer_output.get("tool_args", {}), dict) else {}
             summary_hint = "Summarize key findings and suggest a next investigative check."
+            structured: dict[str, Any] | None = None
+            error = ""
+            policy_ok, policy_reason = validate_query_args(query_args, question=case.question)
         else:
             template = map_question_to_template(case.question)
             actual_intent = template.intent
             query_args = template_to_query_args(template, case.question)
             summary_hint = template.summary_hint
-        policy_ok, policy_reason = validate_query_args(query_args, question=case.question)
-        structured: dict[str, Any] | None = None
-        error = ""
+            structured = None
+            error = ""
+            policy_ok, policy_reason = validate_query_args(query_args, question=case.question)
 
-        if policy_ok:
-            try:
-                run = run_splunk_query_args(query_args, intent=actual_intent, summary_hint=summary_hint)
-                maybe_structured = run.get("structured", {})
-                if isinstance(maybe_structured, dict):
-                    structured = maybe_structured
-            except Exception as exc:
-                error = f"{type(exc).__name__}:{exc}"
-        else:
-            error = policy_reason
+        if not args.use_full_pipeline:
+            if policy_ok:
+                try:
+                    run = run_splunk_query_args(query_args, intent=actual_intent, summary_hint=summary_hint)
+                    maybe_structured = run.get("structured", {})
+                    if isinstance(maybe_structured, dict):
+                        structured = maybe_structured
+                except Exception as exc:
+                    error = f"{type(exc).__name__}:{exc}"
+            else:
+                error = policy_reason
 
         score = _score_case(
             case,
