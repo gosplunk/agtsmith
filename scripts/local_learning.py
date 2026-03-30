@@ -312,7 +312,10 @@ def _build_learning_evidence(profile: dict[str, Any], audit: list[dict[str, Any]
             st_name = str(st).strip()
             if st_name:
                 linux_sourcetypes.add(st_name)
-    auth_sourcetypes = [st for st in ("auth-too_small", "auth.log", "linux_secure", "syslog") if st in linux_sourcetypes]
+    auth_sourcetypes = [
+        st for st in sorted(linux_sourcetypes)
+        if any(tok in st.lower() for tok in ("auth", "secure", "syslog"))
+    ]
     if auth_sourcetypes:
         evidence.append(
             {

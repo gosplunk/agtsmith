@@ -1,0 +1,896 @@
+[
+  {
+    "id": "botsv3_apache_top_ips_all_time",
+    "family": "apache_access_top_ips",
+    "question": "Across the full BOTSv3 dataset, show the top web client IPs in access_combined.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=access_combined",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "clientip",
+      "status",
+      "method",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1595"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_apache_user_agents_all_time",
+    "family": "apache_suspicious_user_agents",
+    "question": "Across the full BOTSv3 dataset, show suspicious web user agents and client IPs.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=access_combined"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=access_combined",
+      "useragent",
+      "clientip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "useragent",
+      "clientip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1595"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_linux_sudo_activity_all_time",
+    "family": "linux_privilege_escalation_activity",
+    "question": "Across the full BOTSv3 dataset, show sudo and su activity in linux_secure with process type, actor, target user, and commands.",
+    "expected_intent": "linux_privilege_escalation_activity",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "linux_secure",
+      "process_name",
+      "actor",
+      "target_user",
+      "table"
+    ],
+    "forbidden_query_terms": [
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "host",
+      "process_name",
+      "outcome",
+      "actor"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1548"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_cloudtrail_activity_all_time",
+    "family": "aws_cloudtrail_activity",
+    "question": "Across the full BOTSv3 dataset, show top CloudTrail API activity.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "eventSource",
+      "eventName",
+      "principal",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "eventSource",
+      "eventName",
+      "principal",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1526"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_cloudtrail_sources_all_time",
+    "family": "aws_cloudtrail_activity",
+    "question": "Across the full BOTSv3 dataset, show suspicious CloudTrail activity sources.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "sourceIPAddress",
+      "principal",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "sourceIPAddress",
+      "eventSource",
+      "eventName",
+      "principal",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1526"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_cloudtrail_event_service_all_time",
+    "family": "aws_cloudtrail_activity",
+    "question": "Across the full BOTSv3 dataset, investigate CloudTrail activity by event name and service.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudtrail"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudtrail",
+      "eventSource",
+      "eventName",
+      "principal",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "eventSource",
+      "eventName",
+      "principal",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1526"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_cisco_asa_flows_all_time",
+    "family": "cisco_asa_network_flows",
+    "question": "Across the full BOTSv3 dataset, show top Cisco ASA blocked and allowed flows.",
+    "expected_intent": "cisco_asa_network_flows",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=cisco:asa"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=cisco:asa",
+      "action",
+      "src_ip",
+      "dest_ip",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=main"
+    ],
+    "required_result_fields": [
+      "action",
+      "src_ip",
+      "dest_ip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1046"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_top_indexes_all_time",
+    "family": "top_indexes",
+    "question": "Across the full BOTSv3 dataset, show the busiest index.",
+    "expected_intent": "top_indexes",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [],
+    "required_query_terms": [
+      "index=botsv3",
+      "stats",
+      "by index"
+    ],
+    "forbidden_query_terms": [
+      "index=* NOT index=_*"
+    ],
+    "required_result_fields": [
+      "index",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [],
+    "min_mitre_pivots": 0
+  },
+  {
+    "id": "botsv3_stream_http_all_time",
+    "family": "stream_http_activity",
+    "question": "Across the full BOTSv3 dataset, show top HTTP methods, status codes, destination sites, and client IPs from stream:http.",
+    "expected_intent": "stream_http_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=stream:http"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=stream:http",
+      "spath",
+      "http_method",
+      "status",
+      "site",
+      "src_ip"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=access_combined",
+      "index=linux"
+    ],
+    "required_result_fields": [
+      "http_method",
+      "status",
+      "site",
+      "src_ip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1071.001"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_osquery_process_all_time",
+    "family": "osquery_process_activity",
+    "question": "Across the full BOTSv3 dataset, investigate osquery process monitoring results and show added processes by host, path, and cmdline.",
+    "expected_intent": "osquery_process_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=osquery:results"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=osquery:results",
+      "spath",
+      "hostidentifier",
+      "path",
+      "cmdline"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=osquery:processes"
+    ],
+    "required_result_fields": [
+      "hostIdentifier",
+      "action",
+      "path",
+      "cmdline",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1059"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_vpc_flow_all_time",
+    "family": "aws_vpc_flow_activity",
+    "question": "Across the full BOTSv3 dataset, show top accepted and rejected AWS VPC flows by source IP, destination IP, destination port, and action.",
+    "expected_intent": "aws_vpc_flow_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=aws:cloudwatchlogs:vpcflow"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=aws:cloudwatchlogs:vpcflow",
+      "rex",
+      "action",
+      "src_ip",
+      "dest_ip",
+      "dest_port"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=aws:cloudtrail",
+      "eventsource=vpc.amazonaws.com"
+    ],
+    "required_result_fields": [
+      "action",
+      "src_ip",
+      "dest_ip",
+      "dest_port",
+      "transport",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1046"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_aad_signin_all_time",
+    "family": "aad_signin_activity",
+    "question": "Across the full BOTSv3 dataset, show Azure AD sign-in activity by user, IP address, app, and login status.",
+    "expected_intent": "aad_signin_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:aad:signin"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:aad:signin",
+      "spath",
+      "userprincipalname",
+      "ipaddress",
+      "appdisplayname",
+      "loginstatus"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=azure:ad:signins"
+    ],
+    "required_result_fields": [
+      "userPrincipalName",
+      "ipAddress",
+      "appDisplayName",
+      "loginStatus",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1078"
+    ],
+    "min_mitre_pivots": 2
+  },
+  {
+    "id": "botsv3_stream_dns_all_time",
+    "family": "stream_dns_activity",
+    "question": "Across the full BOTSv3 dataset, show DNS activity from stream:dns by query name, reply code, source IP, and destination IP.",
+    "expected_intent": "stream_dns_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=stream:dns"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=stream:dns",
+      "spath",
+      "reply_code",
+      "src_ip",
+      "dest_ip"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "query",
+      "reply_code",
+      "src_ip",
+      "dest_ip",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [],
+    "min_mitre_pivots": 0
+  },
+  {
+    "id": "botsv3_o365_management_all_time",
+    "family": "o365_management_activity",
+    "question": "Across the full BOTSv3 dataset, show Office 365 management activity by user, operation, workload, and client IP.",
+    "expected_intent": "o365_management_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=ms:o365:management"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=ms:o365:management",
+      "spath",
+      "userid",
+      "operation",
+      "workload",
+      "clientip"
+    ],
+    "forbidden_query_terms": [
+      "sourcetype=ms:aad:signin"
+    ],
+    "required_result_fields": [
+      "UserId",
+      "Operation",
+      "Workload",
+      "ClientIP",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [],
+    "min_mitre_pivots": 0
+  },
+  {
+    "id": "botsv3_windows_process_all_time",
+    "family": "windows_process_activity",
+    "question": "Across the full BOTSv3 dataset, show Windows process creation activity with image, command line, user, and parent image.",
+    "expected_intent": "windows_process_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=xmlwineventlog"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=xmlwineventlog",
+      "Image",
+      "CommandLine",
+      "ParentImage",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "Computer",
+      "Image",
+      "CommandLine",
+      "User",
+      "ParentImage",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [],
+    "min_mitre_pivots": 0
+  },
+  {
+    "id": "botsv3_linux_audit_all_time",
+    "family": "linux_audit_activity",
+    "question": "Across the full BOTSv3 dataset, show Linux audit activity by host, audit type, operation, and result.",
+    "expected_intent": "linux_audit_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=botsv3"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=linux_audit"
+    ],
+    "required_query_terms": [
+      "index=botsv3",
+      "sourcetype=linux_audit",
+      "audit_type",
+      "audit_op",
+      "audit_res",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "host",
+      "audit_type",
+      "audit_op",
+      "audit_res",
+      "count"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "0",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [],
+    "min_mitre_pivots": 0
+  },
+  {
+    "id": "linux_auth_failures_24h",
+    "family": "linux_auth_failures",
+    "question": "Show failed SSH login activity in the last 24 hours on my linux systems. Identify the top source IPs, usernames targeted, ports used, and which host is being targeted most.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "auth.log",
+      "Invalid user",
+      "stats",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "forbidden_query_terms": [
+      "match(_raw",
+      "case(match(",
+      "index=*"
+    ],
+    "required_result_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1110"
+    ],
+    "min_mitre_pivots": 3
+  },
+  {
+    "id": "linux_auth_failures_24h_variant",
+    "family": "linux_auth_failures",
+    "question": "Investigate repeated failed SSH login attempts on my linux hosts over the last 24 hours and show the top usernames, source IPs, and ports.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "Invalid user",
+      "stats",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "access_combined"
+    ],
+    "required_result_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1110"
+    ],
+    "min_mitre_pivots": 3
+  },
+  {
+    "id": "linux_auth_failures_7d",
+    "family": "linux_auth_failures",
+    "question": "Show failed login activity in the last 7 days on my linux machines.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "stats",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "forbidden_query_terms": [
+      "index=*"
+    ],
+    "required_result_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1110"
+    ],
+    "min_mitre_pivots": 3
+  },
+  {
+    "id": "linux_auth_failures_today",
+    "family": "linux_auth_failures",
+    "question": "Show linux authentication failures today.",
+    "expected_intent": "linux_auth_failures",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "stats"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "access_combined"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1110"
+    ],
+    "min_mitre_pivots": 3
+  },
+  {
+    "id": "windows_failed_logons_24h",
+    "family": "windows_auth_failures",
+    "question": "Show failed login activity in the last 24 hours in windows.",
+    "expected_intent": "windows_auth_failures",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "XmlWinEventLog",
+      "4625",
+      "| table",
+      "user_name",
+      "src_ip"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by user_name src_ip"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-24h",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1110"
+    ],
+    "min_mitre_pivots": 3
+  },
+  {
+    "id": "windows_failed_logons_7d",
+    "family": "windows_auth_failures",
+    "question": "Show failed logon attempts on Windows systems in the last 7 days and preserve the evidence rows.",
+    "expected_intent": "windows_auth_failures",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "XmlWinEventLog",
+      "4625",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "| stats count by user_name src_ip"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1110"
+    ],
+    "min_mitre_pivots": 3
+  },
+  {
+    "id": "windows_failed_logons_today_hosts",
+    "family": "windows_auth_failures",
+    "question": "Which Windows hosts had the most authentication failures today?",
+    "expected_intent": "windows_auth_failures",
+    "expected_shape": "table",
+    "preferred_indexes": [
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "XmlWinEventLog",
+      "4625",
+      "| table"
+    ],
+    "forbidden_query_terms": [
+      "index=*",
+      "auth.log"
+    ],
+    "required_result_fields": [
+      "host"
+    ],
+    "allow_zero_rows": true,
+    "min_rows": 0,
+    "expected_earliest_time": "@d",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1110"
+    ],
+    "min_mitre_pivots": 3
+  },
+  {
+    "id": "mixed_failed_logons_7d",
+    "family": "cross_platform_auth_failures",
+    "question": "Show failed login activity in the last 7 days on my windows or linux machines.",
+    "expected_intent": "failed_login_activity",
+    "expected_shape": "stats",
+    "preferred_indexes": [
+      "index=linux",
+      "index=windows",
+      "index=windows_sysmon"
+    ],
+    "preferred_sourcetypes": [
+      "sourcetype=auth.log",
+      "sourcetype=auth-4",
+      "sourcetype=linux_secure",
+      "sourcetype=XmlWinEventLog"
+    ],
+    "required_query_terms": [
+      "index=linux",
+      "index=windows",
+      "4625",
+      "stats"
+    ],
+    "forbidden_query_terms": [],
+    "required_result_fields": [
+      "index",
+      "host",
+      "sourcetype"
+    ],
+    "allow_zero_rows": false,
+    "min_rows": 1,
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now",
+    "expected_mitre_techniques": [
+      "T1110"
+    ],
+    "min_mitre_pivots": 3
+  }
+]

@@ -43,8 +43,8 @@ FORBIDDEN_SNIPPET_TERMS = (
 
 QUESTION_HINTS: dict[str, tuple[str, ...]] = {
     "failed_login": ("failed", "authentication", "user", "stats", "auth"),
-    "linux_auth": ("linux", "/var/log/auth.log", "auth-too_small", "failed password", "auth", "stats"),
-    "linux_priv": ("/var/log/auth.log", "auth-too_small", "sudo", "su", "failed", "stats"),
+    "linux_auth": ("linux", "/var/log/auth.log", "/var/log/secure", "failed password", "auth", "stats"),
+    "linux_priv": ("/var/log/auth.log", "/var/log/secure", "sudo", "su", "failed", "stats"),
     "apache_access": ("access_combined", "clientip", "status", "web", "stats"),
     "apache_404": ("access_combined", "404", "timechart", "status", "web"),
     "powershell": ("eventcode=4688", "powershell", "process_command_line", "encodedcommand"),

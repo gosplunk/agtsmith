@@ -1802,9 +1802,9 @@
     "expected_latest_time": "now"
   },
   {
-    "id": "linux_sudo_sessions_pidx_hosts",
+    "id": "linux_sudo_sessions_named_hosts",
     "family": "linux_privilege_escalation_activity",
-    "question": "Investigate sudo and su activity on pidx1 and pidx3 over the last 30 days. Show the process type, actor, target user, and commands executed.",
+    "question": "Investigate sudo and su activity on linux-host-a and linux-host-b over the last 30 days. Show the process type, actor, target user, and commands executed.",
     "expected_intent": "linux_privilege_escalation_activity",
     "expected_shape": "table",
     "preferred_indexes": [
@@ -1818,7 +1818,7 @@
     "required_query_terms": [
       "sudo:",
       "su:",
-      "host IN (pidx1,pidx3)",
+      "host IN (linux-host-a,linux-host-b)",
       "process_name",
       "actor",
       "target_user",
@@ -1841,9 +1841,9 @@
     "expected_latest_time": "now"
   },
   {
-    "id": "linux_su_success_test_user_pidx3",
+    "id": "linux_su_success_test_user_host_b",
     "family": "linux_privilege_escalation_activity",
-    "question": "Show successful su activity to agtsmith_test on pidx3 in the last 3 hours.",
+    "question": "Show successful su activity to agtsmith_test on linux-host-b in the last 3 hours.",
     "expected_intent": "linux_privilege_escalation_activity",
     "expected_shape": "table",
     "preferred_indexes": [
@@ -1855,7 +1855,7 @@
       "sourcetype=linux_secure"
     ],
     "required_query_terms": [
-      "host IN (pidx3)",
+      "host IN (linux-host-b)",
       "process_name",
       "outcome",
       "actor",
@@ -1878,9 +1878,9 @@
     "expected_latest_time": "now"
   },
   {
-    "id": "linux_non_sudoer_failure_pidx3",
+    "id": "linux_non_sudoer_failure_host_b",
     "family": "linux_privilege_escalation_activity",
-    "question": "Show non-sudoer privilege failures for agtsmith_test on pidx3 in the last 3 hours.",
+    "question": "Show non-sudoer privilege failures for agtsmith_test on linux-host-b in the last 3 hours.",
     "expected_intent": "linux_privilege_escalation_activity",
     "expected_shape": "table",
     "preferred_indexes": [
@@ -1892,7 +1892,7 @@
       "sourcetype=linux_secure"
     ],
     "required_query_terms": [
-      "host IN (pidx3)",
+      "host IN (linux-host-b)",
       "process_name",
       "outcome",
       "actor",
@@ -1914,9 +1914,9 @@
     "expected_latest_time": "now"
   },
   {
-    "id": "linux_failed_sudo_pidx1_2h",
+    "id": "linux_failed_sudo_host_a_7d",
     "family": "linux_privilege_escalation",
-    "question": "Show failed sudo attempts on pidx1 in the last 7 days.",
+    "question": "Show failed sudo attempts on linux-host-a in the last 7 days.",
     "expected_intent": "linux_privilege_escalation",
     "expected_shape": "stats",
     "preferred_indexes": [
@@ -1928,7 +1928,7 @@
       "sourcetype=linux_secure"
     ],
     "required_query_terms": [
-      "host IN (pidx1)",
+      "host IN (linux-host-a)",
       "pam_unix(sudo:auth): authentication failure",
       "stats",
       "actor",
@@ -1949,9 +1949,9 @@
     "expected_latest_time": "now"
   },
   {
-    "id": "linux_failed_sudo_pidx3_2h",
+    "id": "linux_failed_sudo_host_b_7d",
     "family": "linux_privilege_escalation",
-    "question": "Show failed sudo attempts on pidx3 in the last 7 days.",
+    "question": "Show failed sudo attempts on linux-host-b in the last 7 days.",
     "expected_intent": "linux_privilege_escalation",
     "expected_shape": "stats",
     "preferred_indexes": [
@@ -1963,7 +1963,7 @@
       "sourcetype=linux_secure"
     ],
     "required_query_terms": [
-      "host IN (pidx3)",
+      "host IN (linux-host-b)",
       "pam_unix(sudo:auth): authentication failure",
       "process_name",
       "stats"
@@ -1983,9 +1983,9 @@
     "expected_latest_time": "now"
   },
   {
-    "id": "linux_failed_su_pidx3_2h",
+    "id": "linux_failed_su_host_b_7d",
     "family": "linux_privilege_escalation",
-    "question": "Show failed su attempts on pidx3 in the last 7 days.",
+    "question": "Show failed su attempts on linux-host-b in the last 7 days.",
     "expected_intent": "linux_privilege_escalation",
     "expected_shape": "stats",
     "preferred_indexes": [
@@ -1997,7 +1997,7 @@
       "sourcetype=linux_secure"
     ],
     "required_query_terms": [
-      "host IN (pidx3)",
+      "host IN (linux-host-b)",
       "pam_unix(su:auth): authentication failure",
       "process_name",
       "stats"

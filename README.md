@@ -1,6 +1,6 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.1.0`
+Current release: `v1.2.0`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
@@ -68,6 +68,15 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - Grounded in local environment metadata, Data Domains, and curated SPL references
 - Built to be tuned empirically with benchmarks and evals
 
+## What's New In v1.2.0
+- redesigned the Investigation workspace into a desktop-first two-column layout with a sticky control rail and dominant results column
+- added richer ATT&CK investigation support: hover definitions, ATT&CK pivots, follow-on technique context, persisted ATT&CK bundles, and model-backed ATT&CK validation
+- improved investigation state handling so in-progress runs show pending state and zero-row completions produce a bounded no-evidence outcome
+- improved follow-up usability with a Pivot Drawer, visually distinct follow-up execution, hidden-by-default advanced controls, and collapsed SPL sample results
+- added ATT&CK logic benchmarks for BOTSv3-oriented investigation logic validation
+- added built-in HTTPS support and masked Splunk token handling in Configuration
+- sanitized shipped defaults so environment-specific URLs and local learned assumptions are not baked into the public repo
+
 ## What's New In v1.1.0
 - Guarded local learning with reviewable, airgapped environment-specific memory
 - Stronger Linux auth, Windows auth, Apache, and mixed-platform investigation handling
@@ -116,6 +125,14 @@ export AGTSMITH_UID=$(id -u)
 export AGTSMITH_GID=$(id -g)
 ```
 
+### HTTPS
+The built-in web server can now serve HTTPS directly when both of these environment variables are provided to the runtime:
+
+- `AGTSMITH_TLS_CERT_FILE`
+- `AGTSMITH_TLS_KEY_FILE`
+
+For trusted browser sessions on real hosts, the recommended deployment pattern is still a reverse proxy with a certificate chain the browser already trusts.
+
 ## First-Time Setup
 The recommended path is Docker-first.
 
@@ -138,6 +155,7 @@ Deployment notes:
 ## Key Routes
 - Investigation UI: `/investigation`
 - MCP Chat: `/mcp`
+- Local Learning: `/learning`
 - Configuration: `/configure`
 - Architecture: `/architecture`
 - LangGraph Graph: `/langgraph-graph`
@@ -199,6 +217,14 @@ make langgraph-topology-optimize
 ```
 
 These runs are meant to answer a practical question: does the workflow actually improve when you change the topology, prompts, or model split?
+
+### ATT&CK logic benchmark
+```bash
+python3 scripts/build_attack_logic_benchmark_pack.py
+python3 scripts/run_attack_logic_benchmark.py
+```
+
+This benchmark track validates ATT&CK-oriented investigation logic, pivot generation, and technique mapping without treating BOTSv3 as modern threat ground truth.
 
 ## BOTSv3
 BOTSv3 is included as a separate benchmark track, not as a production assumption. Its timestamps are historical, so those cases use explicit all-time handling only when the question says so.

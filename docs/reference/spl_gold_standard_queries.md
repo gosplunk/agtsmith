@@ -19,7 +19,7 @@ search index=* NOT index=_* (eventtype=failed_login OR info=failed OR action=fai
 ```
 
 ## Linux Failed Login
-Use the live auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. Keep bounded `rex` fallbacks in the query so `auth-too_small`, `linux_secure`, or other parser variants still remain usable when field extraction is uneven.
+Use the live auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. Keep bounded `rex` fallbacks in the query so `linux_secure`, `auth.log`, or other auth-log parser variants still remain usable when field extraction is uneven.
 ```spl
 search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("Failed password" OR "authentication failure" OR "Invalid user" OR "Connection closed by invalid user" OR "FAILED SU")
 | stats count by host user src_ip port
@@ -60,7 +60,7 @@ search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("su
 
 When the analyst explicitly names hosts, prepend a host scope such as:
 ```spl
-search host IN (pidx1,pidx3) index=linux ...
+search host IN (linux-host-a,linux-host-b) index=linux ...
 ```
 
 ## Linux First-Seen Privilege Escalation

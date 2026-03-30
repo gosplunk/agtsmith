@@ -141,6 +141,338 @@ def _load_app_version() -> str:
 
 APP_VERSION = _load_app_version()
 APP_VERSION_LABEL = APP_VERSION if APP_VERSION.startswith("v") else f"v{APP_VERSION}"
+TOKEN_MASK_SENTINEL = "__KEEP_EXISTING_SPLUNK_TOKEN__"
+DEFAULT_MITRE_VALIDATOR_MODEL = "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+
+
+def _mask_secret_display(value: str, visible_suffix: int = 4) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if len(raw) <= visible_suffix:
+        return "*" * len(raw)
+    return ("*" * max(8, len(raw) - visible_suffix)) + raw[-visible_suffix:]
+
+
+def _resolve_config_value_for_merge(key: str, incoming: Any, current_values: dict[str, str]) -> str:
+    value = str(incoming if incoming is not None else "").strip()
+    if key == "SPLUNK_LAB_BEARER_TOKEN" and value == TOKEN_MASK_SENTINEL:
+        return get_runtime_secret("SPLUNK_LAB_BEARER_TOKEN", "")
+    return value
+
+
+def _splunk_search_url_base() -> str:
+    values = parse_env_file(UI_ENV_PATH)
+    if isinstance(values, tuple):
+        values = values[0]
+    values = values if isinstance(values, dict) else {}
+    explicit = str(values.get("SPLUNK_WEB_URL", "")).strip().rstrip("/")
+    if explicit:
+        return f"{explicit}/en-US/app/search/search"
+    base = str(values.get("SPLUNK_BASE_URL", "")).strip().rstrip("/") or str(get_splunk_base_url()).strip().rstrip("/")
+    if not base:
+        return ""
+    parsed = urlparse(base)
+    if not parsed.scheme or not parsed.hostname:
+        return ""
+    scheme = parsed.scheme or "https"
+    host = parsed.hostname
+    return f"{scheme}://{host}:8000/en-US/app/search/search"
+
+
+def _extract_json_object(raw_text: str) -> dict[str, Any]:
+    cleaned = str(raw_text or "").strip()
+    if not cleaned:
+        raise ValueError("empty_model_output")
+    try:
+        direct = json.loads(cleaned)
+        if isinstance(direct, dict):
+            return direct
+    except Exception:
+        pass
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", cleaned):
+        try:
+            obj, _end = decoder.raw_decode(cleaned[match.start() :])
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    raise ValueError("json_object_not_found")
+
+
+def _call_ollama_json(*, model: str, system_prompt: str, user_payload: dict[str, Any], timeout: float = 90.0) -> dict[str, Any]:
+    ollama_host = str(get_ollama_host()).strip().rstrip("/")
+    payload = {
+        "model": model,
+        "prompt": (
+            f"{system_prompt}\n\n"
+            "Return strict JSON only. No prose.\n\n"
+            f"INPUT:\n{json.dumps(user_payload, indent=2)}"
+        ),
+        "stream": False,
+        "think": False,
+    }
+    req = urllib.request.Request(
+        f"{ollama_host}/api/generate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    raw = str(body.get("response") or "").strip()
+    parsed = _extract_json_object(raw)
+    parsed["_raw_text_preview"] = raw[:1200]
+    return parsed
+
+
+def _mitre_validator_model() -> str:
+    parsed = parse_env_file(UI_ENV_PATH)
+    values = parsed[0] if isinstance(parsed, tuple) else parsed
+    if not isinstance(values, dict):
+        values = {}
+    preferred = str(values.get("OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER", "")).strip()
+    if preferred:
+        return preferred
+    fallback = str(values.get("OLLAMA_MODEL_FINAL_SUMMARY", "")).strip()
+    return fallback or DEFAULT_MITRE_VALIDATOR_MODEL
+
+
+def _mitre_attack_validate(result: dict[str, Any], bundle: dict[str, Any]) -> dict[str, Any]:
+    techniques = bundle.get("techniques", []) if isinstance(bundle.get("techniques"), list) else []
+    if not techniques:
+        return {"status": "skipped", "reason": "no_deterministic_mapping"}
+    model = _mitre_validator_model()
+    summary = str(result.get("summary", "")).strip()
+    question = str(result.get("question") or result.get("root_question") or "").strip()
+    intent = str(result.get("intent", "")).strip()
+    evidence = result.get("evidence", {}) if isinstance(result.get("evidence"), dict) else {}
+    top_entities = evidence.get("top_entities", []) if isinstance(evidence.get("top_entities"), list) else []
+    key_findings = []
+    evidence_reviewer = result.get("evidence_reviewer", {}) if isinstance(result.get("evidence_reviewer"), dict) else {}
+    evidence_output = evidence_reviewer.get("output", {}) if isinstance(evidence_reviewer.get("output"), dict) else {}
+    if isinstance(evidence_output.get("key_findings"), list):
+        key_findings = [str(item).strip() for item in evidence_output.get("key_findings", [])[:6] if str(item).strip()]
+    payload = {
+        "question": question,
+        "intent": intent,
+        "summary": summary,
+        "deterministic_bundle": bundle,
+        "evidence_key_findings": key_findings,
+        "top_entities": top_entities[:5],
+    }
+    system = (
+        "You are a MITRE ATT&CK validation reviewer for a Splunk SOC investigation. "
+        "Review the deterministic ATT&CK mapping and judge whether it matches the evidence. "
+        "Do not invent unsupported claims. If uncertain, stay conservative. "
+        "Return JSON with keys: agreement, confidence, rationale, kill_chain_context, "
+        "validated_techniques, alternate_techniques. "
+        "agreement must be one of: agree, partial, disagree. "
+        "validated_techniques and alternate_techniques must be arrays of objects with keys: tactic, technique, technique_id, why."
+    )
+    try:
+        raw = _call_ollama_json(model=model, system_prompt=system, user_payload=payload)
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "model": model,
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+    validated = raw.get("validated_techniques", [])
+    alternates = raw.get("alternate_techniques", [])
+    kill_chain_context = raw.get("kill_chain_context", "")
+    if isinstance(kill_chain_context, dict):
+        kill_chain_context = " | ".join(
+            f"{k}={v}" for k, v in kill_chain_context.items() if str(v).strip()
+        )
+    elif isinstance(kill_chain_context, list):
+        kill_chain_context = " | ".join(str(item).strip() for item in kill_chain_context if str(item).strip())
+    return {
+        "status": "ok",
+        "model": model,
+        "agreement": str(raw.get("agreement", "")).strip() or "partial",
+        "confidence": str(raw.get("confidence", "")).strip() or "medium",
+        "rationale": str(raw.get("rationale", "")).strip(),
+        "kill_chain_context": str(kill_chain_context).strip(),
+        "validated_techniques": [item for item in validated if isinstance(item, dict)][:5],
+        "alternate_techniques": [item for item in alternates if isinstance(item, dict)][:5],
+        "_raw_text_preview": str(raw.get("_raw_text_preview", "")).strip(),
+    }
+
+
+def _mitre_attack_bundle(result: dict[str, Any]) -> dict[str, Any]:
+    intent = str(result.get("intent", "")).strip().lower()
+    summary = str(result.get("summary", "")).lower()
+    mappings: list[dict[str, str]] = []
+    next_pivots: list[str] = []
+    progression: list[dict[str, str]] = []
+    frame = ""
+
+    def add(
+        tactic: str,
+        technique: str,
+        technique_id: str,
+        rationale: str,
+        confidence: str = "medium",
+        definition: str = "",
+    ) -> None:
+        entry = {
+            "tactic": tactic,
+            "technique": technique,
+            "technique_id": technique_id,
+            "confidence": confidence,
+            "rationale": rationale,
+            "definition": definition,
+        }
+        if entry not in mappings:
+            mappings.append(entry)
+    def add_pivot(text: str) -> None:
+        value = str(text or "").strip()
+        if value and value not in next_pivots:
+            next_pivots.append(value)
+    def add_progression(tactic: str, technique: str, technique_id: str, why: str) -> None:
+        entry = {"tactic": tactic, "technique": technique, "technique_id": technique_id, "why": why}
+        if entry not in progression:
+            progression.append(entry)
+
+    if intent in {"failed_login_activity", "linux_auth_failures", "windows_auth_failures"}:
+        add(
+            "Credential Access",
+            "Brute Force",
+            "T1110",
+            "Failed login investigation paths map to repeated authentication failure and credential guessing activity.",
+            "high",
+            "Adversaries may use repeated login attempts or password guessing to gain access to accounts.",
+        )
+        add_pivot("Check for successful logons from the same source IPs after the failures.")
+        add_pivot("Pivot by username across Linux and Windows to detect cross-platform credential guessing.")
+        add_pivot("Review the same sources for privilege escalation or administrative logon activity after the failures.")
+        add_progression("Defense Evasion", "Valid Accounts", "T1078", "Repeated failed logons are often followed by successful account use if credentials are eventually guessed or reused.")
+    if intent in {"linux_privilege_escalation", "linux_privilege_escalation_activity", "linux_privilege_escalation_first_seen"}:
+        add(
+            "Privilege Escalation",
+            "Abuse Elevation Control Mechanism",
+            "T1548",
+            "Linux sudo/su investigation paths align to privilege-escalation control abuse patterns.",
+            "medium",
+            "Adversaries may abuse elevation controls such as sudo or UAC-style mechanisms to gain higher privileges.",
+        )
+        add_pivot("Review the parent authentication events and source users immediately before the sudo or su activity.")
+        add_pivot("Check whether the same user or host showed failed logins before the elevation attempt.")
+        add_progression("Execution", "Command and Scripting Interpreter", "T1059", "Privilege escalation frequently precedes interactive shell or command execution activity.")
+    if intent in {"apache_access_top_ips", "apache_404_spike", "apache_suspicious_user_agents"} or "enumeration" in summary or "scanning" in summary:
+        add(
+            "Reconnaissance",
+            "Active Scanning",
+            "T1595",
+            "Apache anomaly investigation and 404-heavy probing patterns align to active scanning and web reconnaissance.",
+            "high",
+            "Adversaries may probe public-facing services and applications to identify exposed targets and weaknesses.",
+        )
+        add_pivot("Pivot into requested URI paths and user-agent strings for the most active source IPs.")
+        add_pivot("Check whether the same source IPs touched authentication endpoints, admin panels, or sensitive files.")
+        add_progression("Initial Access", "Exploit Public-Facing Application", "T1190", "Web reconnaissance commonly precedes exploitation attempts against exposed applications.")
+    if "cloudtrail" in intent or "cloudtrail" in summary:
+        add(
+            "Discovery",
+            "Cloud Service Discovery",
+            "T1526",
+            "CloudTrail activity reviews often center on cloud service enumeration and event/service usage patterns.",
+            "medium",
+            "Adversaries may enumerate cloud services, APIs, and service usage to understand the environment.",
+        )
+        add_pivot("Pivot by userIdentity, sourceIPAddress, and eventName to separate routine management from unusual cloud discovery behavior.")
+        add_pivot("Review eventSource and service combinations around the same timeframe for escalation or persistence changes.")
+        add_progression("Persistence", "Account Manipulation", "T1098", "Cloud discovery activity can precede IAM policy or account changes.")
+    if intent in {"cisco_asa_network_flows", "aws_vpc_flow_activity"}:
+        add(
+            "Discovery",
+            "Network Service Discovery",
+            "T1046",
+            "Network flow investigations often align to identifying scanning, service probing, and destination-port targeting behavior.",
+            "medium",
+            "Adversaries may attempt to determine which network services are available by probing ports and destinations.",
+        )
+        add_pivot("Review the most active source IPs across destination ports and actions to identify scanning or service targeting patterns.")
+        add_pivot("Pivot from repeated denied flows to any later accepted connections from the same source.")
+        add_progression("Reconnaissance", "Active Scanning", "T1595", "Network flow patterns can reflect broader scanning or external reconnaissance before exploitation.")
+    if intent in {"stream_http_activity"}:
+        add(
+            "Command and Control",
+            "Web Protocols",
+            "T1071.001",
+            "HTTP telemetry investigations often align to suspicious web-based beaconing, outbound activity, or misuse of common web protocols.",
+            "medium",
+            "Adversaries may communicate over HTTP or HTTPS to blend malicious traffic into normal web activity.",
+        )
+        add_pivot("Pivot by destination site, user agent, and URI path to separate routine browsing from repeated suspicious HTTP behavior.")
+        add_pivot("Check whether the same clients also made DNS queries or network connections that support command-and-control hypotheses.")
+        add_progression("Command and Control", "Ingress Tool Transfer", "T1105", "Suspicious web activity can precede or accompany payload download and staging behavior.")
+    if intent in {"aad_signin_activity"}:
+        add(
+            "Defense Evasion",
+            "Valid Accounts",
+            "T1078",
+            "Azure AD sign-in investigations often focus on whether known credentials or identities are being used in suspicious ways across apps and IPs.",
+            "medium",
+            "Adversaries may use valid accounts to blend into normal identity activity and bypass simple detection rules.",
+        )
+        add_pivot("Pivot by user, app, IP address, and sign-in status to separate expected identity use from suspicious account activity.")
+        add_pivot("Review impossible-travel, unfamiliar app access, and repeated failure-to-success transitions for the same user.")
+        add_progression("Persistence", "Account Manipulation", "T1098", "Suspicious identity use can lead into account changes, consent grants, or policy modification.")
+    if intent in {"osquery_process_activity"}:
+        add(
+            "Execution",
+            "Command and Scripting Interpreter",
+            "T1059",
+            "Process monitoring investigations often focus on command-line execution, script launches, and suspicious spawned processes.",
+            "medium",
+            "Adversaries may abuse command interpreters or scripting engines to execute payloads and drive follow-on actions.",
+        )
+        add_pivot("Pivot by host, process path, parent process, and command line to identify unusual execution chains.")
+        add_pivot("Review whether the same process paths also appear in network, DNS, or privilege-escalation telemetry.")
+        add_progression("Defense Evasion", "Masquerading", "T1036", "Unexpected process paths and command lines can indicate disguised or renamed binaries.")
+    if "credential" in summary:
+        add(
+            "Credential Access",
+            "Credentials from Password Stores",
+            "T1555",
+            "Credential-related summaries often indicate authentication or credential access investigation paths.",
+            "low",
+            "Adversaries may obtain credentials from local or cloud password stores and identity artifacts.",
+        )
+    if mappings:
+        primary = mappings[0]
+        frame = (
+            f"Observed behavior aligns most strongly to {primary['tactic']} / "
+            f"{primary['technique']} ({primary['technique_id']}). "
+            "Use the suggested pivots to test whether the activity progressed into adjacent ATT&CK techniques."
+        )
+    return {
+        "techniques": mappings,
+        "next_pivots": next_pivots,
+        "possible_progression": progression,
+        "frame": frame,
+    }
+
+
+def _persist_mitre_bundle_to_artifact(artifact_path: str, mitre_bundle: dict[str, Any]) -> None:
+    target = Path(str(artifact_path or "").strip())
+    if not target.exists():
+        return
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    result = payload.get("result", {})
+    if not isinstance(result, dict):
+        return
+    result["mitre_attack"] = mitre_bundle
+    payload["result"] = result
+    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _default_expected_models() -> list[str]:
@@ -1209,6 +1541,8 @@ def _config_snapshot() -> dict[str, Any]:
         if model not in unique_models:
             unique_models.append(model)
     token = values.get("SPLUNK_LAB_BEARER_TOKEN", "")
+    token_display = TOKEN_MASK_SENTINEL if token else ""
+    token_masked = _mask_secret_display(token)
     edge_enabled = values.get("EDGE_LLM_ENABLED", "0") == "1"
     edge_host = values.get("EDGE_LLM_HOST", "").strip().rstrip("/")
     edge_model = values.get("EDGE_LLM_MODEL", "").strip()
@@ -1221,7 +1555,7 @@ def _config_snapshot() -> dict[str, Any]:
                     "mcp-remote",
                     values.get("SPLUNK_MCP_URL", ""),
                     "--header",
-                    f"Authorization: Bearer {token}",
+                    f"Authorization: Bearer {token_masked or '<masked>'}",
                 ],
             }
         }
@@ -1234,7 +1568,11 @@ def _config_snapshot() -> dict[str, Any]:
         "environment_profile_refresh": _environment_profile_refresh_status(),
         "personalization": _personalization_status(),
         "local_learning": _local_learning_status(),
-        "values": values,
+        "values": {**values, "SPLUNK_LAB_BEARER_TOKEN": token_display},
+        "secret_state": {
+            "splunk_token_present": bool(token),
+            "splunk_token_masked": token_masked,
+        },
         "expected_models": expected_models,
         "ollama_pull_commands": [f"ollama pull {model}" for model in expected_models],
         "assigned_model_pull_commands": [f"ollama pull {model}" for model in unique_models],
@@ -1250,7 +1588,7 @@ def _config_snapshot() -> dict[str, Any]:
             "edge_ollama_tags": f"curl {edge_host}/api/tags" if edge_enabled and edge_host else "",
             "splunk_mcp": (
                 "curl -k -i -H "
-                f"\"Authorization: Bearer {token}\" "
+                f"\"Authorization: Bearer {token_masked or '<masked>'}\" "
                 f"{values.get('SPLUNK_MCP_URL', get_splunk_mcp_url())}"
             ),
         },
@@ -1711,7 +2049,7 @@ APP_HTML = """<!doctype html>
       background-size:cover;
       color:var(--fg);
     }
-    .wrap { max-width: 1220px; min-height:calc(100vh - 48px); margin: 24px auto; padding: 0 16px 24px; box-sizing:border-box; }
+    .wrap { max-width: 1680px; min-height:calc(100vh - 48px); margin: 24px auto; padding: 0 24px 32px; box-sizing:border-box; }
     .topnav {
       display:flex;
       flex-wrap:nowrap;
@@ -1840,12 +2178,46 @@ APP_HTML = """<!doctype html>
       color:#9fb4cc;
     }
     .stack { display:grid; grid-template-columns: 1fr; gap:14px; align-items:start; }
+    .invest-shell {
+      display:grid;
+      grid-template-columns:minmax(360px, 408px) minmax(0, 1fr);
+      gap:24px;
+      align-items:start;
+    }
+    .invest-sidebar { min-width:0; }
+    .invest-sidebar-inner {
+      position:sticky;
+      top:88px;
+    }
+    .invest-main { min-width:0; }
     .card {
       background: rgba(17,24,39,.93);
       border:1px solid var(--line);
       border-radius: 14px;
       padding: 16px;
       box-shadow: 0 12px 30px rgba(0,0,0,.30);
+    }
+    .control-rail {
+      padding:18px;
+      border-color:#28445d;
+      background:linear-gradient(180deg,#0b1625,#08111d);
+    }
+    .control-rail .hero-head {
+      grid-template-columns:1fr;
+      gap:10px;
+      margin-bottom:12px;
+    }
+    .control-rail button {
+      width:100%;
+      justify-content:center;
+    }
+    .results-shell {
+      display:grid;
+      gap:16px;
+    }
+    .results-card {
+      padding:18px 18px 20px;
+      background:linear-gradient(180deg,#0a1422,#07111d);
     }
     .hero-head {
       display:grid;
@@ -1911,6 +2283,9 @@ APP_HTML = """<!doctype html>
     }
     textarea { min-height: 100px; }
     .row { display:grid; grid-template-columns: 1fr 160px 180px 220px; gap:10px; }
+    .control-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; margin-top:10px; }
+    .control-grid > div { min-width:0; }
+    .control-grid .wide { grid-column:1 / -1; }
     .row-ops { display:none; }
     .ops-field { min-width: 0; }
     .ops-field.wide { grid-column: span 2; }
@@ -1949,6 +2324,15 @@ APP_HTML = """<!doctype html>
     }
     .btn-secondary:hover {
       box-shadow:0 14px 28px rgba(8,23,37,.34), inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .btn-followup {
+      background:linear-gradient(135deg,#38bdf8,#0ea5e9);
+      color:#041723;
+      border-color:rgba(186,230,253,.24);
+      box-shadow:0 10px 22px rgba(14,165,233,.22), inset 0 1px 0 rgba(255,255,255,.18);
+    }
+    .btn-followup:hover {
+      box-shadow:0 14px 28px rgba(14,165,233,.30), inset 0 1px 0 rgba(255,255,255,.2);
     }
     .btn-danger { background:#7f1d1d; color:#fee2e2; }
     button:disabled { opacity:.6; cursor:wait; }
@@ -2147,6 +2531,52 @@ APP_HTML = """<!doctype html>
       color:#ffffff;
       font-weight:800;
     }
+    .summary-section {
+      margin-bottom:14px;
+      padding:12px 14px;
+      border:1px solid #22384f;
+      border-radius:12px;
+      background:#081729;
+    }
+    .summary-section:last-child { margin-bottom:0; }
+    .summary-section-title {
+      color:#f8fafc;
+      font-size:12px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      margin-bottom:8px;
+    }
+    .summary-section-copy {
+      color:#dbeafe;
+      font-size:14px;
+      line-height:1.65;
+    }
+    .summary-bullets {
+      margin:0;
+      padding-left:18px;
+      display:grid;
+      gap:8px;
+    }
+    .summary-bullets li {
+      color:#e5eefc;
+      line-height:1.55;
+    }
+    .summary-callout {
+      border-color:#2f6b95;
+      background:linear-gradient(180deg,#0b1b2b,#081729);
+    }
+    .summary-callout .summary-section-title {
+      color:#bde6ff;
+    }
+    .summary-critical {
+      border-color:#16a34a;
+      background:linear-gradient(180deg,#0d1f17,#091712);
+      box-shadow:0 0 0 1px rgba(34,197,94,.14);
+    }
+    .summary-critical .summary-section-title {
+      color:#bbf7d0;
+    }
     .tdir-label {
       color:#8fb6d9;
       font-size:11px;
@@ -2276,6 +2706,36 @@ APP_HTML = """<!doctype html>
       border-radius:10px;
       padding:8px;
       margin-bottom:8px;
+    }
+    .spl-toggle {
+      margin-top:8px;
+      border:1px solid #22384f;
+      border-radius:10px;
+      background:#081729;
+      padding:8px 10px;
+    }
+    .spl-toggle summary {
+      cursor:pointer;
+      list-style:none;
+      outline:none;
+      color:#dbeafe;
+      font-size:13px;
+      font-weight:700;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .spl-toggle summary::-webkit-details-marker { display:none; }
+    .spl-toggle summary::after {
+      content:"Show";
+      color:#9fb4cc;
+      font-size:12px;
+      font-weight:800;
+    }
+    .spl-toggle[open] summary::after { content:"Hide"; }
+    .spl-toggle-body {
+      margin-top:8px;
     }
     .section-head {
       display:flex;
@@ -2438,12 +2898,421 @@ APP_HTML = """<!doctype html>
       font-size:12px;
       font-weight:700;
     }
+    .toggle-row{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      min-height:44px;
+    }
+    .switch{
+      position:relative;
+      display:inline-block;
+      width:54px;
+      height:30px;
+      flex:0 0 auto;
+    }
+    .switch input{
+      opacity:0;
+      width:0;
+      height:0;
+      position:absolute;
+    }
+    .slider{
+      position:absolute;
+      inset:0;
+      cursor:pointer;
+      background:#0f2233;
+      border:1px solid #315a79;
+      transition:.2s ease;
+      border-radius:999px;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+    }
+    .slider:before{
+      content:"";
+      position:absolute;
+      height:22px;
+      width:22px;
+      left:3px;
+      top:3px;
+      background:#dbeafe;
+      transition:.2s ease;
+      border-radius:50%;
+      box-shadow:0 4px 10px rgba(2,6,23,.35);
+    }
+    .switch input:checked + .slider{
+      background:linear-gradient(135deg,#22c55e,#16a34a);
+      border-color:#22c55e;
+    }
+    .switch input:checked + .slider:before{
+      transform:translateX(24px);
+      background:#03140b;
+    }
+    .toggle-copy{
+      color:#dbeafe;
+      font-size:13px;
+      font-weight:700;
+    }
+    .control-status {
+      margin-top:12px;
+      border:1px solid #294560;
+      border-radius:12px;
+      background:#091423;
+      padding:10px 12px;
+    }
+    .control-collapsible {
+      margin-top:12px;
+      border:1px solid #294560;
+      border-radius:12px;
+      background:#091423;
+      padding:10px 12px;
+    }
+    .control-collapsible summary {
+      cursor:pointer;
+      list-style:none;
+      outline:none;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      color:#dbeafe;
+      font-size:13px;
+      font-weight:800;
+    }
+    .control-collapsible summary::-webkit-details-marker { display:none; }
+    .control-collapsible summary::after {
+      content:"Show";
+      color:#9fb4cc;
+      font-size:12px;
+      font-weight:800;
+    }
+    .control-collapsible[open] summary::after { content:"Hide"; }
+    .control-collapsible-body {
+      margin-top:10px;
+      display:grid;
+      gap:10px;
+    }
+    .control-collapsible:not([open]) .control-collapsible-body {
+      display:none;
+    }
+    .followup-panel {
+      margin-top:12px;
+      border:1px solid #2b4a66;
+      border-radius:12px;
+      background:linear-gradient(180deg,#0a1828,#08111d);
+      padding:12px;
+      box-shadow:0 12px 24px rgba(0,0,0,.24);
+    }
+    .followup-panel.empty {
+      border-color:#22384f;
+      background:#091423;
+    }
+    .followup-head {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:8px;
+    }
+    .followup-body {
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.55;
+      white-space:pre-wrap;
+      min-height:40px;
+    }
+    .followup-meta {
+      margin-top:8px;
+      color:#8fb6d9;
+      font-size:12px;
+      line-height:1.45;
+    }
+    .followup-item {
+      border:1px solid #27415a;
+      border-radius:10px;
+      background:#0a1625;
+      padding:10px;
+      cursor:pointer;
+      transition:border-color .18s ease, background .18s ease, transform .18s ease;
+    }
+    .followup-item:hover {
+      border-color:#4f7aa1;
+      background:#0c1b2d;
+      transform:translateY(-1px);
+    }
+    .followup-item.active {
+      border-color:#22c55e;
+      background:linear-gradient(180deg,#0d2017,#091712);
+      box-shadow:0 0 0 1px rgba(34,197,94,.16);
+    }
+    .followup-item-kicker {
+      color:#93c5fd;
+      font-size:10px;
+      font-weight:800;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      margin-bottom:6px;
+    }
+    .followup-item-copy {
+      color:#e5eefc;
+      font-size:13px;
+      line-height:1.5;
+    }
+    .followup-empty {
+      color:#9fb4cc;
+      font-size:12px;
+      line-height:1.5;
+      padding:10px;
+      border:1px dashed #294560;
+      border-radius:10px;
+      background:#091423;
+    }
+    .followup-actions {
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .followup-actions button {
+      margin-top:0;
+      width:auto;
+      justify-content:center;
+    }
+    .mitre-selects {
+      display:grid;
+      gap:8px;
+      margin-top:10px;
+    }
+    .mitre-select-row {
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+      border:1px solid #22384f;
+      border-radius:10px;
+      background:#091423;
+      padding:10px;
+    }
+    .mitre-select-copy {
+      color:#dbeafe;
+      font-size:12px;
+      line-height:1.5;
+      flex:1 1 auto;
+    }
+    .mitre-select-btn {
+      appearance:none;
+      border:1px solid #315a79;
+      border-radius:999px;
+      padding:7px 10px;
+      background:linear-gradient(180deg,#16324a,#102435);
+      color:#dbeafe;
+      font-size:12px;
+      font-weight:800;
+      cursor:pointer;
+      white-space:nowrap;
+      flex:0 0 auto;
+    }
+    .mitre-select-btn:hover {
+      border-color:#60a5fa;
+      transform:translateY(-1px);
+    }
+    .control-status-head {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:6px;
+    }
+    .control-status-copy {
+      color:#9fb4cc;
+      font-size:12px;
+      line-height:1.5;
+    }
+    .brief-grid{
+      display:grid;
+      grid-template-columns:1.2fr .95fr;
+      gap:12px;
+      margin:12px 0 14px;
+    }
+    .brief-card{
+      border:1px solid #244360;
+      border-radius:12px;
+      background:linear-gradient(180deg,#091423,#07131f);
+      padding:12px;
+      min-width:0;
+    }
+    .brief-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:8px;
+    }
+    .brief-kicker{
+      color:#93c5fd;
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      font-weight:800;
+    }
+    .brief-body{
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.55;
+      white-space:pre-wrap;
+    }
+    .brief-metrics{
+      display:grid;
+      grid-template-columns:repeat(2,minmax(0,1fr));
+      gap:8px;
+    }
+    .brief-strip {
+      border:1px solid #244360;
+      border-radius:12px;
+      background:linear-gradient(180deg,#091423,#07131f);
+      padding:12px;
+      margin:-2px 0 14px;
+    }
+    .brief-strip-head {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:8px;
+    }
+    .brief-strip-metrics {
+      display:grid;
+      grid-template-columns:repeat(6,minmax(0,1fr));
+      gap:8px;
+    }
+    .brief-metric{
+      border:1px solid #203549;
+      border-radius:10px;
+      background:#081729;
+      padding:8px 10px;
+    }
+    .brief-metric-label{
+      color:#8fb6d9;
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      font-weight:800;
+      margin-bottom:4px;
+    }
+    .brief-metric-value{
+      color:#f8fafc;
+      font-size:13px;
+      font-weight:700;
+      overflow-wrap:anywhere;
+    }
+    .mitre-list{
+      display:grid;
+      gap:8px;
+    }
+    .mitre-card{
+      border:1px solid #2a4056;
+      border-radius:10px;
+      background:#081729;
+      padding:9px 10px;
+      position:relative;
+    }
+    .mitre-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:4px;
+    }
+    .mitre-title{
+      color:#f8fafc;
+      font-size:13px;
+      font-weight:800;
+    }
+    .mitre-meta{
+      color:#8fb6d9;
+      font-size:11px;
+      font-weight:700;
+      margin-bottom:4px;
+    }
+    .mitre-copy{
+      color:#cbd5e1;
+      font-size:12px;
+      line-height:1.45;
+    }
+    .mitre-actions{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top:8px;
+    }
+    .mitre-pivot-btn{
+      appearance:none;
+      border:1px solid #315a79;
+      border-radius:999px;
+      padding:7px 10px;
+      background:linear-gradient(180deg,#16324a,#102435);
+      color:#dbeafe;
+      font-size:12px;
+      font-weight:800;
+      cursor:pointer;
+    }
+    .mitre-pivot-btn:hover{
+      border-color:#60a5fa;
+      transform:translateY(-1px);
+    }
+    .mitre-tip{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      width:20px;
+      height:20px;
+      border-radius:999px;
+      border:1px solid #315a79;
+      background:#0d2133;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:900;
+      cursor:help;
+      flex:0 0 auto;
+      position:relative;
+    }
+    .mitre-tip-panel{
+      display:none;
+      position:absolute;
+      top:26px;
+      right:0;
+      width:min(340px, 72vw);
+      z-index:20;
+      border:1px solid #315a79;
+      border-radius:12px;
+      background:linear-gradient(180deg,#0a1627,#07111f 78%);
+      padding:10px;
+      box-shadow:0 18px 34px rgba(2,6,23,.34);
+      text-align:left;
+    }
+    .mitre-tip:hover .mitre-tip-panel,
+    .mitre-tip:focus-within .mitre-tip-panel{
+      display:block;
+    }
+    .mitre-tip-line{
+      color:#dbeafe;
+      font-size:12px;
+      line-height:1.45;
+      margin-bottom:6px;
+    }
+    .mitre-tip-line:last-child{margin-bottom:0;}
     @media (max-width: 900px) { .persona-grid { grid-template-columns: 1fr; } }
     @media (max-width: 900px) { .hero-head { grid-template-columns: 1fr; } }
     @media (max-width: 1240px) { .stack { grid-template-columns: 1fr; } }
+    @media (max-width: 1180px) {
+      .wrap { padding:0 18px 28px; }
+      .invest-shell { grid-template-columns:1fr; }
+      .invest-sidebar-inner { position:static; }
+    }
     @media (max-width: 1100px) { .ops-field.wide { grid-column: span 1; } }
     @media (max-width: 900px) { .row { grid-template-columns: 1fr 1fr; } }
-    @media (max-width: 560px) { .row, .row-ops { grid-template-columns: 1fr; } }
+    @media (max-width: 1100px) { .brief-grid { grid-template-columns:1fr; } }
+    @media (max-width: 700px) { .control-grid { grid-template-columns:1fr; } }
+    @media (max-width: 560px) { .row, .row-ops { grid-template-columns: 1fr; } .wrap{padding:0 12px 24px;} }
   </style>
 </head>
 <body>
@@ -2466,14 +3335,15 @@ APP_HTML = """<!doctype html>
       <a class=\"nav-item\" href=\"/logout\"><span class=\"nav-kicker\">Session</span><span class=\"nav-label\">Logout</span></a>
     </nav>
 
-    <div class=\"stack\" id=\"invest-layout\">
-      <div class=\"card\" id=\"analyst-card\">
+    <div class=\"invest-shell\" id=\"invest-layout\">
+      <aside class=\"invest-sidebar\">
+        <div class=\"invest-sidebar-inner\">
+      <div class=\"card control-rail\" id=\"analyst-card\">
         <div class=\"hero-head\">
           <div class=\"hero-title-block\">
-            <h1>A.G.E.N.T. Smith</h1>
-            <div class=\"muted\">A Splunk TDI(R) Agentic SOC Copilot</div>
+            <h1>Investigation Workspace</h1>
+            <div class=\"muted\">Ask a bounded question, review the evidence, then decide the next move.</div>
           </div>
-          <div class=\"hero-summary\">A.G.E.N.T. Smith is a Splunk-centric analyst augmentation platform that uses networked tasker roles, deterministic guardrails, and evidence-first workflow control to support detection, triage, and investigation.</div>
         </div>
         <label class=\"label-row\">Question
           <span class=\"hint\" tabindex=\"0\">?
@@ -2487,48 +3357,71 @@ APP_HTML = """<!doctype html>
             <div class=\"muted\">Type a question to see likely index/sourcetype targets.</div>
           </div>
         </details>
-        <div class=\"row\">
-          <div>
-            <label class=\"label-row\">Session ID (optional)
-              <span class=\"hint\" tabindex=\"0\">?
-                <span class=\"hint-pop\">Analyst session grouping key for artifacts and run history, e.g. `night_shift_a`.</span>
-              </span>
-            </label>
-            <input id=\"session\" placeholder=\"analyst_shift_a\" />
+        <div id=\"selected-followup-panel\" class=\"followup-panel empty\">
+          <div class=\"followup-head\">
+            <div class=\"brief-kicker\">Pivot Drawer</div>
+            <span id=\"selected-followup-badge\" class=\"badge\">Nothing selected</span>
           </div>
-          <div>
-            <label class=\"label-row\">Max Steps
-              <span class=\"hint\" tabindex=\"0\">?
-                <span class=\"hint-pop\">For Agentic Loop only: upper bound on total inner-graph steps per round. Separate loop controls allow one automatic deeper-investigation round, then require analyst approval for anything deeper.</span>
-              </span>
-            </label>
-            <input id=\"maxsteps\" type=\"number\" min=\"1\" max=\"8\" value=\"3\" />
-          </div>
-          <div>
-            <label class=\"label-row\">Write Artifact
-              <span class=\"hint\" tabindex=\"0\">?
-                <span class=\"hint-pop\">When enabled, writes JSON run artifacts under `artifacts/runs/*`.</span>
-              </span>
-            </label>
-            <select id=\"artifact\"><option value=\"1\">Yes</option><option value=\"0\">No</option></select>
-          </div>
-          <div>
-            <label class=\"label-row\">Pipeline
-              <span class=\"hint\" tabindex=\"0\">?
-                <span class=\"hint-pop\">
-                  <strong>Multi-Model Reviewer</strong>: planner, SPL writer, and security reviewer on every run; peer reviewer 1 and 2 only when the reviewer contests or revises the writer output.<br/><br/>
-                  <strong>Agentic Loop</strong>: bounded multi-step investigation with one automatic deeper pass, then analyst approval for any further continuation.
-                </span>
-              </span>
-            </label>
-            <select id=\"pipeline\">
-              <option value=\"multi_model\">Multi-Model Reviewer</option>
-              <option value=\"agentic\">Agentic Loop</option>
-            </select>
+          <div id=\"selected-followup-text\" class=\"followup-body muted\">Select a pivot from the ATT&CK panel on the right to open it here. This drawer is the single place to review, edit, and run a follow-up.</div>
+          <div id=\"selected-followup-meta\" class=\"followup-meta\" style=\"display:none;\"></div>
+          <div class=\"followup-actions\">
+            <button id=\"selected-followup-run\" class=\"btn-followup\" type=\"button\" style=\"display:none;\">Run This Follow-Up</button>
+            <button id=\"selected-followup-clear\" class=\"btn-secondary\" type=\"button\" style=\"display:none;\">Clear</button>
           </div>
         </div>
-        <p id=\"pipeline-help\" class=\"muted\"></p>
-        <button id=\"run\" title=\"Execute selected investigation pipeline with current settings\">Run Investigation</button>
+        <details id=\"control-details\" class=\"control-collapsible\">
+          <summary>Show Advanced Controls</summary>
+          <div class=\"control-collapsible-body\">
+            <div class=\"control-grid\">
+              <div>
+                <label class=\"label-row\">Session ID (optional)
+                  <span class=\"hint\" tabindex=\"0\">?
+                    <span class=\"hint-pop\">Analyst session grouping key for artifacts and run history, e.g. `night_shift_a`.</span>
+                  </span>
+                </label>
+                <input id=\"session\" placeholder=\"analyst_shift_a\" />
+              </div>
+              <div>
+                <label class=\"label-row\">Max Steps
+                  <span class=\"hint\" tabindex=\"0\">?
+                    <span class=\"hint-pop\">For Agentic Loop only: upper bound on total inner-graph steps per round. Separate loop controls allow one automatic deeper-investigation round, then require analyst approval for anything deeper.</span>
+                  </span>
+                </label>
+                <input id=\"maxsteps\" type=\"number\" min=\"1\" max=\"8\" value=\"3\" />
+              </div>
+              <div>
+                <label class=\"label-row\">Write Artifact
+                  <span class=\"hint\" tabindex=\"0\">?
+                    <span class=\"hint-pop\">When enabled, writes JSON run artifacts under `artifacts/runs/*`.</span>
+                  </span>
+                </label>
+                <div class=\"toggle-row\">
+                  <label class=\"switch\" aria-label=\"Write Artifact toggle\">
+                    <input id=\"artifact\" type=\"checkbox\" />
+                    <span class=\"slider\"></span>
+                  </label>
+                  <span id=\"artifact-label\" class=\"toggle-copy\">Off</span>
+                </div>
+              </div>
+              <div>
+                <label class=\"label-row\">Pipeline
+                  <span class=\"hint\" tabindex=\"0\">?
+                    <span class=\"hint-pop\">
+                      <strong>Multi-Model Reviewer</strong>: planner, SPL writer, and security reviewer on every run; peer reviewer 1 and 2 only when the reviewer contests or revises the writer output.<br/><br/>
+                      <strong>Agentic Loop</strong>: bounded multi-step investigation with one automatic deeper pass, then analyst approval for any further continuation.
+                    </span>
+                  </span>
+                </label>
+                <select id=\"pipeline\">
+                  <option value=\"multi_model\">Multi-Model Reviewer</option>
+                  <option value=\"agentic\">Agentic Loop</option>
+                </select>
+              </div>
+            </div>
+            <p id=\"pipeline-help\" class=\"muted\"></p>
+          </div>
+        </details>
+        <button id=\"run\" type=\"button\" onclick=\"window.runInvestigationSafe && window.runInvestigationSafe(); return false;\" title=\"Execute selected investigation pipeline with current settings\">Run Investigation</button>
         <div id=\"run-progress-wrap\" class=\"run-progress-wrap\" style=\"display:none;\">
           <div class=\"run-progress-meta\">
             <span id=\"run-progress-label\">Preparing investigation...</span>
@@ -2538,16 +3431,44 @@ APP_HTML = """<!doctype html>
             <div id=\"run-progress-bar\" class=\"run-progress-bar\"></div>
           </div>
         </div>
-        <p id=\"status\" class=\"muted\"></p>
-        <h3>Summary <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Final analyst-facing narrative generated from guarded, read-only workflow results.</span></span></h3>
-        <div id=\"summary\" class=\"summary-box\"></div>
+        <div class=\"control-status\">
+          <div class=\"control-status-head\">
+            <div class=\"brief-kicker\">Investigation Status</div>
+            <span id=\"brief-supported\" class=\"badge\">Idle</span>
+          </div>
+          <div id=\"status\" class=\"control-status-copy\">Ready.</div>
+        </div>
+      </div>
+        </div>
+      </aside>
+      <main class=\"invest-main\">
+        <div class=\"card results-card\">
+        <div class=\"results-shell\">
+        <div class=\"brief-grid\">
+          <div class=\"brief-card\">
+            <div class=\"brief-head\"><div class=\"brief-kicker\">Investigation Brief</div></div>
+            <div id=\"summary\" class=\"summary-box\"></div>
+          </div>
+          <div class=\"brief-card\">
+            <div class=\"brief-head\"><div class=\"brief-kicker\">MITRE ATT&CK</div></div>
+            <div id=\"brief-mitre\" class=\"mitre-list\"><div class=\"brief-body muted\">No investigation mapping yet.</div></div>
+          </div>
+        </div>
+        <div class=\"brief-strip\">
+          <div class=\"brief-strip-head\"><div class=\"brief-kicker\">Execution Snapshot</div></div>
+          <div id=\"brief-execution\" class=\"brief-strip-metrics\"></div>
+        </div>
         <div class=\"spl-card\">
           <div class=\"spl-title\">Splunk SPL Executed <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Always displays the exact SPL used by the selected execution plan.</span></span></div>
           <pre id=\"spl-details\"></pre>
           <div><a id=\"spl-link\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; color:#93c5fd; text-decoration:none; font-size:13px;\">View in Splunk</a></div>
           <pre id=\"spl-query\"></pre>
-          <div class=\"spl-title\" style=\"margin-top:8px;\">SPL Results (sample)</div>
-          <pre id=\"spl-results\"></pre>
+          <details class=\"spl-toggle\">
+            <summary>SPL Results (sample)</summary>
+            <div class=\"spl-toggle-body\">
+              <pre id=\"spl-results\"></pre>
+            </div>
+          </details>
         </div>
         <h3>TDIR Case <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Detect/Triage/Investigate/Respond/Recover framing generated from the run output. Investigate can show `awaiting_human_approval` after the first automatic deeper round completes and another bounded pivot is available.</span></span></h3>
         <div id=\"tdir-card\" class=\"tdir-card\" style=\"display:none;\">
@@ -2590,9 +3511,68 @@ APP_HTML = """<!doctype html>
             </div>
           </div>
         </details>
+        </div>
       </div>
+      </main>
     </div>
   </div>
+  <script>
+    window.runInvestigationSafe = async function () {
+      if (typeof window.executeInvestigation === 'function') {
+        return window.executeInvestigation({});
+      }
+      const byId = (id) => document.getElementById(id);
+      const questionEl = byId('question');
+      const sessionEl = byId('session');
+      const maxStepsEl = byId('maxsteps');
+      const artifactEl = byId('artifact');
+      const pipelineEl = byId('pipeline');
+      const statusEl = byId('status');
+      const outputEl = byId('output');
+      const summaryEl = byId('summary');
+      const supportedEl = byId('brief-supported');
+      const runBtnEl = byId('run');
+      if (!questionEl || !statusEl || !runBtnEl) {
+        return false;
+      }
+      try {
+        runBtnEl.disabled = true;
+        statusEl.textContent = 'Running...';
+        if (supportedEl) supportedEl.textContent = 'Running';
+        const payload = {
+          question: questionEl.value || '',
+          session_id: sessionEl ? sessionEl.value : '',
+          max_steps: maxStepsEl ? Number(maxStepsEl.value || 3) : 3,
+          write_artifact: artifactEl ? Boolean(artifactEl.checked) : false,
+          pipeline: pipelineEl ? pipelineEl.value : 'multi_model',
+        };
+        const resp = await fetch('/api/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          statusEl.textContent = 'Error';
+          if (supportedEl) supportedEl.textContent = 'Error';
+          if (outputEl) outputEl.textContent = JSON.stringify(data, null, 2);
+          return false;
+        }
+        statusEl.textContent = 'Complete';
+        if (supportedEl) supportedEl.textContent = data?.result?.supported === false ? 'Blocked' : 'Supported';
+        if (summaryEl) summaryEl.textContent = String(data?.result?.summary || '');
+        if (outputEl) outputEl.textContent = JSON.stringify(data, null, 2);
+        return true;
+      } catch (err) {
+        statusEl.textContent = 'Request failed';
+        if (supportedEl) supportedEl.textContent = 'Error';
+        if (outputEl) outputEl.textContent = String(err);
+        return false;
+      } finally {
+        runBtnEl.disabled = false;
+      }
+    };
+  </script>
   <script>
     const $ = (id) => document.getElementById(id);
     const runBtn = $('run');
@@ -2601,6 +3581,7 @@ APP_HTML = """<!doctype html>
     let runProgressValue = 0;
     let lastAskResult = null;
     let pendingContinuationState = null;
+    let selectedFollowup = null;
 
     const esc = (v) => String(v ?? '')
       .replaceAll('&', '&amp;')
@@ -2654,6 +3635,142 @@ APP_HTML = """<!doctype html>
       }
     }
 
+    function updateArtifactLabel() {
+      $('artifact-label').textContent = $('artifact').checked ? 'On' : 'Off';
+    }
+
+    function renderSelectedFollowup() {
+      const panel = $('selected-followup-panel');
+      const badge = $('selected-followup-badge');
+      const text = $('selected-followup-text');
+      const meta = $('selected-followup-meta');
+      const runBtn = $('selected-followup-run');
+      const clearBtn = $('selected-followup-clear');
+      if (!selectedFollowup || !String(selectedFollowup.text || '').trim()) {
+        panel.classList.add('empty');
+        badge.textContent = 'Nothing selected';
+        text.className = 'followup-body muted';
+        text.textContent = 'Select a pivot from the ATT&CK panel on the right to open it here. This drawer is the single place to review, edit, and run a follow-up.';
+        meta.style.display = 'none';
+        meta.textContent = '';
+        runBtn.style.display = 'none';
+        clearBtn.style.display = 'none';
+        return;
+      }
+      panel.classList.remove('empty');
+      badge.textContent = `Pivot ${selectedFollowup.index + 1}`;
+      text.className = 'followup-body';
+      text.textContent = selectedFollowup.text;
+      meta.style.display = 'block';
+      meta.textContent = selectedFollowup.origin ? `From ATT&CK: ${selectedFollowup.origin}` : 'Recommended follow-up question';
+      runBtn.style.display = 'inline-flex';
+      clearBtn.style.display = 'inline-flex';
+    }
+
+    function selectFollowup(text, index, origin) {
+      selectedFollowup = {
+        text: String(text || '').trim(),
+        index: Number(index || 0),
+        origin: String(origin || '').trim(),
+      };
+      if (!selectedFollowup.text) {
+        selectedFollowup = null;
+        return;
+      }
+      renderSelectedFollowup();
+    }
+
+    function renderMitreBrief(result) {
+      const bundle = (result?.mitre_attack && typeof result.mitre_attack === 'object') ? result.mitre_attack : {};
+      const items = Array.isArray(bundle?.techniques) ? bundle.techniques : [];
+      const pivots = Array.isArray(bundle?.next_pivots) ? bundle.next_pivots : [];
+      const progression = Array.isArray(bundle?.possible_progression) ? bundle.possible_progression : [];
+      const validation = (bundle?.validation && typeof bundle.validation === 'object') ? bundle.validation : {};
+      const frame = String(bundle?.frame || '').trim();
+      const primaryLabel = items.length ? `${items[0].technique || 'Technique'} (${items[0].technique_id || ''})`.trim() : '';
+      $('brief-mitre').innerHTML = items.length
+        ? `
+          ${frame ? `<div class="mitre-card"><div class="mitre-copy">${esc(frame)}</div></div>` : ''}
+          ${validation.status === 'ok' ? `<div class="mitre-card"><div class="mitre-title">ATT&CK Validation</div><div class="mitre-meta">${esc(validation.agreement || 'partial')} • ${esc(validation.confidence || 'medium')} confidence • ${esc(validation.model || '')}</div><div class="mitre-copy">${esc(validation.rationale || 'The security reasoning model reviewed the ATT&CK mapping and found it directionally sound.')}</div>${validation.kill_chain_context ? `<div class="mitre-copy" style="margin-top:8px;"><strong>Kill-chain context:</strong> ${esc(validation.kill_chain_context)}</div>` : ''}${Array.isArray(validation.alternate_techniques) && validation.alternate_techniques.length ? `<div class="mitre-copy" style="margin-top:8px;"><strong>Alternates considered:</strong><br/>${validation.alternate_techniques.map((item) => `• ${esc(item.technique_id || '')} ${esc(item.technique || '')}: ${esc(item.why || '')}`).join('<br/>')}</div>` : ''}</div>` : ''}
+          ${items.map((item) => `
+          <div class="mitre-card">
+            <div class="mitre-head">
+              <div class="mitre-title">${esc(item.technique || 'Technique')}</div>
+              <div class="mitre-tip" tabindex="0">?
+                <div class="mitre-tip-panel">
+                  <div class="mitre-tip-line"><strong>${esc(item.technique || 'Technique')}</strong> (${esc(item.technique_id || '')})</div>
+                  <div class="mitre-tip-line"><strong>Tactic:</strong> ${esc(item.tactic || 'Unknown')}</div>
+                  <div class="mitre-tip-line"><strong>Definition:</strong> ${esc(item.definition || 'No definition available yet.')}</div>
+                  <div class="mitre-tip-line"><strong>Why mapped here:</strong> ${esc(item.rationale || 'No rationale available yet.')}</div>
+                </div>
+              </div>
+            </div>
+            <div class="mitre-meta">${esc(item.technique_id || '')} • ${esc(item.tactic || 'Tactic')} • ${esc(item.confidence || 'medium')} confidence</div>
+            <div class="mitre-copy">${esc(item.rationale || '')}</div>
+          </div>
+          `).join('')}
+          ${pivots.length ? `<div class="mitre-card"><div class="mitre-title">Recommended ATT&CK Pivots</div><div class="mitre-copy">Pick a pivot below to open it in the left-side drawer. All follow-up actions happen there.</div><div class="mitre-selects">${pivots.map((item, index) => `<div class="mitre-select-row"><div class="mitre-select-copy"><strong>Pivot ${String(index + 1)}.</strong> ${esc(item)}</div><button type="button" class="mitre-select-btn" data-pivot-index="${String(index)}">Open In Drawer</button></div>`).join('')}</div></div>` : ''}
+          ${progression.length ? `<div class="mitre-card"><div class="mitre-title">Likely Follow-On Techniques</div><div class="mitre-copy">${progression.map((item) => `• ${esc(item.technique_id || '')} ${esc(item.technique || '')}: ${esc(item.why || '')}`).join('<br/>')}</div></div>` : ''}
+        `
+        : '<div class="brief-body muted">No ATT&CK mapping was derived for this investigation yet.</div>';
+      document.querySelectorAll('.mitre-select-btn').forEach((btn) => {
+        btn.onclick = () => {
+          const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
+          const text = pivots[idx] || '';
+          if (!text) return;
+          selectFollowup(text, idx, primaryLabel);
+          $('status').textContent = 'Pivot opened in the left drawer. Review it there, then run when ready.';
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        };
+      });
+    }
+
+    function renderExecutionBrief(result) {
+      const splRuns = Array.isArray(result?.selected_spl_details) ? result.selected_spl_details : [];
+      const latestRun = splRuns.length ? (splRuns[splRuns.length - 1] || {}) : {};
+      const metrics = [
+        ['Intent', result?.intent || 'unknown'],
+        ['Tool', result?.selected_tool || result?.final_adjudication?.selected_tool || 'unknown'],
+        ['Rows', result?.rows_returned ?? latestRun?.rows_returned ?? 'n/a'],
+        ['Runtime', latestRun?.execution_ms ? `${latestRun.execution_ms} ms` : 'n/a'],
+        ['Writer', latestRun?.writer_model || result?.query_writer_model || 'unknown'],
+        ['Confidence', result?.final_confidence ?? result?.selected_confidence ?? 'n/a'],
+      ];
+      $('brief-execution').innerHTML = metrics.map(([label, value]) => `
+        <div class="brief-metric">
+          <div class="brief-metric-label">${esc(label)}</div>
+          <div class="brief-metric-value">${esc(String(value))}</div>
+        </div>
+      `).join('');
+      $('brief-supported').textContent = result?.supported === false
+        ? 'Blocked'
+        : ((result?.rows_returned === 0) ? 'No Hits' : 'Complete');
+    }
+
+    function hasEvidenceRows(result) {
+      if (!result || typeof result !== 'object') return false;
+      if (typeof result.rows_returned === 'number') return result.rows_returned > 0;
+      if (Array.isArray(result.__ui_sample_rows) && result.__ui_sample_rows.length) return true;
+      if (Array.isArray(result.spl_results_preview) && result.spl_results_preview.length) return true;
+      if (Array.isArray(result?.evidence?.top_entities) && result.evidence.top_entities.length) return true;
+      return false;
+    }
+
+    function renderNoEvidenceOutcome(result) {
+      renderExecutionBrief(result || {});
+      $('summary').innerHTML =
+        '<div class="brief-body">' +
+        '<strong>No matching evidence was returned.</strong><br>' +
+        'Splunk completed the query, but no rows matched the selected time range and filters for this investigation.' +
+        '<br><br><strong>Suggested next check:</strong> Widen the time window, verify the expected index/source assumptions, or try a narrower follow-up question.' +
+        '</div>';
+      $('brief-mitre').innerHTML =
+        '<div class="brief-body muted">No ATT&CK mapping was produced because no evidence was returned for this completed investigation.</div>';
+      $('tdir-card').style.display = 'none';
+      $('tdir-case').textContent = '';
+      $('journey').textContent = 'Investigation completed with no matching evidence rows. No ATT&CK classification or deeper pivot chain was produced.';
+    }
+
     function renderModelDecisions(result) {
       if (!result || typeof result !== 'object') {
         $('model-personas').innerHTML = '';
@@ -2661,8 +3778,13 @@ APP_HTML = """<!doctype html>
         $('spl-query').textContent = '';
         $('spl-results').textContent = '';
         $('model-decisions').innerHTML = '';
+        $('brief-execution').innerHTML = '';
+        $('brief-mitre').innerHTML = '<div class="brief-body muted">No ATT&CK mapping was derived for this investigation yet.</div>';
+        $('brief-supported').textContent = 'Idle';
         return;
       }
+      renderExecutionBrief(result);
+      renderMitreBrief(result);
 
       const workflow = Array.isArray(result.model_workflow) ? result.model_workflow : [];
       const workflowStagesPresent = new Set(
@@ -2982,7 +4104,7 @@ APP_HTML = """<!doctype html>
             result?.evidence?.time_window?.latest_time ||
             'now'
           );
-        const splunkBase = 'http://174.175.242.244:8042/en-US/app/search/search';
+        const splunkBase = String(result?.splunk_search_url_base || '');
         const params = new URLSearchParams({
           q: spl,
           'display.page.search.mode': 'smart',
@@ -2993,8 +4115,13 @@ APP_HTML = """<!doctype html>
           'display.page.search.tab': 'statistics',
           'display.general.type': 'statistics',
         });
-        splLink.href = `${splunkBase}?${params.toString()}`;
-        splLink.style.display = 'inline';
+        if (splunkBase) {
+          splLink.href = `${splunkBase}?${params.toString()}`;
+          splLink.style.display = 'inline';
+        } else {
+          splLink.href = '#';
+          splLink.style.display = 'none';
+        }
       } else {
         splLink.href = '#';
         splLink.style.display = 'none';
@@ -3339,13 +4466,17 @@ APP_HTML = """<!doctype html>
       $('tdir-case').textContent = '';
       $('journey').textContent = '';
       $('output').textContent = '';
+      $('brief-mitre').innerHTML = '<div class="brief-body muted">Investigation in progress.</div>';
+      $('summary').innerHTML = '<div class="brief-body muted">Investigation in progress.</div>';
+      $('brief-supported').textContent = 'Running';
+      $('brief-execution').innerHTML = '';
       clearContinuationControls();
       try {
         const payload = {
           question: options.question || $('question').value,
           session_id: $('session').value,
           max_steps: Number($('maxsteps').value || 3),
-          write_artifact: $('artifact').value === '1',
+          write_artifact: Boolean($('artifact').checked),
           pipeline: $('pipeline').value,
           approved_deeper_investigation: Boolean(options.approved_deeper_investigation),
           continuation_state: options.continuation_state || null,
@@ -3369,13 +4500,23 @@ APP_HTML = """<!doctype html>
           if (Array.isArray(data.sample_rows)) {
             lastAskResult.__ui_sample_rows = data.sample_rows;
           }
-          $('status').textContent = 'Complete';
-          $('summary').innerHTML = renderSummaryText(data.result?.summary || '');
-          renderModelDecisions(data.result || {});
-          renderTDIRCase(data.result || {});
-          renderInvestigationJourney(data.result || {});
-          renderWorkflowTimeline(data.result || {});
-          renderContinuationControls(data.result || {});
+          const result = data.result || {};
+          $('status').textContent = hasEvidenceRows(result) ? 'Complete' : 'Complete (No Hits)';
+          if (hasEvidenceRows(result)) {
+            $('summary').innerHTML = renderSummaryText(result?.summary || '');
+            renderModelDecisions(result || {});
+            renderTDIRCase(result || {});
+            renderInvestigationJourney(result || {});
+            renderWorkflowTimeline(result || {});
+            renderContinuationControls(result || {});
+          } else {
+            renderNoEvidenceOutcome(result || {});
+            $('model-personas').innerHTML = '';
+            $('model-decisions').innerHTML = '';
+            $('workflow-track').innerHTML = '';
+            $('workflow-meta').textContent = '';
+            clearContinuationControls();
+          }
           $('output').textContent = JSON.stringify(data, null, 2);
           stopRunProgress(true);
         }
@@ -3389,6 +4530,7 @@ APP_HTML = """<!doctype html>
       }
     }
 
+    window.executeInvestigation = executeInvestigation;
     runBtn.onclick = async () => {
       await executeInvestigation({});
     };
@@ -3400,8 +4542,25 @@ APP_HTML = """<!doctype html>
         continuation_state: pendingContinuationState,
       });
     };
+    $('selected-followup-run').onclick = async () => {
+      if (!selectedFollowup || !selectedFollowup.text) return;
+      $('question').value = selectedFollowup.text;
+      $('status').textContent = 'Running selected follow-up investigation...';
+      window.scrollTo({top: 0, behavior: 'smooth'});
+      await executeInvestigation({ question: selectedFollowup.text });
+    };
+    $('selected-followup-clear').onclick = () => {
+      selectedFollowup = null;
+      renderSelectedFollowup();
+      $('status').textContent = 'Pivot drawer cleared.';
+    };
     $('pipeline').addEventListener('change', updatePipelineHelp);
+    $('artifact').addEventListener('change', updateArtifactLabel);
+    $('control-details').open = false;
     updatePipelineHelp();
+    $('artifact').checked = false;
+    updateArtifactLabel();
+    renderSelectedFollowup();
     let hintTimer = null;
     $('question').addEventListener('input', () => {
       if (hintTimer) clearTimeout(hintTimer);
@@ -6229,7 +7388,16 @@ def _configure_page_body() -> str:
       <div class="cfg-row"><label for="cfg-ollama-host">OLLAMA_HOST</label><div class="cfg-example">Example URL: <code>http://192.168.1.50:11434</code></div><input id="cfg-ollama-host" placeholder="http://192.168.1.50:11434" /></div>
       <div class="cfg-row"><label for="cfg-splunk-base">SPLUNK_BASE_URL</label><div class="cfg-example">Example URL: <code>https://192.168.1.60:8089</code></div><input id="cfg-splunk-base" placeholder="https://192.168.1.60:8089" /></div>
       <div class="cfg-row wide"><label for="cfg-splunk-mcp">SPLUNK_MCP_URL</label><div class="cfg-example">Example URL: <code>https://192.168.1.60:8089/services/mcp</code></div><input id="cfg-splunk-mcp" placeholder="https://192.168.1.60:8089/services/mcp" /></div>
-      <div class="cfg-row wide"><label for="cfg-splunk-token">SPLUNK_LAB_BEARER_TOKEN</label><div class="cfg-example">Example: paste the Splunk MCP bearer token used by the server-side runtime.</div><textarea id="cfg-splunk-token" placeholder="Bearer token value"></textarea></div>
+      <div class="cfg-row wide">
+        <label for="cfg-splunk-token">SPLUNK_LAB_BEARER_TOKEN</label>
+        <div class="cfg-example">Stored server-side for the runtime. The field stays masked unless you explicitly reveal or replace it.</div>
+        <input id="cfg-splunk-token" type="password" placeholder="Bearer token value" autocomplete="off" />
+        <div class="cfg-actions" style="margin-top:6px;">
+          <button id="cfg-token-toggle" class="btn-secondary" type="button" style="margin-top:0;">Reveal Token</button>
+          <button id="cfg-token-clear" class="btn-secondary" type="button" style="margin-top:0;">Clear Token</button>
+          <span id="cfg-token-state" class="cfg-status">No saved token detected.</span>
+        </div>
+      </div>
       <h3>UI Access</h3>
       <div class="cfg-row"><label for="cfg-auth-enabled">SOC_UI_AUTH_ENABLED</label><div class="cfg-example">Keep this enabled for a guarded multi-user UI. First-run setup creates the initial user automatically.</div><div class="cfg-select-wrap"><select id="cfg-auth-enabled"><option value="1">1</option><option value="0">0</option></select></div></div>
       </div>
@@ -6482,12 +7650,18 @@ def _configure_page_body() -> str:
     ['cfg-model-continuation','cfg-model-continuation-picks'],
     ['cfg-model-summary','cfg-model-summary-picks']
   ];
+  let cfgTokenMasked = false;
+  let cfgTokenReveal = false;
   function cfgApplyPayload(values){
     const payload = values || {};
     cfg$('cfg-ollama-host').value = payload.OLLAMA_HOST || '';
     cfg$('cfg-splunk-base').value = payload.SPLUNK_BASE_URL || '';
     cfg$('cfg-splunk-mcp').value = payload.SPLUNK_MCP_URL || '';
     cfg$('cfg-splunk-token').value = payload.SPLUNK_LAB_BEARER_TOKEN || '';
+    cfgTokenMasked = String(payload.SPLUNK_LAB_BEARER_TOKEN || '') === '__KEEP_EXISTING_SPLUNK_TOKEN__';
+    cfgTokenReveal = false;
+    cfg$('cfg-splunk-token').type = 'password';
+    cfg$('cfg-token-toggle').textContent = 'Reveal Token';
     cfg$('cfg-auth-enabled').value = payload.SOC_UI_AUTH_ENABLED || '1';
     cfg$('cfg-edge-enabled').value = payload.EDGE_LLM_ENABLED || '0';
     cfg$('cfg-edge-host').value = payload.EDGE_LLM_HOST || '';
@@ -6503,6 +7677,14 @@ def _configure_page_body() -> str:
     cfg$('cfg-model-peer2').value = payload.OLLAMA_MODEL_PEER_REVIEWER_2 || '';
     cfg$('cfg-model-continuation').value = payload.OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER || '';
     cfg$('cfg-model-summary').value = payload.OLLAMA_MODEL_FINAL_SUMMARY || '';
+  }
+  function cfgApplySecretState(secretState){
+    const meta = secretState || {};
+    const present = Boolean(meta.splunk_token_present);
+    const masked = String(meta.splunk_token_masked || '').trim();
+    cfg$('cfg-token-state').textContent = present
+      ? `Saved token detected (${cfgEscape(masked || 'masked')}). Leave the field as-is to keep it, replace it to rotate it, or clear it to remove it.`
+      : 'No saved token detected.';
   }
   const cfgDefaultAssignments = {
     OLLAMA_MODEL_QUERY_PLANNER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
@@ -6637,11 +7819,12 @@ def _configure_page_body() -> str:
     }
   }
   function cfgCollectPayload(){
+    const tokenValue = cfg$('cfg-splunk-token').value.trim();
     return {
       OLLAMA_HOST: cfg$('cfg-ollama-host').value.trim(),
       SPLUNK_BASE_URL: cfg$('cfg-splunk-base').value.trim(),
       SPLUNK_MCP_URL: cfg$('cfg-splunk-mcp').value.trim(),
-      SPLUNK_LAB_BEARER_TOKEN: cfg$('cfg-splunk-token').value.trim(),
+      SPLUNK_LAB_BEARER_TOKEN: cfgTokenMasked && !tokenValue ? '' : (tokenValue || (cfgTokenMasked ? '__KEEP_EXISTING_SPLUNK_TOKEN__' : '')),
       SOC_UI_AUTH_ENABLED: cfg$('cfg-auth-enabled').value.trim(),
       EDGE_LLM_ENABLED: cfg$('cfg-edge-enabled').value.trim(),
       EDGE_LLM_HOST: cfg$('cfg-edge-host').value.trim(),
@@ -6815,6 +7998,7 @@ def _configure_page_body() -> str:
   function cfgRender(data){
     const values = data.values || {};
     cfgApplyPayload(values);
+    cfgApplySecretState(data.secret_state || {});
     cfgPopulateModelOptions(data.ollama_available_models || []);
     cfgRenderModelCompare(values, data.ollama_available_models || [], data.expected_models || []);
     cfg$('cfg-ollama-pulls').textContent = (data.ollama_pull_commands || []).join('\\n') || 'No model pull commands generated.';
@@ -7029,6 +8213,30 @@ def _configure_page_body() -> str:
   cfg$('cfg-edge-validate').onclick = cfgValidateEdge;
   cfg$('cfg-validate').onclick = cfgValidate;
   cfg$('cfg-mcp-probe').onclick = cfgProbeMcp;
+  cfg$('cfg-token-toggle').onclick = () => {
+    const tokenInput = cfg$('cfg-splunk-token');
+    if(cfgTokenMasked && String(tokenInput.value || '').trim() === '__KEEP_EXISTING_SPLUNK_TOKEN__'){
+      cfg$('cfg-token-state').textContent = 'Saved token stays masked server-side. Enter a replacement value if you want to rotate it.';
+      return;
+    }
+    cfgTokenReveal = !cfgTokenReveal;
+    tokenInput.type = cfgTokenReveal ? 'text' : 'password';
+    cfg$('cfg-token-toggle').textContent = cfgTokenReveal ? 'Hide Token' : 'Reveal Token';
+  };
+  cfg$('cfg-token-clear').onclick = () => {
+    cfg$('cfg-splunk-token').value = '';
+    cfg$('cfg-splunk-token').type = 'password';
+    cfgTokenMasked = false;
+    cfgTokenReveal = false;
+    cfg$('cfg-token-toggle').textContent = 'Reveal Token';
+    cfg$('cfg-token-state').textContent = 'Token cleared in the draft form. Save Configuration to remove it from runtime.';
+  };
+  cfg$('cfg-splunk-token').addEventListener('input', () => {
+    const tokenInput = cfg$('cfg-splunk-token');
+    if(String(tokenInput.value || '').trim() !== '__KEEP_EXISTING_SPLUNK_TOKEN__'){
+      cfgTokenMasked = false;
+    }
+  });
   cfgLoad();
 </script>
 """.replace("{html.escape(APP_VERSION_LABEL)}", html.escape(APP_VERSION_LABEL))
@@ -7727,8 +8935,14 @@ def _mcp_page_body() -> str:
           'display.page.search.tab': 'statistics',
           'display.general.type': 'statistics',
         });
-        splLink.href = `http://174.175.242.244:8042/en-US/app/search/search?${params.toString()}`;
-        splLink.style.display = 'inline';
+        const splunkBase = String(data.splunk_search_url_base || '');
+        if (splunkBase) {
+          splLink.href = `${splunkBase}?${params.toString()}`;
+          splLink.style.display = 'inline';
+        } else {
+          splLink.href = '#';
+          splLink.style.display = 'none';
+        }
       } else {
         splLink.href = '#';
         splLink.style.display = 'none';
@@ -7798,6 +9012,8 @@ class Handler(BaseHTTPRequestHandler):
         ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -7878,8 +9094,8 @@ class Handler(BaseHTTPRequestHandler):
             "<div class=\"login-brand\"><span class=\"login-dot\"></span><span class=\"badge\">Lab-Only</span></div>"
             f"<span class=\"login-version\">{html.escape(APP_VERSION_LABEL)}</span>"
             "</div>"
-            "<h1 class=\"login-title\">SOC Analyst Console Login</h1>"
-            "<p class=\"login-sub\">Authenticate to access investigation tools, docs, and Splunk-connected workflows on this LAN host.</p>"
+            "<h1 class=\"login-title\">A.G.E.N.T. Smith Login</h1>"
+            "<p class=\"login-sub\">Sign in to access A.G.E.N.T. Smith investigation tools, analyst documentation, and guarded Splunk-connected workflows on this LAN host.</p>"
             f"{error_html}"
             "<form class=\"login-form\" method=\"post\" action=\"/login\">"
             "<label>Username</label><input name=\"username\" autocomplete=\"username\" required />"
@@ -8163,7 +9379,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         merged = _config_snapshot().get("values", {})
         if isinstance(merged, dict):
-            merged.update({key: str(value).strip() for key, value in values.items()})
+            merged.update({key: _resolve_config_value_for_merge(key, value, merged) for key, value in values.items()})
         self._json(HTTPStatus.OK, _mcp_probe(merged if isinstance(merged, dict) else {}))
 
     def _api_config_validate_post(self) -> None:
@@ -8181,7 +9397,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         merged = _config_snapshot().get("values", {})
         if isinstance(merged, dict):
-            merged.update({key: str(value).strip() for key, value in values.items()})
+            merged.update({key: _resolve_config_value_for_merge(key, value, merged) for key, value in values.items()})
         scope = str(payload.get("scope", "full")).strip().lower() if isinstance(payload, dict) else "full"
         if scope not in {"full", "edge"}:
             scope = "full"
@@ -8202,8 +9418,11 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(values, dict):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "values must be an object"})
             return
+        current_values = _config_snapshot().get("values", {})
+        if not isinstance(current_values, dict):
+            current_values = {}
         updates = {
-            key: str(values.get(key, "")).strip()
+            key: _resolve_config_value_for_merge(key, values.get(key, ""), current_values)
             for key in CONFIG_EDITABLE_KEYS
             if key in values
         }
@@ -8643,6 +9862,8 @@ class Handler(BaseHTTPRequestHandler):
         result = payload.get("result", {}) if isinstance(payload, dict) else {}
         if not isinstance(result, dict):
             result = {}
+        mitre_bundle = _mitre_attack_bundle(result)
+        result["mitre_attack"] = mitre_bundle
         result_compact = dict(result)
         result_compact.pop("tdir_case", None)
 
@@ -8706,6 +9927,7 @@ class Handler(BaseHTTPRequestHandler):
                 "sample_rows": sample_rows,
                 "sample_rows_source": sample_source,
                 "sample_rows_error": sample_error,
+                "splunk_search_url_base": _splunk_search_url_base(),
                 "selected_spl_details": selected_spl_details,
                 "result": result_compact,
                 "meta": payload.get("meta", {}) if isinstance(payload, dict) else {},
@@ -9109,9 +10331,21 @@ class Handler(BaseHTTPRequestHandler):
             )
             if isinstance(result, dict):
                 result = dict(result)
+                result_body = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+                if isinstance(result_body, dict):
+                    result_body = dict(result_body)
+                    mitre_bundle = _mitre_attack_bundle(result_body)
+                    mitre_bundle["validation"] = _mitre_attack_validate(result_body, mitre_bundle)
+                    result_body["mitre_attack"] = mitre_bundle
+                    result["result"] = result_body
+                    meta = result.get("meta", {}) if isinstance(result.get("meta"), dict) else {}
+                    artifact_path = str(meta.get("artifact", "")).strip()
+                    if artifact_path:
+                        _persist_mitre_bundle_to_artifact(artifact_path, mitre_bundle)
                 result["sample_rows"] = sample_rows
                 result["sample_rows_source"] = sample_source
                 result["sample_rows_error"] = sample_error
+                result["splunk_search_url_base"] = _splunk_search_url_base()
             self._json(200, result)
         except Exception as exc:
             self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
@@ -9121,6 +10355,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run local SOC web UI server")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--tls-cert-file", default=os.getenv("AGTSMITH_TLS_CERT_FILE", "").strip())
+    parser.add_argument("--tls-key-file", default=os.getenv("AGTSMITH_TLS_KEY_FILE", "").strip())
     args = parser.parse_args()
 
     if _auth_enabled():
@@ -9133,7 +10369,18 @@ def main() -> int:
             print("WARNING: default UI auth credential detected (analyst/changeme123!). Change it in config/ui.env.")
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"Web UI running at http://{args.host}:{args.port}")
+    scheme = "http"
+    if args.tls_cert_file and args.tls_key_file:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(certfile=args.tls_cert_file, keyfile=args.tls_key_file)
+        httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
+        scheme = "https"
+    print(f"Web UI running at {scheme}://{args.host}:{args.port}")
+    if scheme == "https":
+        print(f"TLS cert: {args.tls_cert_file}")
+        print(f"TLS key: {args.tls_key_file}")
+    else:
+        print("TLS disabled. Set AGTSMITH_TLS_CERT_FILE and AGTSMITH_TLS_KEY_FILE to enable HTTPS.")
     print(f"UI auth enabled: {_auth_enabled()}")
     print("Default landing: /mcp")
     print("Investigation UI: /investigation")

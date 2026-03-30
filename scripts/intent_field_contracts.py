@@ -38,7 +38,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
         ),
         "linux_auth_failures": (
             ("index=linux",),
-            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth-too_small", "sourcetype=linux_secure", "eventtype=failed_login", "tag=authentication"),
+            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth.log", "sourcetype=linux_secure", "eventtype=failed_login", "tag=authentication"),
             ("failed", "authentication failure", "invalid user"),
             ("stats ", "timechart "),
         ),
@@ -88,14 +88,14 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
         ),
         "linux_privilege_escalation": (
             ("index=linux", "index=botsv3"),
-            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth-too_small", "sourcetype=linux_secure"),
+            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth.log", "sourcetype=linux_secure"),
             ("sudo", " su "),
             ("stats ", "timechart "),
             ("process_name",),
         ),
         "linux_privilege_escalation_activity": (
             ("index=linux", "index=botsv3"),
-            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth-too_small", "sourcetype=linux_secure"),
+            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth.log", "sourcetype=linux_secure"),
             ("sudo:", "su:", "pam_unix(sudo:session)", "pam_unix(su:session)", "command="),
             ("table ",),
             ("process_name",),
@@ -105,7 +105,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
         ),
         "linux_session_activity": (
             ("index=linux",),
-            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth-too_small"),
+            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth.log"),
             ("session opened for user", "session closed for user", "pam_unix(cron:session)"),
             ("session_state",),
             ("actor",),
@@ -123,7 +123,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
         ),
         "linux_privilege_escalation_first_seen": (
             ("index=linux", "index=botsv3"),
-            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth-too_small", "sourcetype=linux_secure"),
+            ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth.log", "sourcetype=linux_secure"),
             ("session opened for user root by", "command=", "pam_unix(sudo:session)", "pam_unix(su:session)", "sudo:", "su:"),
             ("earliest(_time)", "min(_time)"),
             ("first_seen",),

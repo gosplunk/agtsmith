@@ -14,7 +14,7 @@ def infer_question_dimensions(question: str) -> dict[str, Any]:
     platforms: list[str] = []
     if any(tok in q for tok in ("windows", "wineventlog", "xmlwineventlog", "eventcode", "event id", "sysmon")):
         platforms.append("windows")
-    if any(tok in q for tok in ("linux", "ubuntu", "rpi5", "auth.log", "auth-4", "auth-too_small", "linux_secure", "/var/log/auth.log", "sudo", "su ", " ssh", "ssh ")):
+    if any(tok in q for tok in ("linux", "ubuntu", "rpi5", "auth.log", "auth-4", "linux_secure", "/var/log/auth.log", "sudo", "su ", " ssh", "ssh ")):
         platforms.append("linux")
     if any(tok in q for tok in ("apache", "access_combined", "http", "web", "404", "user agent", "useragent")):
         platforms.append("web")

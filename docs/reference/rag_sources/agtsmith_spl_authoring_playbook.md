@@ -14,7 +14,7 @@ This playbook exists to help the query-writing model prefer simple, dataset-grou
 
 ## Linux Auth Failures
 - Preferred index: `index=linux`
-- Prefer the live Linux auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. If extracted sourcetypes are present, `auth-too_small` and `linux_secure` are acceptable.
+- Prefer the live Linux auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. If extracted sourcetypes are present, auth-log variants such as `auth.log` and `linux_secure` are acceptable.
 - Preferred fields: `host`, `user`, `src_ip`, `port`
 - Default query shape:
 
@@ -128,7 +128,7 @@ search index=windows sourcetype=XmlWinEventLog (EventID=5379 OR EventCode=5379 O
 
 ## Linux Session Activity
 - Preferred index: `index=linux`
-- Prefer the live Linux auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. If extracted sourcetypes are present, `auth-too_small` and `linux_secure` are acceptable.
+- Prefer the live Linux auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. If extracted sourcetypes are present, auth-log variants such as `auth.log` and `linux_secure` are acceptable.
 - Preferred signals: `session opened for user`, `session closed for user`, `pam_unix(cron:session)`
 - Preferred fields: `host`, `session_state`, `session_user`
 - Default query shape:
@@ -167,7 +167,7 @@ search index=<linux_audit_index> sourcetype=linux_audit
 
 ## Linux Privilege Escalation First Seen
 - Preferred index: `index=linux`
-- Prefer the live Linux auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. If extracted sourcetypes are present, `auth-too_small` and `linux_secure` are acceptable.
+- Prefer the live Linux auth log source first: `source="/var/log/auth.log"` or `source="/var/log/secure"`. If extracted sourcetypes are present, auth-log variants such as `auth.log` and `linux_secure` are acceptable.
 - Preferred signals: `"session opened for user root by"`, `"COMMAND="`, `"pam_unix(sudo:session)"`, `"pam_unix(su:session)"`, `"sudo:"`, `"su:"`
 - Required shape: `earliest(_time) as first_seen`
 - Default query shape:

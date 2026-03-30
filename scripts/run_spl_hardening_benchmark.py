@@ -19,6 +19,7 @@ from intent_field_contracts import validate_query_for_intent
 from langgraph_multi_model_soc import planner_node, run_multi_model_soc, writer_node
 from minimal_question_to_answer import map_question_to_template, run_splunk_query_args, template_to_query_args
 from query_policy import validate_query_args
+from web_ui_server import _mitre_attack_bundle
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,8 @@ class Case:
     min_rows: int
     expected_earliest_time: str
     expected_latest_time: str
+    expected_mitre_techniques: tuple[str, ...]
+    min_mitre_pivots: int
 
 
 def _generate_botsv3_inventory_cases() -> list[Case]:
@@ -59,6 +62,8 @@ def _generate_botsv3_inventory_cases() -> list[Case]:
                 min_rows=1,
                 expected_earliest_time="0",
                 expected_latest_time="now",
+                expected_mitre_techniques=(),
+                min_mitre_pivots=0,
             )
         )
     return cases
@@ -84,6 +89,8 @@ def _load_cases(path: Path) -> list[Case]:
             min_rows=int(row.get("min_rows", 0)),
             expected_earliest_time=str(row.get("expected_earliest_time", "")).strip(),
             expected_latest_time=str(row.get("expected_latest_time", "")).strip(),
+            expected_mitre_techniques=tuple(row.get("expected_mitre_techniques", [])),
+            min_mitre_pivots=int(row.get("min_mitre_pivots", 0)),
         )
         for row in raw
     ]
@@ -134,6 +141,7 @@ def _score_case(
     policy_reason: str,
     structured: dict[str, Any] | None,
     error: str,
+    mitre_bundle: dict[str, Any] | None,
 ) -> dict[str, Any]:
     query = str(query_args.get("query", "")).strip()
     lower = query.lower()
@@ -226,6 +234,24 @@ def _score_case(
             if not case.allow_zero_rows:
                 score = min(score, 79)
 
+    bundle = mitre_bundle if isinstance(mitre_bundle, dict) else {}
+    techniques = bundle.get("techniques", []) if isinstance(bundle.get("techniques"), list) else []
+    actual_technique_ids = [str(item.get("technique_id", "")).strip() for item in techniques if isinstance(item, dict)]
+    if case.expected_mitre_techniques:
+        hits = [tid for tid in case.expected_mitre_techniques if tid in actual_technique_ids]
+        if hits:
+            score += 10
+        else:
+            findings.append("mitre_mismatch:" + ",".join(case.expected_mitre_techniques))
+    else:
+        score += 10
+    if case.min_mitre_pivots > 0:
+        pivot_count = len(bundle.get("next_pivots", [])) if isinstance(bundle.get("next_pivots"), list) else 0
+        if pivot_count >= case.min_mitre_pivots:
+            score += 5
+        else:
+            findings.append(f"mitre_pivots_below_expectation:{pivot_count}<{case.min_mitre_pivots}")
+
     failure_class = "pass"
     if error:
         failure_class = "execution_error"
@@ -245,6 +271,8 @@ def _score_case(
         failure_class = "shape_mismatch"
     elif any(item.startswith("time_mismatch_") for item in findings):
         failure_class = "time_window_mismatch"
+    elif any(item.startswith("mitre_mismatch:") for item in findings):
+        failure_class = "mitre_mismatch"
 
     return {
         "score": max(0, min(100, score)),
@@ -255,6 +283,8 @@ def _score_case(
         "failure_class": failure_class,
         "intent_contract_ok": contract_ok,
         "intent_contract_reason": contract_reason,
+        "mitre_techniques": actual_technique_ids,
+        "mitre_pivots": len(bundle.get("next_pivots", [])) if isinstance(bundle.get("next_pivots"), list) else 0,
     }
 
 
@@ -390,6 +420,7 @@ def main() -> int:
             policy_reason = str(result.get("validation_reason", ""))
             if not policy_ok:
                 error = policy_reason or "validation_failed"
+            mitre_bundle = _mitre_attack_bundle(result if isinstance(result, dict) else {})
         elif args.use_planner:
             planner_state = planner_node({"question": case.question})
             writer_state = writer_node({"question": case.question, "planner_output": planner_state.get("planner_output", {})})
@@ -400,6 +431,7 @@ def main() -> int:
             structured: dict[str, Any] | None = None
             error = ""
             policy_ok, policy_reason = validate_query_args(query_args, question=case.question)
+            mitre_bundle = _mitre_attack_bundle({"intent": actual_intent, "summary": ""})
         else:
             template = map_question_to_template(case.question)
             actual_intent = template.intent
@@ -408,6 +440,7 @@ def main() -> int:
             structured = None
             error = ""
             policy_ok, policy_reason = validate_query_args(query_args, question=case.question)
+            mitre_bundle = _mitre_attack_bundle({"intent": actual_intent, "summary": ""})
 
         if not args.use_full_pipeline:
             if policy_ok:
@@ -429,6 +462,7 @@ def main() -> int:
             policy_reason=policy_reason,
             structured=structured,
             error=error,
+            mitre_bundle=mitre_bundle,
         )
         row = {
             "id": case.id,

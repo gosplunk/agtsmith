@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-DEFAULT_REMOTE_URL = "http://192.168.169.173:8791/logs/stream"
+DEFAULT_REMOTE_URL = ""
 DEFAULT_BUFFER_SIZE = 5000
 ALLOWED_ROLES = {"admin", "ops"}
 
