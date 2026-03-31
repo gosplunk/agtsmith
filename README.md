@@ -62,6 +62,11 @@ These screenshots reflect the current `v1.2.1` interface.
 
 ![A.G.E.N.T. Smith v1.2.1 architecture view](docs/images/screenshots/v1.2.1/agtsmith-v1.2.1-architecture.png)
 
+### Data Domains And Personalization
+`v1.2.1` environment-aware Data Domains view showing the Linux domain expanded into Apache `access_combined` telemetry with field inventory used for query grounding and personalization.
+
+![A.G.E.N.T. Smith v1.2.1 Data Domains personalization view](docs/images/screenshots/v1.2.1/agtsmith-v1.2.1-data-domains.png)
+
 ## How It Works
 The default SPL path is a split-role pipeline:
 
