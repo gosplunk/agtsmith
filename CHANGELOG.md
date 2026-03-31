@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.2.1
+
+- aligned the live investigation runtime to the saved role model assignments instead of falling back to process defaults
+- moved security review, evidence review, continuation review, and final summary to `Foundation-Sec-8B-Reasoning` while keeping `Qwen` for planning and `deepseek-coder-v2:lite` for SPL generation and repair
+- updated architecture docs, runbooks, model strategy guidance, and investigation graphs to reflect the split-role model pipeline
+- added a canonical next-release planning document for `v1.3.0`, including the planned persistent follow-up context enhancement for standard pivots
+- fixed the runtime configuration save flow so host changes persist cleanly without leaving the UI stuck on `Saving...`
+- verified remote Ollama host validation and end-to-end live investigation execution through the web UI
+
 ## v1.2.0
 
 - redesigned the Investigation UI into a desktop-first two-column workspace with a sticky left control rail and dominant right results area
