@@ -1,6 +1,6 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.2.0`
+Current release: `v1.2.1`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
@@ -44,6 +44,24 @@ Then:
 - refresh Data Domains
 - run the first investigation
 
+## Screenshots
+These screenshots reflect the current `v1.2.1` interface.
+
+### Login
+`v1.2.1` login flow for the analyst console.
+
+![A.G.E.N.T. Smith v1.2.1 login](docs/images/screenshots/v1.2.1/agtsmith-v1.2.1-login.png)
+
+### Investigation Workspace
+`v1.2.1` Splunk-first investigation workflow with sticky analyst controls, current assessment, timeline, pivots, and ATT&CK context.
+
+![A.G.E.N.T. Smith v1.2.1 investigation workspace](docs/images/screenshots/v1.2.1/agtsmith-v1.2.1-investigation.png)
+
+### Architecture View
+`v1.2.1` system architecture and role separation view for the bounded Splunk investigation pipeline.
+
+![A.G.E.N.T. Smith v1.2.1 architecture view](docs/images/screenshots/v1.2.1/agtsmith-v1.2.1-architecture.png)
+
 ## How It Works
 The default SPL path is a split-role pipeline:
 
@@ -79,6 +97,13 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - added ATT&CK logic benchmarks for BOTSv3-oriented investigation logic validation
 - added built-in HTTPS support and masked Splunk token handling in Configuration
 - sanitized shipped defaults so environment-specific URLs and local learned assumptions are not baked into the public repo
+
+## What's New In v1.2.1
+- aligned the live investigation runtime to the saved Configuration role assignments instead of falling back to process defaults
+- moved security review, evidence review, continuation review, and final summary to `Foundation-Sec-8B-Reasoning` while keeping `Qwen` for planning and `deepseek-coder-v2:lite` for SPL generation and repair
+- updated the docs, architecture graphs, and model strategy guidance to reflect the split-role investigation pipeline
+- added a canonical next-release planning document for `v1.3.0`, including persistent follow-up context as a planned standard-pivot enhancement
+- fixed the runtime configuration save flow so changing Ollama/Splunk hosts does not leave the UI stuck on `Saving...`
 
 ## What's New In v1.1.0
 - Guarded local learning with reviewable, airgapped environment-specific memory
