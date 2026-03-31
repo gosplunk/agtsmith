@@ -45,7 +45,7 @@ Then:
 - run the first investigation
 
 ## How It Works
-The default SPL path is a two-model pipeline:
+The default SPL path is a split-role pipeline:
 
 1. `Planner`
    - default: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
@@ -54,8 +54,11 @@ The default SPL path is a two-model pipeline:
    - default: `deepseek-coder-v2:lite`
    - turns the plan into bounded read-only SPL
 3. `Security Reviewer`
-   - default: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
-   - critiques the writer output before deterministic validation
+   - default: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+   - performs security-oriented critique before deterministic validation
+4. `Evidence Reviewer / Final Summary`
+   - default: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+   - judges returned evidence quality and produces the analyst-facing narrative
 
 If the reviewer approves the query cleanly, the controller can skip extra adjudication and move straight to validation.
 
@@ -238,6 +241,9 @@ make spl-hardening-benchmark-botsv3-inventory
 ## Roadmap
 Near-term work is focused on making the current investigation loop stronger, not turning the project into a different product.
 
+For the current planned-release view, including committed next-step work and known gaps, see:
+- [Next Release Plan](docs/project/next_release_plan.md)
+
 - Better mixed-platform handling for prompts that span Windows and Linux in one question
 - Deeper multi-step investigations with stronger bounded continuation, clearer pivot logic, and better evidence review
 - Broader LangGraph topology eval coverage so routing and review changes are measured before they become defaults
@@ -256,13 +262,18 @@ Near-term work is focused on making the current investigation loop stronger, not
 4. `docs/runbooks/health_check.md`
 5. `docs/architecture/two_model_spl_pipeline.md`
 6. `docs/architecture/system_design.md`
+7. `docs/project/next_release_plan.md`
 
 ## Default Model Assignments
 ```bash
 export OLLAMA_MODEL_QUERY_PLANNER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
 export OLLAMA_MODEL_QUERY_WRITER="deepseek-coder-v2:lite"
-export OLLAMA_MODEL_SECURITY_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-export OLLAMA_MODEL_EVIDENCE_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+export OLLAMA_MODEL_SECURITY_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+export OLLAMA_MODEL_EVIDENCE_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+export OLLAMA_MODEL_PEER_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+export OLLAMA_MODEL_PEER_REVIEWER_2="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+export OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+export OLLAMA_MODEL_FINAL_SUMMARY="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 export OLLAMA_MODEL_QUERY_REPAIR="deepseek-coder-v2:lite"
 ```
 

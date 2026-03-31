@@ -43,6 +43,13 @@ from query_policy import validate_query_args
 from tdir_core import build_tdir_case
 from environment_profile import validate_query_against_environment
 from spl_query_repair import attempt_query_repair_once
+from runtime_config import (
+    DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER,
+    DEFAULT_MODEL_EVIDENCE_REVIEWER,
+    DEFAULT_MODEL_FINAL_SUMMARY,
+    DEFAULT_MODEL_QUERY_REPAIR,
+    get_model_assignment,
+)
 
 
 class AgentState(TypedDict, total=False):
@@ -70,19 +77,19 @@ class AgentState(TypedDict, total=False):
 BLOCKED_TERMS = ("delete", "drop", "remove", "shutdown", "restart", "write", "modify")
 AGENTIC_SUMMARY_MODEL = os.getenv(
     "OLLAMA_MODEL_AGENTIC_SUMMARY",
-    os.getenv("OLLAMA_MODEL_FINAL_SUMMARY", OLLAMA_REASONING_MODEL),
+    get_model_assignment("OLLAMA_MODEL_FINAL_SUMMARY", DEFAULT_MODEL_FINAL_SUMMARY),
 )
-AGENTIC_EVIDENCE_REVIEWER_MODEL = os.getenv("OLLAMA_MODEL_EVIDENCE_REVIEWER", OLLAMA_REASONING_MODEL)
+AGENTIC_EVIDENCE_REVIEWER_MODEL = get_model_assignment("OLLAMA_MODEL_EVIDENCE_REVIEWER", DEFAULT_MODEL_EVIDENCE_REVIEWER)
 AGENTIC_QUERY_WRITER_MODEL = os.getenv("OLLAMA_MODEL_AGENTIC_QUERY_WRITER", "deterministic_template_router_v1")
 AGENTIC_REVIEWER_MODEL = os.getenv("OLLAMA_MODEL_AGENTIC_REVIEWER", "deterministic_query_policy_guard_v1")
 AGENTIC_PEER_REVIEWER_MODEL = os.getenv("OLLAMA_MODEL_AGENTIC_PEER_REVIEWER", "deterministic_intent_alignment_guard_v1")
 AGENTIC_CONTROLLER_MODEL = os.getenv("OLLAMA_MODEL_AGENTIC_CONTROLLER", "deterministic_agentic_controller_v1")
-AGENTIC_CONTINUATION_REVIEWER_MODEL = os.getenv(
+AGENTIC_CONTINUATION_REVIEWER_MODEL = get_model_assignment(
     "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER",
-    OLLAMA_REASONING_MODEL,
+    DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER,
 )
 AGENTIC_CONTINUATION_REVIEW_TIMEOUT_SEC = float(os.getenv("OLLAMA_AGENTIC_CONTINUATION_TIMEOUT_SEC", "180"))
-AGENTIC_QUERY_REPAIR_MODEL = os.getenv("OLLAMA_MODEL_QUERY_REPAIR", "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M")
+AGENTIC_QUERY_REPAIR_MODEL = get_model_assignment("OLLAMA_MODEL_QUERY_REPAIR", DEFAULT_MODEL_QUERY_REPAIR)
 AGENTIC_AUTO_CONTINUE_LIMIT = int(os.getenv("OLLAMA_AGENTIC_AUTO_CONTINUE_LIMIT", "1"))
 AGENTIC_MAX_INVESTIGATION_DEPTH = int(os.getenv("OLLAMA_AGENTIC_MAX_INVESTIGATION_DEPTH", "3"))
 AGENTIC_CONTINUE_CONFIDENCE_THRESHOLD = float(os.getenv("OLLAMA_AGENTIC_CONTINUE_CONFIDENCE_THRESHOLD", "0.6"))

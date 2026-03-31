@@ -1,28 +1,28 @@
 # Model Strategy
 
-## Active Two-Model SPL Workflow
+## Active Split-Role SPL Workflow
 
-### Planner and Reviewer Model
+### Planner Model
 - Default:
   - `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
 - Responsibilities:
   - planner
-  - security reviewer / critic
-  - evidence reviewer
   - peer reviewer 1 when needed
   - peer reviewer 2 when needed
 
-This model is used for reasoning-heavy stages where the system needs intent interpretation, search-strategy explanation, and critique.
+This model is used for higher-context reasoning where the system needs intent interpretation, search-strategy explanation, and adjudication between competing candidate plans.
 
-### Summary Model
+### Security Review and Summary Model
 - Default:
   - `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
 - Responsibilities:
+  - security reviewer / critic
+  - evidence reviewer
   - final summary
   - agentic summary
-  - continuation summary handoff
+  - continuation reviewer
 
-This model is used for concise analyst-facing summaries and end-of-run narrative output.
+This model is used for security-oriented critique, evidence assessment, continuation judgment, and concise analyst-facing output.
 
 ### SPL Writer Model
 - Default:
@@ -71,7 +71,7 @@ Configuration keys:
 5. Peer reviewers adjudicate writer vs reviewer candidate only when the reviewer does not cleanly approve the query or materially changes it.
 6. Deterministic validation enforces read-only safety and environment binding.
 7. Splunk executes only approved plans.
-8. Evidence review and summary convert execution results into analyst-facing output.
+8. Evidence review, continuation review, and final summary convert execution results into analyst-facing output.
 
 ## Offline Optimization Flow
 The same runtime now has an offline eval harness used to improve the LangGraph layout without changing the live default path blindly:
@@ -88,10 +88,11 @@ This is where experimental decisions about reviewer, peer review, summary, and r
 ```bash
 export OLLAMA_MODEL_QUERY_PLANNER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
 export OLLAMA_MODEL_QUERY_WRITER="deepseek-coder-v2:lite"
-export OLLAMA_MODEL_SECURITY_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-export OLLAMA_MODEL_EVIDENCE_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+export OLLAMA_MODEL_SECURITY_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+export OLLAMA_MODEL_EVIDENCE_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 export OLLAMA_MODEL_PEER_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
 export OLLAMA_MODEL_PEER_REVIEWER_2="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+export OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 export OLLAMA_MODEL_FINAL_SUMMARY="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 export OLLAMA_MODEL_QUERY_REPAIR="deepseek-coder-v2:lite"
 export EDGE_LLM_ENABLED="0"

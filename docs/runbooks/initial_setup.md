@@ -203,15 +203,20 @@ A.G.E.N.T. Smith will show:
 
 Run the generated `ollama pull ...` commands on the Ollama host for anything missing, then re-run validation.
 
-Recommended two-model assignment:
+Recommended role assignment:
 - `Planner` -> `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
 - `SPL Writer` -> `deepseek-coder-v2:lite`
-- `Security Reviewer` -> `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
+- `Security Reviewer` -> `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+- `Evidence Reviewer` -> `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+- `Continuation Reviewer` -> `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+- `Final Summary` -> `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+- `Peer Reviewer 1 / 2` -> `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
 
 Normal runtime path:
 - Planner -> SPL Writer -> Security Reviewer
 - Peer reviewers only run when the reviewer does not cleanly approve the writer output
 - Deterministic validation still decides what can touch Splunk
+- Evidence review, continuation review, and final summary run on the security-tuned Foundation-Sec path after execution
 - Optional later extension: add a small edge-hosted model ahead of the planner for question routing and split-query hints, while keeping the primary planner/writer/reviewer roles on the main inference host.
 
 ### 6. Optional edge helper

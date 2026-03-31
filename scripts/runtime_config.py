@@ -12,6 +12,16 @@ DEFAULT_SPLUNK_MCP_URL = "https://127.0.0.1:8089/services/mcp"
 DEFAULT_SPLUNK_BASE_URL = "https://127.0.0.1:8089"
 DEFAULT_EDGE_LLM_ROLE = "edge_router_splitter"
 DEFAULT_EDGE_LLM_TIMEOUT_SEC = "60"
+DEFAULT_MODEL_QUERY_PLANNER = "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+DEFAULT_MODEL_QUERY_WRITER = "deepseek-coder-v2:lite"
+DEFAULT_MODEL_REASONING = "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+DEFAULT_MODEL_SECURITY_REVIEWER = DEFAULT_MODEL_REASONING
+DEFAULT_MODEL_EVIDENCE_REVIEWER = DEFAULT_MODEL_REASONING
+DEFAULT_MODEL_PEER_REVIEWER = DEFAULT_MODEL_QUERY_PLANNER
+DEFAULT_MODEL_PEER_REVIEWER_2 = DEFAULT_MODEL_QUERY_PLANNER
+DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER = DEFAULT_MODEL_REASONING
+DEFAULT_MODEL_FINAL_SUMMARY = DEFAULT_MODEL_REASONING
+DEFAULT_MODEL_QUERY_REPAIR = DEFAULT_MODEL_QUERY_WRITER
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 UI_ENV_PATH = PROJECT_ROOT / "config" / "ui.env"
@@ -66,6 +76,10 @@ def get_splunk_base_url() -> str:
 
 def get_runtime_secret(name: str, default: str = "") -> str:
     return str(_get_config_value(name, default)).strip()
+
+
+def get_model_assignment(name: str, default: str = "") -> str:
+    return str(_get_config_value(name, default)).strip() or default
 
 
 def parse_env_file(path: Path | None = None) -> tuple[list[str], dict[str, str]]:

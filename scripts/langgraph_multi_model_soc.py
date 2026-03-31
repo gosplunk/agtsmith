@@ -50,21 +50,30 @@ from spl_query_repair import attempt_query_repair_once
 from tdir_core import build_tdir_case
 from environment_profile import validate_query_against_environment
 from intent_field_contracts import validate_query_for_intent
-
-# Per-role model selection (env-driven for easy lab switching)
-DEFAULT_PLANNER_MODEL = "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-DEFAULT_QUERY_WRITER_MODEL = "deepseek-coder-v2:lite"
-MODEL_QUERY_PLANNER = os.getenv(
-    "OLLAMA_MODEL_QUERY_PLANNER",
-    os.getenv("OLLAMA_MODEL_PLANNER", os.getenv("OLLAMA_MODEL_PRIMARY", DEFAULT_PLANNER_MODEL)),
+from runtime_config import (
+    DEFAULT_MODEL_EVIDENCE_REVIEWER,
+    DEFAULT_MODEL_FINAL_SUMMARY,
+    DEFAULT_MODEL_PEER_REVIEWER,
+    DEFAULT_MODEL_PEER_REVIEWER_2,
+    DEFAULT_MODEL_QUERY_PLANNER,
+    DEFAULT_MODEL_QUERY_REPAIR,
+    DEFAULT_MODEL_QUERY_WRITER,
+    DEFAULT_MODEL_SECURITY_REVIEWER,
+    get_model_assignment,
 )
-MODEL_QUERY_WRITER = os.getenv("OLLAMA_MODEL_QUERY_WRITER", DEFAULT_QUERY_WRITER_MODEL)
-MODEL_SECURITY_REVIEWER = os.getenv("OLLAMA_MODEL_SECURITY_REVIEWER", MODEL_QUERY_PLANNER)
-MODEL_EVIDENCE_REVIEWER = os.getenv("OLLAMA_MODEL_EVIDENCE_REVIEWER", MODEL_SECURITY_REVIEWER)
-MODEL_PEER_REVIEWER = os.getenv("OLLAMA_MODEL_PEER_REVIEWER", MODEL_QUERY_PLANNER)
-MODEL_PEER_REVIEWER_2 = os.getenv("OLLAMA_MODEL_PEER_REVIEWER_2", MODEL_QUERY_PLANNER)
-MODEL_FINAL_SUMMARY = os.getenv("OLLAMA_MODEL_FINAL_SUMMARY", MODEL_QUERY_PLANNER)
-MODEL_QUERY_REPAIR = os.getenv("OLLAMA_MODEL_QUERY_REPAIR", MODEL_QUERY_WRITER)
+
+# Per-role model selection (env or saved runtime config driven for easy lab switching)
+MODEL_QUERY_PLANNER = get_model_assignment(
+    "OLLAMA_MODEL_QUERY_PLANNER",
+    os.getenv("OLLAMA_MODEL_PLANNER", os.getenv("OLLAMA_MODEL_PRIMARY", DEFAULT_MODEL_QUERY_PLANNER)),
+)
+MODEL_QUERY_WRITER = get_model_assignment("OLLAMA_MODEL_QUERY_WRITER", DEFAULT_MODEL_QUERY_WRITER)
+MODEL_SECURITY_REVIEWER = get_model_assignment("OLLAMA_MODEL_SECURITY_REVIEWER", DEFAULT_MODEL_SECURITY_REVIEWER)
+MODEL_EVIDENCE_REVIEWER = get_model_assignment("OLLAMA_MODEL_EVIDENCE_REVIEWER", DEFAULT_MODEL_EVIDENCE_REVIEWER)
+MODEL_PEER_REVIEWER = get_model_assignment("OLLAMA_MODEL_PEER_REVIEWER", DEFAULT_MODEL_PEER_REVIEWER)
+MODEL_PEER_REVIEWER_2 = get_model_assignment("OLLAMA_MODEL_PEER_REVIEWER_2", DEFAULT_MODEL_PEER_REVIEWER_2)
+MODEL_FINAL_SUMMARY = get_model_assignment("OLLAMA_MODEL_FINAL_SUMMARY", DEFAULT_MODEL_FINAL_SUMMARY)
+MODEL_QUERY_REPAIR = get_model_assignment("OLLAMA_MODEL_QUERY_REPAIR", DEFAULT_MODEL_QUERY_REPAIR)
 RAG_ENABLED = str(os.getenv("OLLAMA_RAG_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 RAG_MAX_CHARS = int(os.getenv("OLLAMA_RAG_MAX_CHARS", "1600"))
 
@@ -694,7 +703,8 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
                 "| sort - count | head 20"
             )
             normalized["intent"] = "linux_audit_activity"
-        args["query"] = re.sub(r"\s{2,}", " ", str(args["query"]).strip())
+        if "query" in args and str(args.get("query", "")).strip():
+            args["query"] = re.sub(r"\s{2,}", " ", str(args["query"]).strip())
 
     if tool == "splunk_run_query" and "row_limit" not in args:
         args["row_limit"] = 10
@@ -1035,9 +1045,16 @@ def security_review_node(state: MultiModelState) -> MultiModelState:
             "source": "reviewer_fallback",
         }
 
+    revised_tool_args = reviewer_output.get("revised_tool_args", writer_output.get("tool_args", {}))
+    if not isinstance(revised_tool_args, dict):
+        revised_tool_args = {}
+    writer_tool_args = writer_output.get("tool_args", {})
+    if not isinstance(writer_tool_args, dict):
+        writer_tool_args = {}
+    merged_tool_args = {**writer_tool_args, **revised_tool_args}
     candidate = {
         "selected_tool": reviewer_output.get("revised_selected_tool", writer_output.get("selected_tool", "")),
-        "tool_args": reviewer_output.get("revised_tool_args", writer_output.get("tool_args", {})),
+        "tool_args": merged_tool_args,
         "intent": planner_output.get("intent", "unknown"),
         "confidence": reviewer_output.get("confidence", 0.5),
         "reason": reviewer_output.get("rationale", ""),

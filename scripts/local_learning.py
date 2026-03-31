@@ -14,7 +14,13 @@ from typing import Any
 import httpx
 
 from environment_profile import load_environment_profile
-from runtime_config import get_ollama_host, parse_env_file
+from runtime_config import (
+    DEFAULT_MODEL_QUERY_PLANNER,
+    DEFAULT_MODEL_QUERY_WRITER,
+    DEFAULT_MODEL_SECURITY_REVIEWER,
+    get_ollama_host,
+    parse_env_file,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS_ROOT = PROJECT_ROOT / "artifacts"
@@ -38,10 +44,6 @@ INTENT_TO_DOMAIN = {
     "windows_auth_failures": "windows_auth",
     "apache_access_top_ips": "apache_web",
 }
-DEFAULT_MODEL_QUERY_PLANNER = "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-DEFAULT_MODEL_QUERY_WRITER = "deepseek-coder-v2:lite"
-DEFAULT_MODEL_SECURITY_REVIEWER = DEFAULT_MODEL_QUERY_PLANNER
-
 EXPECTED_KIND_BY_DOMAIN = {
     "linux_auth": "preferred_sources",
     "windows_auth": "preferred_fields",

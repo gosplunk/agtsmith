@@ -1,11 +1,13 @@
-# Two-Model SPL Pipeline
+# Split-Role SPL Pipeline
 
 ## Overview
 
-A.G.E.N.T. Smith now uses a two-model path for SPL generation:
+A.G.E.N.T. Smith now uses a split-role path for SPL generation and security review:
 
-- `Planner / Reviewer`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
+- `Planner`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
 - `SPL Writer`: `deepseek-coder-v2:lite`
+- `Security Review / Evidence Review / Final Summary`: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+- `Peer Review`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
 
 An optional helper layer can sit in front of that path:
 - `Edge Router / Splitter`: small LLM on an edge device for cheap question classification and cross-platform split hints
@@ -26,15 +28,15 @@ flowchart LR
     R --> B[Planner Node<br/>Qwen]
     A -->|edge helper disabled| B
     B --> C[Writer Node<br/>DeepSeek-Coder]
-    C --> D[Reviewer Node<br/>Qwen]
+    C --> D[Reviewer Node<br/>Foundation-Sec]
     D -->|clean approval| G[Deterministic Validation]
     D -->|contested or revised| E[Peer Review 1<br/>Qwen]
     E --> F[Peer Review 2<br/>Qwen]
     F --> G
     G -->|approved| H[Splunk MCP Read-Only Execution]
     G -->|blocked| I[Fail Closed]
-    H --> J[Evidence Review<br/>Qwen]
-    J --> K[Final Summary<br/>Qwen]
+    H --> J[Evidence Review<br/>Foundation-Sec]
+    J --> K[Final Summary<br/>Foundation-Sec]
 ```
 
 ## Stage Responsibilities
@@ -75,6 +77,7 @@ Output shape:
 - flags bad assumptions
 - proposes safer or better read-only rewrites
 - can send the query straight to deterministic validation when it cleanly approves the writer output
+- defaults to Foundation-Sec so the critique path stays security-oriented instead of sharing the planner role
 
 ### Deterministic Validation
 - blocks unsafe behavior
@@ -104,10 +107,11 @@ Primary environment variables:
 ```bash
 OLLAMA_MODEL_QUERY_PLANNER=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
 OLLAMA_MODEL_QUERY_WRITER=deepseek-coder-v2:lite
-OLLAMA_MODEL_SECURITY_REVIEWER=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
-OLLAMA_MODEL_EVIDENCE_REVIEWER=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
+OLLAMA_MODEL_SECURITY_REVIEWER=hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
+OLLAMA_MODEL_EVIDENCE_REVIEWER=hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
 OLLAMA_MODEL_PEER_REVIEWER=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
 OLLAMA_MODEL_PEER_REVIEWER_2=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
+OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER=hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
 OLLAMA_MODEL_QUERY_REPAIR=deepseek-coder-v2:lite
 OLLAMA_MODEL_FINAL_SUMMARY=hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
 ```

@@ -47,6 +47,15 @@ from ollama_log_stream import (
 )
 from environment_profile import suggest_domains_for_question
 from runtime_config import (
+    DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER,
+    DEFAULT_MODEL_EVIDENCE_REVIEWER,
+    DEFAULT_MODEL_FINAL_SUMMARY,
+    DEFAULT_MODEL_PEER_REVIEWER,
+    DEFAULT_MODEL_PEER_REVIEWER_2,
+    DEFAULT_MODEL_QUERY_PLANNER,
+    DEFAULT_MODEL_QUERY_REPAIR,
+    DEFAULT_MODEL_QUERY_WRITER,
+    DEFAULT_MODEL_SECURITY_REVIEWER,
     UI_ENV_PATH,
     display_path,
     get_edge_llm_enabled,
@@ -57,6 +66,7 @@ from runtime_config import (
     get_ollama_host,
     get_splunk_base_url,
     get_splunk_mcp_url,
+    get_runtime_secret,
     parse_env_file,
     write_env_file,
 )
@@ -97,15 +107,15 @@ EXPECTED_MODEL_KEYS = [
     "OLLAMA_MODEL_FINAL_SUMMARY",
 ]
 DEFAULT_MODEL_ASSIGNMENTS = {
-    "OLLAMA_MODEL_QUERY_PLANNER": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
-    "OLLAMA_MODEL_QUERY_WRITER": "deepseek-coder-v2:lite",
-    "OLLAMA_MODEL_QUERY_REPAIR": "deepseek-coder-v2:lite",
-    "OLLAMA_MODEL_EVIDENCE_REVIEWER": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
-    "OLLAMA_MODEL_SECURITY_REVIEWER": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
-    "OLLAMA_MODEL_PEER_REVIEWER": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
-    "OLLAMA_MODEL_PEER_REVIEWER_2": "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M",
-    "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER": "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest",
-    "OLLAMA_MODEL_FINAL_SUMMARY": "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest",
+    "OLLAMA_MODEL_QUERY_PLANNER": DEFAULT_MODEL_QUERY_PLANNER,
+    "OLLAMA_MODEL_QUERY_WRITER": DEFAULT_MODEL_QUERY_WRITER,
+    "OLLAMA_MODEL_QUERY_REPAIR": DEFAULT_MODEL_QUERY_REPAIR,
+    "OLLAMA_MODEL_EVIDENCE_REVIEWER": DEFAULT_MODEL_EVIDENCE_REVIEWER,
+    "OLLAMA_MODEL_SECURITY_REVIEWER": DEFAULT_MODEL_SECURITY_REVIEWER,
+    "OLLAMA_MODEL_PEER_REVIEWER": DEFAULT_MODEL_PEER_REVIEWER,
+    "OLLAMA_MODEL_PEER_REVIEWER_2": DEFAULT_MODEL_PEER_REVIEWER_2,
+    "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER": DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER,
+    "OLLAMA_MODEL_FINAL_SUMMARY": DEFAULT_MODEL_FINAL_SUMMARY,
 }
 EDGE_CONFIG_KEYS = [
     "EDGE_LLM_ENABLED",
@@ -143,6 +153,7 @@ APP_VERSION = _load_app_version()
 APP_VERSION_LABEL = APP_VERSION if APP_VERSION.startswith("v") else f"v{APP_VERSION}"
 TOKEN_MASK_SENTINEL = "__KEEP_EXISTING_SPLUNK_TOKEN__"
 DEFAULT_MITRE_VALIDATOR_MODEL = "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+_SPLUNK_WEB_BASE_CACHE: dict[str, str] = {}
 
 
 def _mask_secret_display(value: str, visible_suffix: int = 4) -> str:
@@ -151,7 +162,8 @@ def _mask_secret_display(value: str, visible_suffix: int = 4) -> str:
         return ""
     if len(raw) <= visible_suffix:
         return "*" * len(raw)
-    return ("*" * max(8, len(raw) - visible_suffix)) + raw[-visible_suffix:]
+    masked_prefix = "*" * min(12, max(8, len(raw) - visible_suffix))
+    return f"{masked_prefix}...{raw[-visible_suffix:]}"
 
 
 def _resolve_config_value_for_merge(key: str, incoming: Any, current_values: dict[str, str]) -> str:
@@ -173,11 +185,46 @@ def _splunk_search_url_base() -> str:
     if not base:
         return ""
     parsed = urlparse(base)
-    if not parsed.scheme or not parsed.hostname:
+    if not parsed.hostname:
         return ""
-    scheme = parsed.scheme or "https"
     host = parsed.hostname
-    return f"{scheme}://{host}:8000/en-US/app/search/search"
+    cached = _SPLUNK_WEB_BASE_CACHE.get(host)
+    if cached:
+        return cached
+
+    def _probe(candidate: str) -> bool:
+        req = urllib.request.Request(
+            f"{candidate}/en-US/account/login",
+            headers={"User-Agent": "A.G.E.N.T.-Smith/1.2"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(
+                req,
+                timeout=3.0,
+                context=ssl._create_unverified_context() if candidate.startswith("https://") else None,
+            ) as resp:
+                status = getattr(resp, "status", 200)
+                return 200 <= int(status) < 500
+        except urllib.error.HTTPError as exc:
+            return 200 <= int(exc.code) < 500
+        except Exception:
+            return False
+
+    candidates = [
+        f"https://{host}:8000",
+        f"http://{host}:8000",
+    ]
+    if parsed.scheme in {"http", "https"}:
+        preferred = f"{parsed.scheme}://{host}:8000"
+        candidates = [preferred] + [item for item in candidates if item != preferred]
+
+    for candidate in candidates:
+        if _probe(candidate):
+            resolved = f"{candidate}/en-US/app/search/search"
+            _SPLUNK_WEB_BASE_CACHE[host] = resolved
+            return resolved
+    return ""
 
 
 def _extract_json_object(raw_text: str) -> dict[str, Any]:
@@ -2049,8 +2096,10 @@ APP_HTML = """<!doctype html>
       background-size:cover;
       color:var(--fg);
     }
-    .wrap { max-width: 1680px; min-height:calc(100vh - 48px); margin: 24px auto; padding: 0 24px 32px; box-sizing:border-box; }
+    .wrap { max-width: 1740px; min-height:calc(100vh - 48px); margin: 24px auto; padding: 0 28px 32px; box-sizing:border-box; }
     .topnav {
+      position:relative;
+      z-index:220;
       display:flex;
       flex-wrap:nowrap;
       gap:4px;
@@ -2083,6 +2132,7 @@ APP_HTML = """<!doctype html>
       overflow:hidden;
     }
     .nav-item-dropdown { overflow:visible; }
+    .nav-item-dropdown{ z-index:221; }
     .nav-trigger {
       display:flex;
       flex-direction:column;
@@ -2145,7 +2195,7 @@ APP_HTML = """<!doctype html>
       visibility:hidden;
       transform:translateY(6px);
       transition:opacity .14s ease, transform .14s ease, visibility .14s ease;
-      z-index:40;
+      z-index:260;
     }
     .nav-item-dropdown:hover .nav-submenu,
     .nav-item-dropdown:focus-within .nav-submenu {
@@ -2184,10 +2234,19 @@ APP_HTML = """<!doctype html>
       gap:24px;
       align-items:start;
     }
-    .invest-sidebar { min-width:0; }
-    .invest-sidebar-inner {
+    .invest-sidebar {
+      min-width:0;
+      align-self:start;
       position:sticky;
       top:88px;
+    }
+    .invest-sidebar-inner {
+      max-height:calc(100vh - 88px);
+      overflow-y:auto;
+      overscroll-behavior:contain;
+      scrollbar-gutter:stable;
+      padding-right:4px;
+      height:fit-content;
     }
     .invest-main { min-width:0; }
     .card {
@@ -2214,6 +2273,7 @@ APP_HTML = """<!doctype html>
     .results-shell {
       display:grid;
       gap:16px;
+      padding-bottom:88px;
     }
     .results-card {
       padding:18px 18px 20px;
@@ -2651,28 +2711,32 @@ APP_HTML = """<!doctype html>
       box-shadow:0 0 0 1px rgba(34,197,94,0.18);
     }
     .persona-grid {
-      display:grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      display:flex;
+      flex-wrap:wrap;
+      align-items:stretch;
       gap:8px;
-      margin-bottom:8px;
+      margin-bottom:4px;
     }
     .persona {
       border:1px solid #27415a;
       background:#07111f;
       border-radius:10px;
-      padding:8px;
+      padding:8px 9px;
+      min-width:0;
+      flex:1 1 220px;
+      max-width:320px;
     }
     .persona .p-head {
       display:flex;
       align-items:center;
       justify-content:space-between;
       gap:8px;
-      margin-bottom:4px;
+      margin-bottom:3px;
     }
     .persona .p-name {
       font-weight:700;
       color:#dbeafe;
-      font-size:13px;
+      font-size:12px;
     }
     .persona.planner { border-color:#1d4ed8; background:#0b1731; }
     .persona.reviewer { border-color:#15803d; background:#061a12; }
@@ -2681,19 +2745,44 @@ APP_HTML = """<!doctype html>
     .persona.policy { border-color:#7c3aed; background:#1a0a2e; }
     .persona .p-role {
       color:#9fb4cc;
-      font-size:12px;
+      font-size:11px;
       margin-bottom:4px;
     }
     .persona .p-detail {
       color:#cdd8e5;
-      font-size:12px;
-      line-height:1.35;
-      white-space:pre-wrap;
+      font-size:11px;
+      line-height:1.4;
+      display:grid;
+      gap:4px;
     }
     .persona .p-model {
       color:#8fb7ff;
-      font-size:11px;
+      font-size:10px;
       overflow-wrap:anywhere;
+      margin-bottom:4px;
+    }
+    .persona .p-why,.persona .p-outcome{
+      border-top:1px solid rgba(53,83,110,.48);
+      padding-top:4px;
+    }
+    .persona .p-mini-label{
+      color:#8fb6d9;
+      font-size:9px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      font-weight:800;
+      margin-bottom:2px;
+    }
+    .persona-arrow{
+      flex:0 0 auto;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      color:#6cb7ff;
+      font-size:18px;
+      font-weight:900;
+      padding:0 2px;
+      opacity:.9;
     }
     .persona.planner .p-model { color:#93c5fd; }
     .persona.reviewer .p-model { color:#86efac; }
@@ -2701,11 +2790,19 @@ APP_HTML = """<!doctype html>
     .persona.judge2 .p-model { color:#f9a8d4; }
     .persona.policy .p-model { color:#d8b4fe; }
     .spl-card {
-      border:1px solid #294560;
-      background:#061423;
+      border:1px solid rgba(41,69,96,.72);
+      background:linear-gradient(180deg,#071523,#06111d);
       border-radius:10px;
-      padding:8px;
-      margin-bottom:8px;
+      padding:12px;
+    }
+    .spl-raw-shell{
+      display:none;
+      margin-top:12px;
+      padding-top:12px;
+      border-top:1px solid rgba(36,67,96,.65);
+    }
+    .spl-raw-shell.open{
+      display:block;
     }
     .spl-toggle {
       margin-top:8px;
@@ -2747,7 +2844,37 @@ APP_HTML = """<!doctype html>
       font-weight:700;
       font-size:13px;
       color:#dbeafe;
-      margin-bottom:6px;
+      margin-bottom:0;
+    }
+    .coverage-grid{
+      display:grid;
+      gap:10px;
+    }
+    .coverage-row{
+      display:grid;
+      grid-template-columns:180px minmax(0,1fr);
+      gap:12px;
+      padding:10px 12px;
+      border:1px solid #22384f;
+      border-radius:10px;
+      background:#081729;
+    }
+    .coverage-row-title{
+      color:#8fb6d9;
+      font-size:11px;
+      font-weight:800;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .coverage-row-copy{
+      color:#e5eefc;
+      font-size:13px;
+      line-height:1.5;
+      overflow-wrap:anywhere;
+    }
+    .coverage-row.gap{
+      border-color:#7f1d1d;
+      background:linear-gradient(180deg,#231018,#140b10);
     }
     .decision-log {
       white-space: pre-wrap;
@@ -2773,22 +2900,139 @@ APP_HTML = """<!doctype html>
       font-weight:700;
     }
     .advanced-shell {
-      margin-top:14px;
+      position:fixed;
+      left:24px;
+      right:24px;
+      bottom:0;
+      z-index:8;
       border:1px solid #27415a;
-      border-radius:12px;
-      background:#061423;
-      padding:10px 12px;
+      border-bottom:0;
+      border-radius:16px 16px 0 0;
+      background:linear-gradient(180deg,rgba(8,20,35,.98),rgba(5,13,24,.98));
+      box-shadow:0 -18px 36px rgba(2,6,23,.38);
+      padding:0;
+      overflow:hidden;
     }
     .advanced-shell summary {
       cursor:pointer;
       font-weight:800;
       color:#dbeafe;
       outline:none;
+      list-style:none;
+      display:grid;
+      grid-template-columns:minmax(0,1fr) auto;
+      align-items:center;
+      gap:10px;
+      padding:8px 14px;
+    }
+    .advanced-shell summary::-webkit-details-marker{display:none;}
+    .advanced-shell[open] .advanced-drawer-toggle{
+      transform:rotate(180deg);
+    }
+    .advanced-drawer-head{
+      display:flex;
+      flex-direction:row;
+      align-items:center;
+      gap:8px;
+      min-width:0;
+      white-space:nowrap;
+    }
+    .advanced-drawer-copy{
+      color:#9fb4cc;
+      font-size:11px;
+      line-height:1.2;
+      font-weight:400;
+      white-space:nowrap;
+    }
+    .advanced-summary-main{
+      min-width:0;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+    }
+    .advanced-summary-controls{
+      display:flex;
+      align-items:center;
+      justify-content:flex-end;
+      gap:8px;
+      min-width:0;
+      flex-wrap:nowrap;
+    }
+    .drawer-jump-links{
+      display:flex;
+      flex-wrap:nowrap;
+      gap:5px;
+      align-items:center;
+      min-width:0;
+      overflow-x:auto;
+      scrollbar-width:none;
+    }
+    .drawer-jump-links::-webkit-scrollbar{display:none;}
+    .drawer-jump-links .jump-link{
+      padding:4px 8px;
+      font-size:11px;
+      background:rgba(8,23,37,.84);
+      white-space:nowrap;
+    }
+    .drawer-spl-toggle{
+      margin-top:0;
+      white-space:nowrap;
+      padding:6px 9px;
+      font-size:11px;
+      flex:0 0 auto;
+    }
+    .advanced-drawer-actions{
+      display:flex;
+      align-items:center;
+      gap:8px;
+    }
+    .advanced-drawer-toggle{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      width:24px;
+      height:24px;
+      border-radius:999px;
+      border:1px solid #315a79;
+      background:#0a2034;
+      color:#dbeafe;
+      font-size:12px;
+      font-weight:900;
+      flex:0 0 auto;
+      transition:transform .18s ease;
+    }
+    .advanced-drawer-expand{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      width:24px;
+      height:24px;
+      border-radius:999px;
+      border:1px solid #315a79;
+      background:#0a2034;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:900;
+      flex:0 0 auto;
+    }
+    .advanced-shell:not([open]) .advanced-drawer-expand{
+      opacity:.45;
+      pointer-events:none;
     }
     .advanced-body {
-      margin-top:12px;
+      margin-top:0;
       display:grid;
       gap:14px;
+      padding:0 16px 16px;
+      max-height:30vh;
+      overflow:auto;
+    }
+    .advanced-shell[data-mode="full"]{
+      top:76px;
+    }
+    .advanced-shell[data-mode="full"] .advanced-body{
+      max-height:calc(100vh - 124px);
     }
     .advanced-panel {
       border:1px solid #22384f;
@@ -3300,17 +3544,438 @@ APP_HTML = """<!doctype html>
       margin-bottom:6px;
     }
     .mitre-tip-line:last-child{margin-bottom:0;}
-    @media (max-width: 900px) { .persona-grid { grid-template-columns: 1fr; } }
+    .case-header{
+      border:1px solid #244360;
+      border-radius:14px;
+      background:linear-gradient(180deg,#0a1628,#08111d);
+      padding:14px 16px;
+    }
+    .case-header-grid{
+      display:block;
+    }
+    .case-chip-row{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      align-content:flex-start;
+      justify-content:flex-start;
+      margin-top:12px;
+    }
+    .case-chip{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:7px 10px;
+      border-radius:999px;
+      border:1px solid #294560;
+      background:#0a2034;
+      color:#dbeafe;
+      font-size:12px;
+      font-weight:800;
+    }
+    .case-chip.readonly{
+      border-color:#15803d;
+      background:#082515;
+      color:#bbf7d0;
+    }
+    .workspace-grid{
+      display:grid;
+      grid-template-columns:minmax(0,1.72fr) minmax(320px,.78fr);
+      gap:20px;
+      align-items:start;
+    }
+    .workspace-center,.workspace-main,.workspace-side{
+      min-width:0;
+      display:grid;
+      gap:16px;
+      align-content:start;
+    }
+    .workspace-center{
+      grid-template-rows:auto auto;
+      gap:0;
+      align-self:start;
+    }
+    .workspace-utility-row{
+      position:relative;
+      min-height:74px;
+    }
+    .workspace-side{
+      position:static;
+    }
+    .support-card,.timeline-card,.coverage-card,.pivot-card-shell{
+      border:1px solid rgba(36,67,96,.72);
+      border-radius:12px;
+      background:linear-gradient(180deg,rgba(9,20,35,.94),rgba(7,19,31,.90));
+      padding:14px;
+      min-width:0;
+    }
+    .workspace-utility{
+      display:grid;
+      gap:0;
+      position:sticky;
+      top:88px;
+      z-index:4;
+      min-height:42px;
+      padding:5px 10px;
+      border-bottom:1px solid rgba(49,90,121,.68);
+      background:linear-gradient(180deg,rgba(8,21,34,1),rgba(7,18,29,1));
+      box-shadow:none;
+    }
+    .workspace-main{ padding-top:10px; }
+    .utility-bar{
+      display:flex;
+      flex-wrap:wrap;
+      gap:6px;
+      align-items:center;
+      padding:0;
+      border:0;
+      border-radius:0;
+      background:transparent;
+      box-shadow:none;
+    }
+    .utility-pill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:5px 9px;
+      border-radius:999px;
+      border:1px solid #294560;
+      background:#0a2034;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:800;
+      max-width:100%;
+    }
+    .utility-pill strong{
+      font-weight:800;
+      color:#f8fafc;
+    }
+    .utility-pill.readonly{
+      border-color:#166534;
+      background:#082515;
+      color:#bbf7d0;
+    }
+    .utility-actions{
+      margin-left:auto;
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+    }
+    .jump-links{
+      display:flex;
+      flex-wrap:wrap;
+      gap:6px;
+      align-items:center;
+      padding:4px 2px 0;
+      border-top:1px solid rgba(36,67,96,.48);
+    }
+    .jump-link{
+      color:#9fd1ff;
+      text-decoration:none;
+      font-size:12px;
+      font-weight:700;
+      padding:6px 10px;
+      border:1px solid #243d56;
+      border-radius:999px;
+      background:rgba(8,23,37,.72);
+    }
+    .jump-link:hover{
+      color:#dbeafe;
+      border-color:#325978;
+    }
+    @media (max-width: 1280px){
+      .advanced-shell summary{
+        grid-template-columns:1fr;
+      }
+      .advanced-summary-main{
+        display:grid;
+        gap:8px;
+      }
+      .advanced-drawer-head{
+        flex-direction:column;
+        align-items:flex-start;
+        white-space:normal;
+      }
+      .advanced-drawer-copy{
+        white-space:normal;
+      }
+      .advanced-summary-controls{
+        flex-wrap:wrap;
+        justify-content:flex-start;
+      }
+      .drawer-jump-links{
+        flex-wrap:wrap;
+        overflow-x:visible;
+      }
+    }
+    #assessment-section,#timeline-section,#spl-section,#coverage-section,#pivots-section,#mitre-section,#advanced-section{
+      scroll-margin-top:152px;
+    }
+    .support-list,.decision-support-grid{
+      display:grid;
+      gap:10px;
+    }
+    .support-item,.decision-support-item{
+      border:1px solid #22384f;
+      border-radius:10px;
+      background:#081729;
+      padding:10px;
+    }
+    .support-label{
+      color:#8fb6d9;
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      font-weight:800;
+      margin-bottom:4px;
+    }
+    .support-value{
+      color:#f8fafc;
+      font-size:13px;
+      font-weight:700;
+      line-height:1.45;
+      overflow-wrap:anywhere;
+    }
+    .support-copy{
+      color:#cbd5e1;
+      font-size:12px;
+      line-height:1.5;
+      margin-top:4px;
+    }
+    .read-only-panel{
+      border-color:#166534;
+      background:linear-gradient(180deg,#0b1f17,#08150f);
+      box-shadow:0 0 0 1px rgba(34,197,94,.14);
+    }
+    .read-only-panel .support-value{color:#bbf7d0;}
+    .timeline-list{
+      display:grid;
+      gap:10px;
+    }
+    .timeline-phase{
+      border:1px solid #22384f;
+      border-radius:12px;
+      background:#081729;
+      overflow:hidden;
+    }
+    .timeline-phase summary{
+      list-style:none;
+      cursor:pointer;
+      padding:12px 14px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      outline:none;
+    }
+    .timeline-phase summary::-webkit-details-marker{display:none;}
+    .timeline-phase-main{
+      display:flex;
+      align-items:center;
+      gap:12px;
+      min-width:0;
+    }
+    .timeline-phase-name{
+      color:#f8fafc;
+      font-size:14px;
+      font-weight:900;
+      letter-spacing:.02em;
+    }
+    .timeline-phase-status{
+      display:inline-flex;
+      align-items:center;
+      padding:4px 8px;
+      border-radius:999px;
+      border:1px solid #315a79;
+      background:#0a2034;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:800;
+      text-transform:uppercase;
+      letter-spacing:.06em;
+    }
+    .timeline-phase.complete .timeline-phase-status{border-color:#166534;background:#052e16;color:#bbf7d0;}
+    .timeline-phase.in_progress .timeline-phase-status{border-color:#92400e;background:#3b1d08;color:#fde68a;}
+    .timeline-phase.planned .timeline-phase-status{border-color:#1d4ed8;background:#0f1f4a;color:#bfdbfe;}
+    .timeline-phase.awaiting_human_approval .timeline-phase-status{border-color:#7c3aed;background:#2a1148;color:#e9d5ff;}
+    .timeline-phase-summary{
+      color:#cbd5e1;
+      font-size:12px;
+      line-height:1.45;
+      text-align:right;
+      min-width:0;
+    }
+    .timeline-phase-body{
+      border-top:1px solid #203549;
+      padding:12px 14px 14px;
+      display:grid;
+      gap:10px;
+    }
+    .timeline-detail-grid,.coverage-grid,.pivot-meta-grid{
+      display:grid;
+      grid-template-columns:repeat(2,minmax(0,1fr));
+      gap:10px;
+    }
+    .pivot-meta-grid{
+      grid-template-columns:repeat(3,minmax(0,1fr));
+    }
+    .timeline-detail,.pivot-meta{
+      border:1px solid #203549;
+      border-radius:10px;
+      background:#091423;
+      padding:10px;
+    }
+    .timeline-detail-title{
+      color:#8fb6d9;
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      font-weight:800;
+      margin-bottom:6px;
+    }
+    .timeline-detail-copy{
+      color:#dbeafe;
+      font-size:12px;
+      line-height:1.5;
+      white-space:pre-wrap;
+    }
+    .spl-toolbar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-bottom:6px;
+    }
+    .spl-toolbar-actions{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .spl-toolbar-actions button,.spl-toolbar-actions a{
+      margin-top:0;
+      width:auto;
+    }
+    .spl-mode-tabs{
+      display:flex;
+      gap:8px;
+      margin:10px 0;
+      flex-wrap:wrap;
+    }
+    .spl-mode-btn{
+      margin-top:0;
+      width:auto !important;
+      padding:8px 12px;
+      border-radius:999px;
+      background:linear-gradient(180deg,#16324a,#102435);
+      color:#dbeafe;
+      border:1px solid #315a79;
+      box-shadow:none;
+    }
+    .spl-mode-btn.active{
+      background:linear-gradient(135deg,#22c55e,#16a34a);
+      border-color:#22c55e;
+      color:#03230f;
+    }
+    .spl-summary-panel{
+      border:1px solid #22384f;
+      border-radius:12px;
+      background:#081729;
+      padding:12px;
+    }
+    .coverage-callout{
+      border:1px solid #315a79;
+      border-radius:12px;
+      background:linear-gradient(180deg,#0b1b2b,#081729);
+      padding:12px;
+    }
+    .coverage-gap{
+      border-color:#92400e;
+      background:linear-gradient(180deg,#221105,#1a0d04);
+    }
+    .coverage-pill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:5px 9px;
+      border-radius:999px;
+      border:1px solid #294560;
+      background:#0a2034;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:700;
+    }
+    .pivot-grid{
+      display:grid;
+      gap:10px;
+    }
+    .pivot-card{
+      border:1px solid #244360;
+      border-radius:12px;
+      background:linear-gradient(180deg,#081729,#07131f);
+      padding:12px;
+      display:grid;
+      gap:10px;
+    }
+    .pivot-card-head{
+      display:flex;
+      justify-content:space-between;
+      gap:10px;
+      align-items:flex-start;
+    }
+    .pivot-card-kicker{
+      color:#8fb6d9;
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      font-weight:800;
+      margin-bottom:4px;
+    }
+    .pivot-card-title{
+      color:#f8fafc;
+      font-size:14px;
+      font-weight:900;
+      line-height:1.35;
+    }
+    .pivot-card-copy{
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.55;
+    }
+    .pivot-actions{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+    .pivot-actions button{
+      width:auto;
+      margin-top:0;
+    }
+    @media (max-width: 900px) {
+      .persona-grid { display:grid; grid-template-columns:1fr; }
+      .persona{max-width:none;}
+      .persona-arrow{display:none;}
+    }
     @media (max-width: 900px) { .hero-head { grid-template-columns: 1fr; } }
     @media (max-width: 1240px) { .stack { grid-template-columns: 1fr; } }
+    @media (max-width: 1420px) {
+      .workspace-grid{grid-template-columns:1fr;}
+      .workspace-side{position:static;}
+      .case-header-grid{grid-template-columns:1fr;}
+      .case-chip-row{justify-content:flex-start;}
+    }
     @media (max-width: 1180px) {
       .wrap { padding:0 18px 28px; }
       .invest-shell { grid-template-columns:1fr; }
-      .invest-sidebar-inner { position:static; }
+      .invest-sidebar { position:static; }
+      .workspace-utility { position:static; }
+      .advanced-shell { left:12px; right:12px; }
     }
     @media (max-width: 1100px) { .ops-field.wide { grid-column: span 1; } }
     @media (max-width: 900px) { .row { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 1100px) { .brief-grid { grid-template-columns:1fr; } }
+    @media (max-width: 900px) { .timeline-detail-grid,.coverage-grid,.pivot-meta-grid,.brief-strip-metrics,.coverage-row { grid-template-columns:1fr; } }
     @media (max-width: 700px) { .control-grid { grid-template-columns:1fr; } }
     @media (max-width: 560px) { .row, .row-ops { grid-template-columns: 1fr; } .wrap{padding:0 12px 24px;} }
   </style>
@@ -3362,7 +4027,7 @@ APP_HTML = """<!doctype html>
             <div class=\"brief-kicker\">Pivot Drawer</div>
             <span id=\"selected-followup-badge\" class=\"badge\">Nothing selected</span>
           </div>
-          <div id=\"selected-followup-text\" class=\"followup-body muted\">Select a pivot from the ATT&CK panel on the right to open it here. This drawer is the single place to review, edit, and run a follow-up.</div>
+          <div id=\"selected-followup-text\" class=\"followup-body muted\">Select a pivot from Recommended Next Pivots in the main investigation column to open it here. This drawer is the single place to review and run a follow-up.</div>
           <div id=\"selected-followup-meta\" class=\"followup-meta\" style=\"display:none;\"></div>
           <div class=\"followup-actions\">
             <button id=\"selected-followup-run\" class=\"btn-followup\" type=\"button\" style=\"display:none;\">Run This Follow-Up</button>
@@ -3444,73 +4109,144 @@ APP_HTML = """<!doctype html>
       <main class=\"invest-main\">
         <div class=\"card results-card\">
         <div class=\"results-shell\">
-        <div class=\"brief-grid\">
-          <div class=\"brief-card\">
-            <div class=\"brief-head\"><div class=\"brief-kicker\">Investigation Brief</div></div>
-            <div id=\"summary\" class=\"summary-box\"></div>
+          <div class=\"case-header\">
+            <div class=\"case-header-grid\">
+              <div>
+                <div class=\"brief-kicker\">Splunk Investigation Workspace</div>
+                <h2>Current Investigation</h2>
+                <div class=\"muted\">Splunk evidence remains the source of truth. Structured reasoning, ATT&amp;CK context, and pivots are layered on top of the executed search.</div>
+              </div>
+            </div>
           </div>
-          <div class=\"brief-card\">
-            <div class=\"brief-head\"><div class=\"brief-kicker\">MITRE ATT&CK</div></div>
-            <div id=\"brief-mitre\" class=\"mitre-list\"><div class=\"brief-body muted\">No investigation mapping yet.</div></div>
+          <div class=\"workspace-grid\">
+            <div class=\"workspace-center\">
+              <div class=\"workspace-utility-row\">
+                <div class=\"workspace-utility\">
+                  <div id=\"case-header-chips\" class=\"utility-bar\"></div>
+                </div>
+              </div>
+              <section class=\"workspace-main\">
+              <div class=\"brief-card\" id=\"assessment-section\">
+                <div class=\"brief-head\"><div class=\"brief-kicker\">Current Assessment</div></div>
+                <div id=\"summary\" class=\"summary-box\"></div>
+              </div>
+              <div class=\"timeline-card\" id=\"timeline-section\">
+                <div class=\"brief-head\">
+                  <div class=\"brief-kicker\">Splunk Investigation Timeline</div>
+                  <span class=\"badge\">Detect &rarr; Triage &rarr; Investigate &rarr; Respond &rarr; Recover</span>
+                </div>
+                <div id=\"investigation-timeline\" class=\"timeline-list\"></div>
+              </div>
+              <div class=\"spl-card spl-section\" id=\"spl-section\">
+                <div class=\"spl-toolbar\">
+                  <div class=\"spl-title\">SPL Executed <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Keep Splunk visible. Review the analyst summary first, then inspect the exact SPL exactly as executed.</span></span></div>
+                  <div class=\"spl-toolbar-actions\">
+                    <button id=\"spl-visibility-toggle\" class=\"btn-secondary\" type=\"button\">Show SPL Executed</button>
+                    <button id=\"copy-spl\" class=\"btn-secondary\" type=\"button\" style=\"display:none;\">Copy SPL</button>
+                    <a id=\"spl-link\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; color:#93c5fd; text-decoration:none; font-size:13px;\">View in Splunk</a>
+                  </div>
+                </div>
+                <div id=\"spl-meta-strip\" class=\"brief-strip-metrics\"></div>
+                <div id=\"spl-summary-panel\" class=\"spl-summary-panel\">
+                  <div id=\"spl-analyst-summary\" class=\"brief-body muted\">Run an investigation to see the search strategy, data sources queried, and what the SPL was trying to prove or disprove.</div>
+                </div>
+                <div id=\"spl-raw-shell\" class=\"spl-raw-shell\">
+                  <div id=\"spl-raw-panel\" class=\"spl-summary-panel\">
+                    <pre id=\"spl-query\"></pre>
+                  </div>
+                  <details class=\"spl-toggle\">
+                    <summary>SPL Results (sample)</summary>
+                    <div class=\"spl-toggle-body\">
+                      <pre id=\"spl-results\"></pre>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <div class=\"coverage-card\" id=\"coverage-section\">
+                <div class=\"brief-head\"><div class=\"brief-kicker\">Splunk Coverage and Visibility</div></div>
+                <div id=\"coverage-visibility\" class=\"coverage-grid\"></div>
+              </div>
+              <div class=\"pivot-card-shell\" id=\"pivots-section\">
+                <div class=\"brief-head\"><div class=\"brief-kicker\">Recommended Next Pivots</div></div>
+                <div id=\"pivot-cards\" class=\"pivot-grid\"></div>
+              </div>
+              </section>
+            </div>
+            <aside class=\"workspace-side\">
+              <div class=\"support-card\" id=\"mitre-section\">
+                <div class=\"brief-head\"><div class=\"brief-kicker\">MITRE ATT&CK</div></div>
+                <div id=\"brief-mitre\" class=\"mitre-list\"><div class=\"brief-body muted\">No investigation mapping yet.</div></div>
+              </div>
+              <div class=\"support-card\">
+                <div class=\"brief-head\"><div class=\"brief-kicker\">Decision Support</div></div>
+                <div id=\"decision-support-summary\" class=\"decision-support-grid\"></div>
+              </div>
+            </aside>
           </div>
-        </div>
-        <div class=\"brief-strip\">
-          <div class=\"brief-strip-head\"><div class=\"brief-kicker\">Execution Snapshot</div></div>
-          <div id=\"brief-execution\" class=\"brief-strip-metrics\"></div>
-        </div>
-        <div class=\"spl-card\">
-          <div class=\"spl-title\">Splunk SPL Executed <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Always displays the exact SPL used by the selected execution plan.</span></span></div>
-          <pre id=\"spl-details\"></pre>
-          <div><a id=\"spl-link\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; color:#93c5fd; text-decoration:none; font-size:13px;\">View in Splunk</a></div>
-          <pre id=\"spl-query\"></pre>
-          <details class=\"spl-toggle\">
-            <summary>SPL Results (sample)</summary>
-            <div class=\"spl-toggle-body\">
-              <pre id=\"spl-results\"></pre>
+          <details class=\"advanced-shell\" id=\"advanced-section\">
+            <summary>
+              <div class=\"advanced-summary-main\">
+                <div class=\"advanced-drawer-head\">
+                  <span>Investigation Drawer</span>
+                  <span class=\"advanced-drawer-copy\">Audit and review trace.</span>
+                </div>
+                <div class=\"advanced-summary-controls\">
+                  <div class=\"drawer-jump-links\">
+                    <a class=\"jump-link\" href=\"#assessment-section\">Assessment</a>
+                    <a class=\"jump-link\" href=\"#timeline-section\">Timeline</a>
+                    <a class=\"jump-link\" href=\"#spl-section\">SPL</a>
+                    <a class=\"jump-link\" href=\"#pivots-section\">Pivots</a>
+                    <a class=\"jump-link\" href=\"#coverage-section\">Coverage</a>
+                    <a class=\"jump-link\" href=\"#mitre-section\">ATT&amp;CK</a>
+                  </div>
+                  <button id=\"drawer-spl-toggle\" class=\"btn-secondary drawer-spl-toggle\" type=\"button\">Show SPL Executed</button>
+                </div>
+              </div>
+              <div class=\"advanced-drawer-actions\">
+                <button id=\"advanced-full-toggle\" class=\"advanced-drawer-expand\" type=\"button\" title=\"Expand the drawer to full height\">&#9633;</button>
+                <span class=\"advanced-drawer-toggle\">&#9650;</span>
+              </div>
+            </summary>
+            <div class=\"advanced-body\">
+              <div class=\"advanced-panel\">
+                <div class=\"advanced-subhead\">Decision Support</div>
+                <div id=\"model-personas\" class=\"persona-grid\"></div>
+              </div>
+              <div class=\"advanced-panel\">
+                <div class=\"advanced-subhead\">Execution Audit</div>
+                <div id=\"model-decisions\" class=\"decision-log\"></div>
+              </div>
+              <div class=\"advanced-panel\">
+                <div class=\"advanced-subhead\">TDI(R) Case Progression</div>
+                <div id=\"tdir-card\" class=\"tdir-card\" style=\"display:none;\">
+                  <div id=\"tdir-head\" class=\"tdir-head\"></div>
+                  <div id=\"tdir-meta\" class=\"tdir-meta\"></div>
+                </div>
+                <div id=\"tdir-case\" class=\"tdir-body\"></div>
+                <div id=\"workflow-track\" class=\"flow-track\"></div>
+                <div id=\"workflow-meta\" class=\"flow-meta\"></div>
+              </div>
+              <div class=\"advanced-panel\">
+                <div class=\"advanced-subhead\">Advanced Review Trace</div>
+                <pre id=\"journey\"></pre>
+                <div id=\"continue-shell\" class=\"continue-shell\" style=\"display:none;\">
+                  <div class=\"continue-title\">Deeper Investigation Control <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Shows the bounded continuation state: one automatic deeper-investigation round is allowed when justified, then further continuation requires analyst approval. Duplicate pivots and low-confidence follow-ups are blocked.</span></span></div>
+                  <div id=\"continue-copy\" class=\"continue-copy\"></div>
+                  <div class=\"continue-actions\">
+                    <span id=\"continue-pill\" class=\"continue-pill\"></span>
+                    <button id=\"continue-btn\" class=\"btn-secondary\" style=\"display:none; margin-top:0;\">Run Deeper Investigation</button>
+                  </div>
+                </div>
+              </div>
+              <div class=\"advanced-panel\">
+                <div class=\"section-head\">
+                  <div class=\"advanced-subhead\">Raw Result JSON</div>
+                  <button id=\"toggle-json\" class=\"btn-secondary\" style=\"margin-top:0;\">Show JSON</button>
+                </div>
+                <pre id=\"output\" style=\"display:none;\"></pre>
+              </div>
             </div>
           </details>
-        </div>
-        <h3>TDIR Case <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Detect/Triage/Investigate/Respond/Recover framing generated from the run output. Investigate can show `awaiting_human_approval` after the first automatic deeper round completes and another bounded pivot is available.</span></span></h3>
-        <div id=\"tdir-card\" class=\"tdir-card\" style=\"display:none;\">
-          <div id=\"tdir-head\" class=\"tdir-head\"></div>
-          <div id=\"tdir-meta\" class=\"tdir-meta\"></div>
-        </div>
-        <div id=\"tdir-case\" class=\"tdir-body\"></div>
-        <h3>Model Decisions <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Shows each model persona output and final adjudication for transparent review.</span></span></h3>
-        <div id=\"model-personas\" class=\"persona-grid\"></div>
-        <details class=\"advanced-shell\">
-          <summary>Show Advanced Details</summary>
-          <div class=\"advanced-body\">
-            <div class=\"advanced-panel\">
-              <div class=\"advanced-subhead\">Detailed Model Trace</div>
-              <div id=\"model-decisions\" class=\"decision-log\"></div>
-            </div>
-            <div class=\"advanced-panel\">
-              <div class=\"advanced-subhead\">Workflow Journey (TDI/R)</div>
-              <div id=\"workflow-track\" class=\"flow-track\"></div>
-              <div id=\"workflow-meta\" class=\"flow-meta\"></div>
-            </div>
-            <div class=\"advanced-panel\">
-              <div class=\"advanced-subhead\">Investigation Narrative Trace</div>
-              <pre id=\"journey\"></pre>
-            </div>
-            <div id=\"continue-shell\" class=\"continue-shell\" style=\"display:none;\">
-              <div class=\"continue-title\">Deeper Investigation Control <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Shows the bounded continuation state: one automatic deeper-investigation round is allowed when justified, then further continuation requires analyst approval. Duplicate pivots and low-confidence follow-ups are blocked.</span></span></div>
-              <div id=\"continue-copy\" class=\"continue-copy\"></div>
-              <div class=\"continue-actions\">
-                <span id=\"continue-pill\" class=\"continue-pill\"></span>
-                <button id=\"continue-btn\" class=\"btn-secondary\" style=\"display:none; margin-top:0;\">Run Deeper Investigation</button>
-              </div>
-            </div>
-            <div class=\"advanced-panel\">
-              <div class=\"section-head\">
-                <div class=\"advanced-subhead\">Result JSON</div>
-                <button id=\"toggle-json\" class=\"btn-secondary\" style=\"margin-top:0;\">Show JSON</button>
-              </div>
-              <pre id=\"output\" style=\"display:none;\"></pre>
-            </div>
-          </div>
-        </details>
         </div>
       </div>
       </main>
@@ -3650,7 +4386,7 @@ APP_HTML = """<!doctype html>
         panel.classList.add('empty');
         badge.textContent = 'Nothing selected';
         text.className = 'followup-body muted';
-        text.textContent = 'Select a pivot from the ATT&CK panel on the right to open it here. This drawer is the single place to review, edit, and run a follow-up.';
+        text.textContent = 'Select a pivot from Recommended Next Pivots in the main investigation column to open it here. This drawer is the single place to review and run a follow-up.';
         meta.style.display = 'none';
         meta.textContent = '';
         runBtn.style.display = 'none';
@@ -3680,84 +4416,361 @@ APP_HTML = """<!doctype html>
       renderSelectedFollowup();
     }
 
+    function extractExecutedSPL(result) {
+      if (result?.query_args?.query) return String(result.query_args.query);
+      if (result?.final_adjudication?.selected_args?.query) return String(result.final_adjudication.selected_args.query);
+      if (result?.evidence?.query_or_args?.query) return String(result.evidence.query_or_args.query);
+      if (Array.isArray(result?.trajectory)) {
+        for (let i = result.trajectory.length - 1; i >= 0; i -= 1) {
+          const q = result.trajectory[i]?.args?.query;
+          if (q) return String(q);
+        }
+      }
+      return '';
+    }
+
+    function extractCoverage(result, spl) {
+      const source = String(spl || '');
+      const indexes = Array.from(new Set(Array.from(source.matchAll(/index\\s*=\\s*([A-Za-z0-9_:-]+)/g)).map((m) => m[1])));
+      const sourcetypes = Array.from(new Set(Array.from(source.matchAll(/sourcetype\\s*=\\s*\"?([A-Za-z0-9_:\\/.-]+)\"?/g)).map((m) => m[1])));
+      const rawSources = Array.from(new Set(Array.from(source.matchAll(/source\\s*=\\s*\"([^\"]+)\"/g)).map((m) => m[1])));
+      const lower = source.toLowerCase();
+      const platforms = [];
+      if (lower.includes('platform=\"linux\"') || lower.includes('/var/log/auth.log') || lower.includes('/var/log/secure') || lower.includes('linux_secure') || lower.includes(' index=linux')) platforms.push('Linux');
+      if (lower.includes('platform=\"windows\"') || lower.includes('xmlwineventlog') || lower.includes('eventcode=4625') || lower.includes(' index=windows')) platforms.push('Windows');
+      if (lower.includes('access_combined') || lower.includes('apache')) platforms.push('Apache/Web');
+      if (lower.includes('cloudtrail')) platforms.push('AWS CloudTrail');
+      if (lower.includes('stream:http')) platforms.push('HTTP Proxy/Stream');
+      if (lower.includes('cisco') || lower.includes('asa')) platforms.push('Cisco ASA');
+      if (lower.includes('vpcflow')) platforms.push('AWS VPC Flow');
+      const summaryText = String(result?.summary || '').toLowerCase();
+      const rows = Number(result?.rows_returned || 0);
+      let coverageStatus = rows > 0 ? 'Evidence returned' : 'No evidence returned';
+      const gaps = [];
+      const crossPlatform = source.includes('append [') || new Set(platforms).size > 1;
+      if (crossPlatform) coverageStatus = rows > 0 ? 'Cross-platform coverage attempted' : 'Cross-platform coverage attempted with no evidence';
+      if (summaryText.includes('windows security logon failures were queried') || summaryText.includes('no windows')) gaps.push('Windows coverage was queried but returned no matching evidence in this time window.');
+      if (summaryText.includes('visibility gap') || summaryText.includes('indexing issue') || summaryText.includes('data or indexing issue')) gaps.push('The investigation narrative indicates a telemetry or indexing visibility concern.');
+      return {
+        indexes,
+        sourcetypes,
+        rawSources,
+        platforms: Array.from(new Set(platforms)),
+        coverageStatus,
+        gaps,
+        crossPlatform,
+      };
+    }
+
+    function deriveHighestPriorityEntity(result) {
+      const entities = Array.isArray(result?.evidence?.top_entities) ? result.evidence.top_entities : [];
+      if (entities.length && entities[0] && typeof entities[0] === 'object') {
+        const row = entities[0];
+        return row.src_ip || row.clientip || row.host || row.user_name || row.TargetUserName || row.Account_Name || row.index || 'Not derived';
+      }
+      const summary = String(result?.summary || '');
+      const ipMatch = summary.match(/\\b\\d{1,3}(?:\\.\\d{1,3}){3}\\b/);
+      if (ipMatch) return ipMatch[0];
+      const hostMatch = summary.match(/host\\s+([A-Za-z0-9_.:-]+)/i);
+      if (hostMatch) return hostMatch[1];
+      return 'Not derived';
+    }
+
+    function renderCaseHeader(result, coverage, latestRun) {
+      const confidence = result?.final_confidence || result?.selected_confidence || 'n/a';
+      $('case-header-chips').innerHTML = `
+        <div class="utility-pill readonly"><span>Read-Only</span><strong>Splunk investigation mode</strong></div>
+        <div class="utility-pill"><span>Case type</span><strong>${esc(result?.intent || 'unknown')}</strong></div>
+        <div class="utility-pill"><span>Confidence</span><strong>${esc(String(confidence))}</strong></div>
+        <div class="utility-pill"><span>Coverage</span><strong>${esc(coverage.coverageStatus || 'Unknown')}</strong></div>
+        <div class="utility-pill"><span>Rows</span><strong>${esc(String(result?.rows_returned ?? latestRun?.rows_returned ?? 'n/a'))}</strong></div>
+      `;
+      syncUtilityBarVisibility();
+      bindSplToggleButtons();
+    }
+
     function renderMitreBrief(result) {
       const bundle = (result?.mitre_attack && typeof result.mitre_attack === 'object') ? result.mitre_attack : {};
       const items = Array.isArray(bundle?.techniques) ? bundle.techniques : [];
-      const pivots = Array.isArray(bundle?.next_pivots) ? bundle.next_pivots : [];
       const progression = Array.isArray(bundle?.possible_progression) ? bundle.possible_progression : [];
       const validation = (bundle?.validation && typeof bundle.validation === 'object') ? bundle.validation : {};
       const frame = String(bundle?.frame || '').trim();
-      const primaryLabel = items.length ? `${items[0].technique || 'Technique'} (${items[0].technique_id || ''})`.trim() : '';
       $('brief-mitre').innerHTML = items.length
         ? `
           ${frame ? `<div class="mitre-card"><div class="mitre-copy">${esc(frame)}</div></div>` : ''}
-          ${validation.status === 'ok' ? `<div class="mitre-card"><div class="mitre-title">ATT&CK Validation</div><div class="mitre-meta">${esc(validation.agreement || 'partial')} • ${esc(validation.confidence || 'medium')} confidence • ${esc(validation.model || '')}</div><div class="mitre-copy">${esc(validation.rationale || 'The security reasoning model reviewed the ATT&CK mapping and found it directionally sound.')}</div>${validation.kill_chain_context ? `<div class="mitre-copy" style="margin-top:8px;"><strong>Kill-chain context:</strong> ${esc(validation.kill_chain_context)}</div>` : ''}${Array.isArray(validation.alternate_techniques) && validation.alternate_techniques.length ? `<div class="mitre-copy" style="margin-top:8px;"><strong>Alternates considered:</strong><br/>${validation.alternate_techniques.map((item) => `• ${esc(item.technique_id || '')} ${esc(item.technique || '')}: ${esc(item.why || '')}`).join('<br/>')}</div>` : ''}</div>` : ''}
           ${items.map((item) => `
-          <div class="mitre-card">
-            <div class="mitre-head">
-              <div class="mitre-title">${esc(item.technique || 'Technique')}</div>
-              <div class="mitre-tip" tabindex="0">?
-                <div class="mitre-tip-panel">
-                  <div class="mitre-tip-line"><strong>${esc(item.technique || 'Technique')}</strong> (${esc(item.technique_id || '')})</div>
-                  <div class="mitre-tip-line"><strong>Tactic:</strong> ${esc(item.tactic || 'Unknown')}</div>
-                  <div class="mitre-tip-line"><strong>Definition:</strong> ${esc(item.definition || 'No definition available yet.')}</div>
-                  <div class="mitre-tip-line"><strong>Why mapped here:</strong> ${esc(item.rationale || 'No rationale available yet.')}</div>
+            <div class="mitre-card">
+              <div class="mitre-head">
+                <div class="mitre-title">${esc(item.technique || 'Technique')}</div>
+                <div class="mitre-tip" tabindex="0">?
+                  <div class="mitre-tip-panel">
+                    <div class="mitre-tip-line"><strong>${esc(item.technique || 'Technique')}</strong> (${esc(item.technique_id || '')})</div>
+                    <div class="mitre-tip-line"><strong>Tactic:</strong> ${esc(item.tactic || 'Unknown')}</div>
+                    <div class="mitre-tip-line"><strong>Definition:</strong> ${esc(item.definition || 'No definition available yet.')}</div>
+                    <div class="mitre-tip-line"><strong>Why mapped here:</strong> ${esc(item.rationale || 'No rationale available yet.')}</div>
+                  </div>
                 </div>
               </div>
+              <div class="mitre-meta">${esc(item.technique_id || '')} • ${esc(item.tactic || 'Tactic')} • ${esc(item.confidence || 'medium')} confidence</div>
+              <div class="mitre-copy">${esc(item.rationale || '')}</div>
             </div>
-            <div class="mitre-meta">${esc(item.technique_id || '')} • ${esc(item.tactic || 'Tactic')} • ${esc(item.confidence || 'medium')} confidence</div>
-            <div class="mitre-copy">${esc(item.rationale || '')}</div>
-          </div>
           `).join('')}
-          ${pivots.length ? `<div class="mitre-card"><div class="mitre-title">Recommended ATT&CK Pivots</div><div class="mitre-copy">Pick a pivot below to open it in the left-side drawer. All follow-up actions happen there.</div><div class="mitre-selects">${pivots.map((item, index) => `<div class="mitre-select-row"><div class="mitre-select-copy"><strong>Pivot ${String(index + 1)}.</strong> ${esc(item)}</div><button type="button" class="mitre-select-btn" data-pivot-index="${String(index)}">Open In Drawer</button></div>`).join('')}</div></div>` : ''}
+          ${validation.status === 'ok' ? `<div class="mitre-card"><div class="mitre-title">ATT&CK Validation</div><div class="mitre-meta">${esc(validation.agreement || 'partial')} • ${esc(validation.confidence || 'medium')} confidence • ${esc(validation.model || '')}</div><div class="mitre-copy">${esc(validation.rationale || 'The security reasoning model reviewed the ATT&CK mapping and found it directionally sound.')}</div>${validation.kill_chain_context ? `<div class="mitre-copy" style="margin-top:8px;"><strong>Kill-chain context:</strong> ${esc(validation.kill_chain_context)}</div>` : ''}${Array.isArray(validation.alternate_techniques) && validation.alternate_techniques.length ? `<div class="mitre-copy" style="margin-top:8px;"><strong>Alternates considered:</strong><br/>${validation.alternate_techniques.map((item) => `• ${esc(item.technique_id || '')} ${esc(item.technique || '')}: ${esc(item.why || '')}`).join('<br/>')}</div>` : ''}</div>` : ''}
           ${progression.length ? `<div class="mitre-card"><div class="mitre-title">Likely Follow-On Techniques</div><div class="mitre-copy">${progression.map((item) => `• ${esc(item.technique_id || '')} ${esc(item.technique || '')}: ${esc(item.why || '')}`).join('<br/>')}</div></div>` : ''}
         `
         : '<div class="brief-body muted">No ATT&CK mapping was derived for this investigation yet.</div>';
-      document.querySelectorAll('.mitre-select-btn').forEach((btn) => {
-        btn.onclick = () => {
-          const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
-          const text = pivots[idx] || '';
-          if (!text) return;
-          selectFollowup(text, idx, primaryLabel);
-          $('status').textContent = 'Pivot opened in the left drawer. Review it there, then run when ready.';
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-        };
-      });
     }
 
-    function renderExecutionBrief(result) {
-      const splRuns = Array.isArray(result?.selected_spl_details) ? result.selected_spl_details : [];
-      const latestRun = splRuns.length ? (splRuns[splRuns.length - 1] || {}) : {};
-      const metrics = [
-        ['Intent', result?.intent || 'unknown'],
-        ['Tool', result?.selected_tool || result?.final_adjudication?.selected_tool || 'unknown'],
-        ['Rows', result?.rows_returned ?? latestRun?.rows_returned ?? 'n/a'],
-        ['Runtime', latestRun?.execution_ms ? `${latestRun.execution_ms} ms` : 'n/a'],
-        ['Writer', latestRun?.writer_model || result?.query_writer_model || 'unknown'],
-        ['Confidence', result?.final_confidence ?? result?.selected_confidence ?? 'n/a'],
+    function renderDecisionSupportSummary(result) {
+      const reviewer = result?.security_reviewer_output || result?.security_reviewer?.output || {};
+      const evidenceReviewer = result?.evidence_reviewer_output || result?.evidence_reviewer?.output || {};
+      const continuationReviewer = result?.continuation_reviewer_output || result?.continuation_reviewer?.output || {};
+      const adjudication = result?.final_adjudication || {};
+      const items = [
+        ['Plan confidence', result?.final_confidence || result?.selected_confidence || reviewer.confidence || 'n/a'],
+        ['Query safety', reviewer.approved === false ? 'Needs review' : 'Approved'],
+        ['Evidence quality', evidenceReviewer.evidence_quality || evidenceReviewer.confidence || 'n/a'],
+        ['Final adjudication', adjudication.validation_ok === false ? 'Blocked' : (adjudication.selected_tool || result?.selected_tool || 'Complete')],
+        ['Continuation', continuationReviewer.should_continue === true ? 'Recommended' : 'Not recommended'],
       ];
-      $('brief-execution').innerHTML = metrics.map(([label, value]) => `
+      $('decision-support-summary').innerHTML = items.map(([label, value]) => `
+        <div class="support-item">
+          <div class="support-label">${esc(label)}</div>
+          <div class="support-value">${esc(String(value))}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderSplunkTimeline(result, coverage, analystSummary) {
+      const tdir = result?.tdir_case || {};
+      const phase = tdir.phase_status || {};
+      const rows = Number(result?.rows_returned || 0);
+      const intent = result?.intent || 'unknown';
+      const tool = result?.selected_tool || result?.final_adjudication?.selected_tool || 'unknown';
+      const phases = [
+        ['Detect', result?.supported === false ? 'blocked' : 'complete', `Question classified as ${intent}.`, 'Accepted the analyst question and selected a bounded Splunk investigation path.', result?.supported === false ? 'The request was blocked by policy or guardrails.' : 'The case was accepted for investigation.'],
+        ['Triage', phase.triage || 'complete', `Splunk search path selected with ${coverage.indexes.length || 0} index target(s) and ${coverage.sourcetypes.length || 0} sourcetype hint(s).`, `Executed ${tool} to gather initial evidence.`, rows > 0 ? `${rows} row(s) of evidence were returned for first-pass triage.` : 'No matching evidence was returned for initial triage.'],
+        ['Investigate', rows > 0 ? (phase.investigate || 'complete') : 'no_evidence', analystSummary || 'No analyst summary available yet.', `Reviewed the SPL logic and evidence coverage across ${coverage.platforms.join(', ') || 'the targeted sources'}.`, rows > 0 ? 'Evidence was reviewed and follow-on pivots were generated.' : 'The investigation completed without matching evidence, so no deeper case narrative was produced.'],
+        ['Respond', phase.respond || 'planned', 'Read-only phase. No containment or response action is executed by default.', 'Surface analyst follow-up pivots only.', 'Response remains planned unless explicitly enabled later.'],
+        ['Recover', phase.recover || 'planned', 'Recovery automation is not active in this phase.', 'Preserve investigation context and recommended next moves.', 'Recovery remains future-state for this bounded investigation mode.'],
+      ];
+      $('investigation-timeline').innerHTML = phases.map((item, idx) => `
+        <details class="timeline-phase"${idx < 3 ? ' open' : ''}>
+          <summary>
+            <div class="timeline-phase-main">
+              <div class="timeline-phase-name">${esc(item[0])}</div>
+              <div class="timeline-phase-summary">${esc(item[4])}</div>
+            </div>
+            <div class="timeline-phase-status">${esc(String(item[1]).replaceAll('_', ' '))}</div>
+          </summary>
+          <div class="timeline-phase-body">
+            <div class="timeline-detail-grid">
+              <div class="timeline-detail"><div class="timeline-detail-title">Key Evidence</div><div class="timeline-detail-copy">${esc(item[2])}</div></div>
+              <div class="timeline-detail"><div class="timeline-detail-title">Relevant Splunk Action</div><div class="timeline-detail-copy">${esc(item[3])}</div></div>
+              <div class="timeline-detail"><div class="timeline-detail-title">Analyst-Facing Conclusion</div><div class="timeline-detail-copy">${esc(item[4])}</div></div>
+            </div>
+          </div>
+        </details>
+      `).join('');
+    }
+
+    function summarizeSplIntent(result, coverage) {
+      const indexes = coverage.indexes.length ? coverage.indexes.join(', ') : 'the selected indexes';
+      const sourcetypes = coverage.sourcetypes.length ? coverage.sourcetypes.join(', ') : 'available sourcetypes';
+      const sources = coverage.rawSources.length ? coverage.rawSources.join(', ') : 'the discovered sources';
+      const logic = String(result?.search_strategy_summary || result?.intent_summary || 'The search used the selected Splunk evidence path to confirm or disprove the analyst question.');
+      return `
+        <strong>What the search did:</strong> ${esc(logic)}<br><br>
+        <strong>Data sources queried:</strong> indexes=${esc(indexes)} | sourcetypes=${esc(sourcetypes)} | sources=${esc(sources)}<br><br>
+        <strong>What it was testing:</strong> ${esc(String(result?.question || result?.root_question || 'The analyst question'))}<br><br>
+        <strong>Coverage:</strong> ${esc(coverage.coverageStatus)}${coverage.crossPlatform ? ' with cross-platform scope.' : '.'}
+      `;
+    }
+
+    function renderSplEvidence(result, coverage, spl, latestRun) {
+      const runtime = latestRun?.execution_ms ? `${latestRun.execution_ms} ms` : 'n/a';
+      const rows = String(result?.rows_returned ?? latestRun?.rows_returned ?? 'n/a');
+      const tool = result?.selected_tool || result?.final_adjudication?.selected_tool || 'unknown';
+      const windowLabel = `${String(result?.query_args?.earliest_time || result?.final_adjudication?.selected_args?.earliest_time || '-24h')} -> ${String(result?.query_args?.latest_time || result?.final_adjudication?.selected_args?.latest_time || 'now')}`;
+      const splLink = $('spl-link');
+      $('spl-meta-strip').innerHTML = [
+        ['Runtime', runtime],
+        ['Rows returned', rows],
+        ['Execution tool', tool],
+        ['Data sources', coverage.sourcetypes.length ? coverage.sourcetypes.join(', ') : (coverage.indexes.join(', ') || 'n/a')],
+        ['Time window', windowLabel],
+        ['Coverage', coverage.coverageStatus || 'Unknown'],
+      ].map(([label, value]) => `
         <div class="brief-metric">
           <div class="brief-metric-label">${esc(label)}</div>
           <div class="brief-metric-value">${esc(String(value))}</div>
         </div>
       `).join('');
-      $('brief-supported').textContent = result?.supported === false
-        ? 'Blocked'
-        : ((result?.rows_returned === 0) ? 'No Hits' : 'Complete');
+      $('spl-analyst-summary').innerHTML = summarizeSplIntent(result, coverage);
+      $('spl-query').textContent = spl || '(No Splunk query was captured for this path)';
+      $('copy-spl').style.display = spl ? 'inline-flex' : 'none';
+      $('brief-supported').textContent = result?.supported === false ? 'Blocked' : ((result?.rows_returned === 0) ? 'No Hits' : 'Complete');
+      if (spl) {
+        const earliest =
+          String(
+            result?.query_args?.earliest_time ||
+            result?.final_adjudication?.selected_args?.earliest_time ||
+            result?.evidence?.time_window?.earliest_time ||
+            '-24h@h'
+          );
+        const latest =
+          String(
+            result?.query_args?.latest_time ||
+            result?.final_adjudication?.selected_args?.latest_time ||
+            result?.evidence?.time_window?.latest_time ||
+            'now'
+          );
+        const splunkBase = String(result?.splunk_search_url_base || '');
+        const params = new URLSearchParams({
+          q: spl,
+          'display.page.search.mode': 'smart',
+          'dispatch.sample_ratio': '1',
+          workload_pool: '',
+          earliest,
+          latest,
+          'display.page.search.tab': 'statistics',
+          'display.general.type': 'statistics',
+        });
+        if (splunkBase) {
+          splLink.href = `${splunkBase}?${params.toString()}`;
+          splLink.style.display = 'inline';
+        } else {
+          splLink.href = '#';
+          splLink.style.display = 'none';
+        }
+      } else {
+        splLink.href = '#';
+        splLink.style.display = 'none';
+      }
+    }
+
+    function renderCoverageVisibility(result, coverage) {
+      const rows = Number(result?.rows_returned || 0);
+      const noGapText = 'No explicit telemetry gap was called out in the returned result.';
+      const items = [
+        ['Platforms and indexes searched', `${coverage.platforms.length ? coverage.platforms.join(', ') : 'Not derived'} | ${coverage.indexes.length ? coverage.indexes.join(', ') : 'No explicit index extracted'}`],
+        ['Sourcetypes and source paths', `${coverage.sourcetypes.length ? coverage.sourcetypes.join(', ') : 'Not derived'} | ${coverage.rawSources.length ? coverage.rawSources.join(', ') : 'No explicit source path extracted'}`],
+        ['Evidence return and coverage status', `${rows > 0 ? 'Evidence rows were returned.' : 'No rows were returned for the expected sources in this window.'} ${coverage.coverageStatus || 'Unknown'}`],
+        ['Visibility gaps and follow-up checks', coverage.gaps.length ? coverage.gaps.join(' ') : noGapText],
+      ];
+      $('coverage-visibility').innerHTML = items.map(([label, value]) => `
+        <div class="coverage-row${label === 'Visibility gaps and follow-up checks' && String(value) !== noGapText ? ' gap' : ''}">
+          <div class="coverage-row-title">${esc(label)}</div>
+          <div class="coverage-row-copy">${esc(String(value))}</div>
+        </div>
+      `).join('');
+    }
+
+    function classifyPivot(pivotText) {
+      const text = String(pivotText || '').trim();
+      const lower = text.toLowerCase();
+      let entity = 'Derived field';
+      if (lower.includes('source ip')) entity = 'Source IP';
+      else if (lower.includes('username') || lower.includes('user ')) entity = 'Username';
+      else if (lower.includes('host')) entity = 'Host';
+      else if (lower.includes('sourcetype')) entity = 'Sourcetype';
+      else if (lower.includes('index')) entity = 'Index inventory';
+      const why = lower.includes('validate visibility')
+        ? 'Validates whether Splunk has the expected telemetry depth before making a stronger claim.'
+        : 'Extends the investigation using the highest-value Splunk pivot from the current evidence.';
+      const scope = lower.includes('across linux and windows') || lower.includes('cross-platform')
+        ? 'Cross-platform'
+        : (lower.includes('across') ? 'Broad pivot' : 'Focused pivot');
+      const expected = lower.includes('successful')
+        ? 'Confirms whether failed access progressed to successful access.'
+        : lower.includes('privilege escalation')
+          ? 'Tests whether the activity progressed beyond initial access into higher-risk behavior.'
+          : 'Expands the evidence set around the most important entity from the current case.';
+      return { why, entity, expected, scope, title: text.length > 72 ? `${text.slice(0, 72).trim()}...` : text };
+    }
+
+    function renderPivotCards(result) {
+      const mitrePivots = Array.isArray(result?.mitre_attack?.next_pivots) ? result.mitre_attack.next_pivots : [];
+      const tdirPivots = Array.isArray(result?.tdir_case?.recommended_next_pivots) ? result.tdir_case.recommended_next_pivots : [];
+      const pivots = (mitrePivots.length ? mitrePivots : tdirPivots).map((item) => String(item || '').trim()).filter(Boolean);
+      const primaryTechnique = Array.isArray(result?.mitre_attack?.techniques) && result.mitre_attack.techniques.length
+        ? `${result.mitre_attack.techniques[0].technique || 'Technique'} (${result.mitre_attack.techniques[0].technique_id || ''})`.trim()
+        : 'Splunk investigation follow-up';
+      $('pivot-cards').innerHTML = pivots.length
+        ? pivots.map((item, index) => {
+            const meta = classifyPivot(item);
+            return `
+              <div class="pivot-card">
+                <div class="pivot-card-head">
+                  <div>
+                    <div class="pivot-card-kicker">Pivot ${String(index + 1)}</div>
+                    <div class="pivot-card-title">${esc(meta.title)}</div>
+                  </div>
+                </div>
+                <div class="pivot-card-copy">${esc(item)}</div>
+                <div class="pivot-meta-grid">
+                  <div class="pivot-meta"><strong>Why this pivot matters</strong><span>${esc(meta.why)}</span></div>
+                  <div class="pivot-meta"><strong>Pivot on</strong><span>${esc(meta.entity)}</span></div>
+                  <div class="pivot-meta"><strong>Expected value</strong><span>${esc(meta.expected)}</span></div>
+                  <div class="pivot-meta"><strong>Estimated scope</strong><span>${esc(meta.scope)}</span></div>
+                </div>
+                <div class="pivot-actions">
+                  <button type="button" class="btn-secondary pivot-open-btn" data-pivot-index="${String(index)}">Open In Drawer</button>
+                  <button type="button" class="btn-followup pivot-run-btn" data-pivot-index="${String(index)}">Run Pivot Now</button>
+                </div>
+              </div>
+            `;
+          }).join('')
+        : '<div class="brief-body muted">No additional Splunk-grounded pivots were derived for this investigation yet.</div>';
+      document.querySelectorAll('.pivot-open-btn').forEach((btn) => {
+        btn.onclick = () => {
+          const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
+          const text = pivots[idx] || '';
+          if (!text) return;
+          selectFollowup(text, idx, primaryTechnique);
+          $('status').textContent = 'Pivot opened in the left drawer. Review it there, then run when ready.';
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        };
+      });
+      document.querySelectorAll('.pivot-run-btn').forEach((btn) => {
+        btn.onclick = async () => {
+          const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
+          const text = pivots[idx] || '';
+          if (!text) return;
+          selectFollowup(text, idx, primaryTechnique);
+          $('question').value = text;
+          $('status').textContent = 'Running selected follow-up investigation...';
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          await executeInvestigation({ question: text });
+        };
+      });
+      return pivots;
     }
 
     function hasEvidenceRows(result) {
       if (!result || typeof result !== 'object') return false;
-      if (typeof result.rows_returned === 'number') return result.rows_returned > 0;
+      if (typeof result.rows_returned === 'number' && result.rows_returned > 0) return true;
+      if (Array.isArray(result?.selected_spl_details) && result.selected_spl_details.some((row) => typeof row?.rows_returned === 'number' && row.rows_returned > 0)) return true;
       if (Array.isArray(result.__ui_sample_rows) && result.__ui_sample_rows.length) return true;
       if (Array.isArray(result.spl_results_preview) && result.spl_results_preview.length) return true;
       if (Array.isArray(result?.evidence?.top_entities) && result.evidence.top_entities.length) return true;
+      if (String(result.summary || '').trim().startsWith('- **What was queried**')) return true;
       return false;
     }
 
     function renderNoEvidenceOutcome(result) {
-      renderExecutionBrief(result || {});
+      const latestRun = Array.isArray(result?.selected_spl_details) && result.selected_spl_details.length
+        ? (result.selected_spl_details[result.selected_spl_details.length - 1] || {})
+        : {};
+      const spl = extractExecutedSPL(result || {});
+      const coverage = extractCoverage(result || {}, spl);
+      renderCaseHeader(result || {}, coverage, latestRun);
+      renderSplEvidence(result || {}, coverage, spl, latestRun);
+      renderCoverageVisibility(result || {}, coverage);
+      renderDecisionSupportSummary(result || {});
+      renderSplunkTimeline(result || {}, coverage, 'Splunk completed the query, but no rows matched the current time window and filters.');
+      $('pivot-cards').innerHTML = '<div class="brief-body muted">No pivots were generated because the completed Splunk search returned no matching evidence. Validate coverage, widen the time range, or refine the search scope.</div>';
+      setSplVisibility(false);
       $('summary').innerHTML =
         '<div class="brief-body">' +
         '<strong>No matching evidence was returned.</strong><br>' +
@@ -3771,20 +4784,42 @@ APP_HTML = """<!doctype html>
       $('journey').textContent = 'Investigation completed with no matching evidence rows. No ATT&CK classification or deeper pivot chain was produced.';
     }
 
+    function syncUtilityBarVisibility() {
+      const row = document.querySelector('.workspace-utility-row');
+      const chips = $('case-header-chips');
+      if (!row || !chips) return;
+      row.style.display = chips.textContent.trim() ? '' : 'none';
+    }
+
     function renderModelDecisions(result) {
       if (!result || typeof result !== 'object') {
         $('model-personas').innerHTML = '';
-        $('spl-details').textContent = '';
         $('spl-query').textContent = '';
         $('spl-results').textContent = '';
         $('model-decisions').innerHTML = '';
-        $('brief-execution').innerHTML = '';
         $('brief-mitre').innerHTML = '<div class="brief-body muted">No ATT&CK mapping was derived for this investigation yet.</div>';
         $('brief-supported').textContent = 'Idle';
+        $('case-header-chips').innerHTML = '';
+        $('spl-meta-strip').innerHTML = '';
+        $('coverage-visibility').innerHTML = '';
+        $('pivot-cards').innerHTML = '';
+        $('decision-support-summary').innerHTML = '';
+        $('investigation-timeline').innerHTML = '';
+        syncUtilityBarVisibility();
         return;
       }
-      renderExecutionBrief(result);
+      const splRuns = Array.isArray(result?.selected_spl_details) ? result.selected_spl_details : [];
+      const latestRun = splRuns.length ? (splRuns[splRuns.length - 1] || {}) : {};
+      const spl = extractExecutedSPL(result);
+      const coverage = extractCoverage(result, spl);
+      renderCaseHeader(result, coverage, latestRun);
       renderMitreBrief(result);
+      renderDecisionSupportSummary(result);
+      renderSplEvidence(result, coverage, spl, latestRun);
+      renderCoverageVisibility(result, coverage);
+      renderPivotCards(result);
+      renderSplunkTimeline(result, coverage, String(result?.summary || '').trim());
+      setSplVisibility(false);
 
       const workflow = Array.isArray(result.model_workflow) ? result.model_workflow : [];
       const workflowStagesPresent = new Set(
@@ -4011,55 +5046,43 @@ APP_HTML = """<!doctype html>
           badge: 'Continue'
         });
       }
-      $('model-personas').innerHTML = personas.map((p) =>
-        `<div class="persona ${esc(p.cls)}">
+      function shortenModelName(model) {
+        const text = String(model || '').trim();
+        if (!text) return 'not recorded';
+        return text.length > 52 ? `${text.slice(0, 52).trim()}...` : text;
+      }
+
+      function modelChoiceReason(persona) {
+        const name = String(persona?.name || '').toLowerCase();
+        if (name.includes('planner')) return 'Higher-context reasoning before any bounded SPL is generated.';
+        if (name.includes('writer')) return 'Structured query synthesis for Splunk-safe read-only execution.';
+        if (name.includes('security reviewer')) return 'Second-pass safety and quality critique before execution.';
+        if (name.includes('peer reviewer')) return 'Adjudication role used when multiple model outputs must be compared.';
+        if (name.includes('evidence reviewer')) return 'Post-query evidence assessment to judge strength and actionability.';
+        if (name.includes('final adjudication')) return 'Deterministic policy gate, not a model preference.';
+        if (name.includes('continuation reviewer')) return 'Selects the highest-value next pivot before another bounded round.';
+        if (name.includes('query repair')) return 'Used only when one bounded repair pass is justified.';
+        return 'Selected for this stage of the investigation pipeline.';
+      }
+
+      function summarizePersonaOutcome(detail) {
+        const lines = String(detail || '').split('\\n').map((line) => line.trim()).filter(Boolean);
+        if (!lines.length) return 'No recorded output.';
+        return lines.slice(0, 2).join(' | ');
+      }
+
+      $('model-personas').innerHTML = personas.map((p, idx) =>
+        `${idx ? '<div class="persona-arrow" aria-hidden="true">&rarr;</div>' : ''}<div class="persona ${esc(p.cls)}">
           <div class="p-head"><span class="p-name">${esc(p.name)}</span><span class="pill">${esc(p.badge)}</span></div>
           <div class="p-role">${esc(p.role)}</div>
-          <div class="p-model">${esc(p.model)}</div>
-          <div class="p-detail">${esc(p.detail)}</div>
+          <div class="p-model">${esc(shortenModelName(p.model))}</div>
+          <div class="p-detail">
+            <div class="p-why"><div class="p-mini-label">Why this model</div>${esc(modelChoiceReason(p))}</div>
+            <div class="p-outcome"><div class="p-mini-label">Stage output</div>${esc(summarizePersonaOutcome(p.detail))}</div>
+          </div>
         </div>`
       ).join('');
 
-      const splLink = $('spl-link');
-
-      let spl = '';
-      let splDetails = 'writer_model=unknown\\nrun_time_ms=unknown\\nsource=unavailable';
-      const splRuns = Array.isArray(result?.selected_spl_details) ? result.selected_spl_details : [];
-      if (splRuns.length) {
-        const latest = splRuns[splRuns.length - 1] || {};
-        splDetails = [
-          `writer_model=${String(latest.writer_model || 'unknown')}`,
-          `run_time_ms=${String(latest.execution_ms ?? 'unknown')}`,
-          `rows_returned=${String(latest.rows_returned ?? 'unknown')}`,
-          `reason=${String(latest.reason || '')}`,
-          'source=deterministic_run_telemetry',
-        ].join('\\n');
-      }
-      if (result?.query_args?.query) spl = String(result.query_args.query);
-      else if (result?.final_adjudication?.selected_args?.query) spl = String(result.final_adjudication.selected_args.query);
-      else if (result?.evidence?.query_or_args?.query) spl = String(result.evidence.query_or_args.query);
-      else if (Array.isArray(result?.trajectory)) {
-        for (let i = result.trajectory.length - 1; i >= 0; i -= 1) {
-          const q = result.trajectory[i]?.args?.query;
-          if (q) { spl = String(q); break; }
-        }
-      }
-      if (!spl) {
-        const tool = String(result?.selected_tool || result?.final_adjudication?.selected_tool || '');
-        spl = `(No splunk_run_query in this path) selected_tool=${tool || 'n/a'}`;
-      }
-      if (!splRuns.length && result?.query_args?.query) {
-        const writer =
-          String(result?.query_writer?.model || result?.planner?.model || result?.query_writer_model || 'unknown');
-        splDetails = [
-          `writer_model=${writer}`,
-          'run_time_ms=unknown',
-          'rows_returned=unknown',
-          'source=single_step_result',
-        ].join('\\n');
-      }
-      $('spl-details').textContent = splDetails;
-      $('spl-query').textContent = spl;
       const previewRowsRaw =
         (Array.isArray(result?.__ui_sample_rows) && result.__ui_sample_rows.length
           ? result.__ui_sample_rows
@@ -4073,8 +5096,7 @@ APP_HTML = """<!doctype html>
               )
           ));
       const previewRows = previewRowsRaw.filter((row) => row && typeof row === 'object').slice(0, 50);
-      const latestSplRun = splRuns.length ? (splRuns[splRuns.length - 1] || {}) : {};
-      const latestRowsReturned = latestSplRun.rows_returned;
+      const latestRowsReturned = latestRun.rows_returned;
       const resultRowsReturned = typeof result?.rows_returned === 'number'
         ? result.rows_returned
         : (typeof latestRowsReturned === 'number' ? latestRowsReturned : null);
@@ -4089,43 +5111,6 @@ APP_HTML = """<!doctype html>
                 : '(No SPL result rows were captured for this run)'
             )
         );
-      if (spl && !spl.startsWith('(No splunk_run_query')) {
-        const earliest =
-          String(
-            result?.query_args?.earliest_time ||
-            result?.final_adjudication?.selected_args?.earliest_time ||
-            result?.evidence?.time_window?.earliest_time ||
-            '-24h@h'
-          );
-        const latest =
-          String(
-            result?.query_args?.latest_time ||
-            result?.final_adjudication?.selected_args?.latest_time ||
-            result?.evidence?.time_window?.latest_time ||
-            'now'
-          );
-        const splunkBase = String(result?.splunk_search_url_base || '');
-        const params = new URLSearchParams({
-          q: spl,
-          'display.page.search.mode': 'smart',
-          'dispatch.sample_ratio': '1',
-          workload_pool: '',
-          earliest,
-          latest,
-          'display.page.search.tab': 'statistics',
-          'display.general.type': 'statistics',
-        });
-        if (splunkBase) {
-          splLink.href = `${splunkBase}?${params.toString()}`;
-          splLink.style.display = 'inline';
-        } else {
-          splLink.href = '#';
-          splLink.style.display = 'none';
-        }
-      } else {
-        splLink.href = '#';
-        splLink.style.display = 'none';
-      }
       const detailHtml = esc(detailLines.join('\\n')).replaceAll('\\n', '<br>');
       $('model-decisions').innerHTML =
         `${workflowHtml.length ? `<div class="decision-subhead">Pipeline Roles</div>${workflowHtml.join('')}` : ''}` +
@@ -4266,6 +5251,72 @@ APP_HTML = """<!doctype html>
       meta.textContent = roleJourney
         ? `pipeline=${pipeline} total=${total}\nroles: ${roleJourney}`
         : `pipeline=${pipeline} total=${total}`;
+    }
+
+    function setSplVisibility(showRaw) {
+      const rawShell = $('spl-raw-shell');
+      const toolbarToggle = $('spl-visibility-toggle');
+      const drawerToggle = $('drawer-spl-toggle');
+      rawShell.classList.toggle('open', !!showRaw);
+      if (toolbarToggle) toolbarToggle.textContent = showRaw ? 'Hide SPL Executed' : 'Show SPL Executed';
+      if (drawerToggle) drawerToggle.textContent = showRaw ? 'Hide SPL Executed' : 'Show SPL Executed';
+      $('copy-spl').style.display = showRaw && $('spl-query').textContent ? 'inline-flex' : 'none';
+    }
+
+    function bindSplToggleButtons() {
+      const handler = () => {
+        const rawShell = $('spl-raw-shell');
+        setSplVisibility(!rawShell.classList.contains('open'));
+      };
+      const toolbarToggle = $('spl-visibility-toggle');
+      const drawerToggle = $('drawer-spl-toggle');
+      if (toolbarToggle) toolbarToggle.onclick = handler;
+      if (drawerToggle) drawerToggle.onclick = handler;
+    }
+
+    function bindAdvancedSummaryControls() {
+      const summary = document.querySelector('.advanced-shell > summary');
+      if (!summary) return;
+      summary.querySelectorAll('a.jump-link').forEach((node) => {
+        node.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const href = node.getAttribute('href') || '';
+          if (!href.startsWith('#')) return;
+          const target = document.querySelector(href);
+          if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          if (history && typeof history.replaceState === 'function') {
+            history.replaceState(null, '', href);
+          }
+        });
+      });
+      summary.querySelectorAll('button').forEach((node) => {
+        node.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        });
+      });
+    }
+
+    function bindAdvancedDrawerMode() {
+      const drawer = $('advanced-section');
+      const fullToggle = $('advanced-full-toggle');
+      if (!drawer || !fullToggle) return;
+      const sync = () => {
+        const full = drawer.dataset.mode === 'full';
+        fullToggle.textContent = full ? '↙' : '□';
+        fullToggle.title = full ? 'Return the drawer to normal height' : 'Expand the drawer to full height';
+      };
+      drawer.addEventListener('toggle', () => {
+        if (!drawer.open) drawer.dataset.mode = 'normal';
+        sync();
+      });
+      fullToggle.onclick = () => {
+        if (!drawer.open) return;
+        drawer.dataset.mode = drawer.dataset.mode === 'full' ? 'normal' : 'full';
+        sync();
+      };
+      sync();
     }
 
     async function refreshDomainHints() {
@@ -4453,15 +5504,26 @@ APP_HTML = """<!doctype html>
       runBtn.disabled = true;
       $('status').textContent = 'Running...';
       startRunProgress();
-      $('summary').innerHTML = '';
+      $('case-header-chips').innerHTML = `
+        <div class="utility-pill readonly"><span>Read-Only</span><strong>Splunk investigation mode</strong></div>
+        <div class="utility-pill"><span>Status</span><strong>Running</strong></div>
+      `;
+      syncUtilityBarVisibility();
+      bindSplToggleButtons();
       $('model-personas').innerHTML = '';
-      $('spl-details').textContent = '';
+      $('spl-meta-strip').innerHTML = '';
+      $('spl-analyst-summary').innerHTML = '<div class="brief-body muted">Investigation in progress.</div>';
       $('spl-link').style.display = 'none';
+      $('copy-spl').style.display = 'none';
       $('spl-query').textContent = '';
       $('spl-results').textContent = '';
+      $('coverage-visibility').innerHTML = '<div class="coverage-row"><div class="coverage-row-title">Coverage</div><div class="coverage-row-copy">Awaiting Splunk evidence.</div></div>';
+      $('pivot-cards').innerHTML = '<div class="brief-body muted">Recommended next pivots will appear after Splunk evidence is returned and reviewed.</div>';
+      $('decision-support-summary').innerHTML = '<div class="support-item"><div class="support-label">Decision support</div><div class="support-value">Pending evidence review.</div></div>';
       $('model-decisions').innerHTML = '';
       $('workflow-track').innerHTML = '';
       $('workflow-meta').textContent = '';
+      $('investigation-timeline').innerHTML = '<details class="timeline-phase" open><summary><div class="timeline-phase-main"><div class="timeline-phase-name">Detect</div><div class="timeline-phase-summary">Investigation in progress.</div></div><div class="timeline-phase-status">running</div></summary><div class="timeline-phase-body"><div class="timeline-detail-grid"><div class="timeline-detail"><div class="timeline-detail-title">Key Evidence</div><div class="timeline-detail-copy">Awaiting Splunk evidence.</div></div><div class="timeline-detail"><div class="timeline-detail-title">Relevant Splunk Action</div><div class="timeline-detail-copy">Preparing bounded search execution.</div></div><div class="timeline-detail"><div class="timeline-detail-title">Analyst-Facing Conclusion</div><div class="timeline-detail-copy">Investigation in progress.</div></div></div></div></details>';
       $('tdir-card').style.display = 'none';
       $('tdir-case').textContent = '';
       $('journey').textContent = '';
@@ -4469,7 +5531,7 @@ APP_HTML = """<!doctype html>
       $('brief-mitre').innerHTML = '<div class="brief-body muted">Investigation in progress.</div>';
       $('summary').innerHTML = '<div class="brief-body muted">Investigation in progress.</div>';
       $('brief-supported').textContent = 'Running';
-      $('brief-execution').innerHTML = '';
+      setSplVisibility(false);
       clearContinuationControls();
       try {
         const payload = {
@@ -4497,10 +5559,16 @@ APP_HTML = """<!doctype html>
           stopRunProgress(false);
         } else {
           lastAskResult = data.result || {};
+          if (lastAskResult && typeof lastAskResult === 'object') {
+            lastAskResult = {
+              ...lastAskResult,
+              splunk_search_url_base: data.splunk_search_url_base || lastAskResult.splunk_search_url_base || '',
+            };
+          }
           if (Array.isArray(data.sample_rows)) {
             lastAskResult.__ui_sample_rows = data.sample_rows;
           }
-          const result = data.result || {};
+          const result = lastAskResult || {};
           $('status').textContent = hasEvidenceRows(result) ? 'Complete' : 'Complete (No Hits)';
           if (hasEvidenceRows(result)) {
             $('summary').innerHTML = renderSummaryText(result?.summary || '');
@@ -4556,10 +5624,25 @@ APP_HTML = """<!doctype html>
     };
     $('pipeline').addEventListener('change', updatePipelineHelp);
     $('artifact').addEventListener('change', updateArtifactLabel);
+    $('copy-spl').onclick = async () => {
+      const text = $('spl-query').textContent || '';
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        $('status').textContent = 'SPL copied to clipboard.';
+      } catch (_err) {
+        $('status').textContent = 'Unable to copy SPL from the browser.';
+      }
+    };
     $('control-details').open = false;
     updatePipelineHelp();
     $('artifact').checked = false;
     updateArtifactLabel();
+    bindSplToggleButtons();
+    bindAdvancedSummaryControls();
+    bindAdvancedDrawerMode();
+    setSplVisibility(false);
+    syncUtilityBarVisibility();
     renderSelectedFollowup();
     let hintTimer = null;
     $('question').addEventListener('input', () => {
@@ -4610,6 +5693,8 @@ DOCS_SHELL_HTML = """<!doctype html>
     }}
     .wrap {{ max-width: 1360px; min-height:calc(100vh - 28px); margin: 14px auto; padding: 0 14px 20px; box-sizing:border-box; }}
     .topnav {{
+      position:relative;
+      z-index:220;
       display:flex;
       flex-wrap:nowrap;
       gap:4px;
@@ -4641,7 +5726,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       transition:transform .16s ease, border-color .16s ease, box-shadow .16s ease, background .16s ease, color .16s ease;
       overflow:hidden;
     }}
-    .nav-item-dropdown {{ overflow:visible; }}
+    .nav-item-dropdown {{ overflow:visible; z-index:221; }}
     .nav-trigger {{
       display:flex;
       flex-direction:column;
@@ -4675,7 +5760,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       visibility:hidden;
       transform:translateY(6px);
       transition:opacity .14s ease, transform .14s ease, visibility .14s ease;
-      z-index:40;
+      z-index:260;
     }}
     .nav-item-dropdown:hover .nav-submenu,
     .nav-item-dropdown:focus-within .nav-submenu {{
@@ -6046,15 +7131,15 @@ def _architecture_svg() -> str:
       <h3>LLM Host (Windows + RTX 3090)</h3>
       <ul>
         <li>Remote Ollama API on <code>:11434</code>.</li>
-        <li>Planner interprets the question and produces a structured search plan.</li>
-        <li>SPL Writer turns that plan into bounded read-only SPL.</li>
-        <li>Security Reviewer critiques quality and safety.</li>
+        <li>Planner uses Qwen to interpret the question and produce a structured search plan.</li>
+        <li>SPL Writer uses DeepSeek to turn that plan into bounded read-only SPL.</li>
+        <li>Security Reviewer uses Foundation-Sec for security-oriented quality and safety critique.</li>
         <li>Peer Reviewer 1 only runs when the reviewer does not cleanly approve the writer output.</li>
         <li>Peer Reviewer 2 verifies or overrides that adjudication when it is needed.</li>
-        <li>Evidence Reviewer checks executed rows against the claim set.</li>
-        <li>Continuation Reviewer decides whether another bounded pivot is warranted.</li>
+        <li>Evidence Reviewer uses Foundation-Sec to check executed rows against the claim set.</li>
+        <li>Continuation Reviewer uses Foundation-Sec to decide whether another bounded pivot is warranted.</li>
         <li>Controller model supports bounded orchestration in the agentic path.</li>
-        <li>Final Summary model produces the analyst-facing narrative.</li>
+        <li>Final Summary uses Foundation-Sec to produce the analyst-facing narrative.</li>
       </ul>
       <div class="arch-pill-row">
         <span class="arch-pill">write</span>
@@ -6125,7 +7210,7 @@ def _architecture_svg() -> str:
   <div class="arch-loop-strip" aria-label="Architecture feedback loops">
     <span class="arch-loop-chip">Data Domains</span>
     <span class="arch-loop-arrow" aria-hidden="true">&rarr;</span>
-    <span class="arch-loop-chip">Planner and Reviewer Prompts</span>
+    <span class="arch-loop-chip">Planner and Security Review Prompts</span>
     <span class="arch-loop-arrow" aria-hidden="true">&rarr;</span>
     <span class="arch-loop-chip">Deterministic Policy Gate</span>
     <span class="arch-loop-arrow" aria-hidden="true">&rarr;</span>
@@ -6145,7 +7230,7 @@ def _architecture_svg() -> str:
     </div>
     <div class="arch-interop-card">
       <div class="arch-interop-title">Grounding Path</div>
-      <div class="arch-interop-line"><strong>Data Domains</strong> -> <strong>Planner/Reviewer prompts</strong> for environment-aware SPL generation using known fields where available.</div>
+      <div class="arch-interop-line"><strong>Data Domains</strong> -> <strong>planner/security-review prompts</strong> for environment-aware SPL generation using known fields where available.</div>
       <div class="arch-interop-line"><strong>RAG snippets</strong> -> <strong>query repair and critique</strong> for higher-quality searches.</div>
     </div>
     <div class="arch-interop-card">
@@ -6405,8 +7490,8 @@ def _architecture_page_body() -> str:
 
           <text x="788" y="118" fill="#9bf7cf" font-size="12" font-weight="700" letter-spacing=".08em">PRIMARY INFERENCE</text>
           <text x="788" y="150" fill="#f5f9ff" font-size="24" font-weight="800">Primary Ollama Host</text>
-          <text x="788" y="178" fill="#bfd0df" font-size="13">Planner, writer, reviewer, peer review,</text>
-          <text x="788" y="198" fill="#bfd0df" font-size="13">evidence, continuation, summary.</text>
+          <text x="788" y="178" fill="#bfd0df" font-size="13">Qwen plans, DeepSeek writes, Foundation-Sec</text>
+          <text x="788" y="198" fill="#bfd0df" font-size="13">reviews evidence, continuation, and summary.</text>
           <text x="788" y="226" fill="#8fb0cb" font-size="13">Main model endpoint</text>
 
           <text x="1278" y="118" fill="#8fd8ff" font-size="12" font-weight="700" letter-spacing=".08em">DATA PLANE</text>
@@ -6473,7 +7558,7 @@ def _architecture_page_body() -> str:
             <h3>Primary Ollama Host</h3>
             <span class="arch-step-badge">4</span>
           </div>
-          <p class="arch-endpoint-copy">Run the main model roles. Planner, SPL writer, reviewers, adjudication, continuation, and summary roles propose and critique the bounded plan. This host remains the primary reasoning engine whether or not the edge helper exists.</p>
+          <p class="arch-endpoint-copy">Run the main model roles. Qwen plans, DeepSeek writes bounded SPL, Foundation-Sec handles the security-facing review path, and peer adjudication remains available when needed. This host remains the primary reasoning engine whether or not the edge helper exists.</p>
           <div class="arch-endpoint-meta">Remote API on <code>:11434</code><br/>Controller -&gt; primary inference host</div>
         </section>
         <section class="arch-endpoint-card">
@@ -6544,13 +7629,13 @@ def _architecture_page_body() -> str:
           <ul>
             <li>Optional Edge Helper only runs when explicitly enabled in runtime configuration.</li>
             <li>Its narrow role is routing, split-query hints, and cheap confidence pre-checks.</li>
-            <li>Planner interprets the analyst question and proposes the bounded search strategy.</li>
-            <li>SPL Writer generates the bounded read-only SPL from that plan.</li>
-            <li>Security Reviewer critiques quality and safety.</li>
-            <li>Peer Reviewer 1 and 2 adjudicate only when the reviewer contests or materially revises the writer output.</li>
-            <li>Evidence Reviewer checks returned rows against the claim set.</li>
-            <li>Continuation Reviewer decides whether another bounded pivot is warranted.</li>
-            <li>Final Summary produces the analyst-facing narrative.</li>
+            <li>Planner uses Qwen to interpret the analyst question and propose the bounded search strategy.</li>
+            <li>SPL Writer uses DeepSeek to generate bounded read-only SPL from that plan.</li>
+            <li>Security Reviewer uses Foundation-Sec for security-oriented critique and safety review.</li>
+            <li>Peer Reviewer 1 and 2 stay available for adjudication when the reviewer contests or materially revises the writer output.</li>
+            <li>Evidence Reviewer uses Foundation-Sec to check returned rows against the claim set.</li>
+            <li>Continuation Reviewer uses Foundation-Sec to decide whether another bounded pivot is warranted.</li>
+            <li>Final Summary uses Foundation-Sec to produce the analyst-facing narrative.</li>
           </ul>
         </div>
         <div class="arch-panel">
@@ -7148,10 +8233,34 @@ def _configure_page_body() -> str:
       color:#f8fafc;
     }
     .cfg-row textarea{min-height:100px;resize:vertical;font-family:"Consolas","SFMono-Regular",Menlo,monospace;}
+    .cfg-secret-view{
+      display:none;
+      border:1px solid #2a4056;
+      border-radius:12px;
+      background:#07111f;
+      color:#dbeafe;
+      font-family:"Consolas","SFMono-Regular",Menlo,monospace;
+      font-size:12px;
+      line-height:1.45;
+      padding:12px;
+      white-space:pre-wrap;
+      word-break:break-all;
+      overflow-wrap:anywhere;
+      max-height:160px;
+      overflow:auto;
+      box-sizing:border-box;
+    }
+    .cfg-secret-view.visible{display:block;}
+    .cfg-secret-note{
+      color:#9fb4cc;
+      font-size:12px;
+      line-height:1.45;
+      margin-top:6px;
+    }
     .cfg-select-wrap{position:relative;}
     .cfg-select-wrap::after{content:"";position:absolute;right:16px;top:50%;width:10px;height:10px;border-right:2px solid #8fb6d9;border-bottom:2px solid #8fb6d9;transform:translateY(-65%) rotate(45deg);pointer-events:none;}
     .cfg-actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:16px;}
-    .cfg-status{font-size:13px;color:#9fb4cc;}
+    .cfg-status{font-size:13px;color:#9fb4cc;overflow-wrap:anywhere;word-break:break-word;min-width:0;}
     .cfg-note{margin-top:14px;padding:12px 14px;border:1px solid #36516b;border-radius:14px;background:#091423;color:#dbeafe;font-size:13px;line-height:1.55;}
     .cfg-pre{white-space:pre-wrap;background:#020617;border:1px solid #1f2937;border-radius:14px;padding:14px;overflow:auto;line-height:1.5;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;max-width:100%;min-width:0;}
     .cfg-badges{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 0;}
@@ -7392,8 +8501,11 @@ def _configure_page_body() -> str:
         <label for="cfg-splunk-token">SPLUNK_LAB_BEARER_TOKEN</label>
         <div class="cfg-example">Stored server-side for the runtime. The field stays masked unless you explicitly reveal or replace it.</div>
         <input id="cfg-splunk-token" type="password" placeholder="Bearer token value" autocomplete="off" />
+        <div id="cfg-splunk-token-view" class="cfg-secret-view" aria-live="polite"></div>
+        <div id="cfg-token-note" class="cfg-secret-note" style="display:none;">Token is revealed in a wrapped read-only view. Hide it to return to the compact masked editor or replace it.</div>
         <div class="cfg-actions" style="margin-top:6px;">
           <button id="cfg-token-toggle" class="btn-secondary" type="button" style="margin-top:0;">Reveal Token</button>
+          <button id="cfg-token-copy" class="btn-secondary" type="button" style="margin-top:0;">Copy Token</button>
           <button id="cfg-token-clear" class="btn-secondary" type="button" style="margin-top:0;">Clear Token</button>
           <span id="cfg-token-state" class="cfg-status">No saved token detected.</span>
         </div>
@@ -7652,6 +8764,32 @@ def _configure_page_body() -> str:
   ];
   let cfgTokenMasked = false;
   let cfgTokenReveal = false;
+  let cfgTokenActual = '';
+  let cfgTokenFetched = false;
+  function cfgShowMaskedTokenEditor(){
+    cfg$('cfg-splunk-token').style.display = 'block';
+    cfg$('cfg-splunk-token').type = 'password';
+    cfg$('cfg-splunk-token-view').classList.remove('visible');
+    cfg$('cfg-token-note').style.display = 'none';
+    cfg$('cfg-token-toggle').textContent = 'Reveal Token';
+    cfgTokenReveal = false;
+  }
+  function cfgShowRevealedToken(value){
+    cfg$('cfg-splunk-token-view').textContent = String(value || '');
+    cfg$('cfg-splunk-token-view').classList.add('visible');
+    cfg$('cfg-splunk-token').style.display = 'none';
+    cfg$('cfg-token-note').style.display = 'block';
+    cfg$('cfg-token-toggle').textContent = 'Hide Token';
+    cfgTokenReveal = true;
+  }
+  async function cfgFetchRuntimeSecret(){
+    const resp = await fetch('/api/config/runtime-secret?name=SPLUNK_LAB_BEARER_TOKEN');
+    const data = await resp.json();
+    if(!resp.ok){ throw new Error(data.error || `secret fetch failed (${resp.status})`); }
+    cfgTokenActual = String(data.value || '');
+    cfgTokenFetched = true;
+    return cfgTokenActual;
+  }
   function cfgApplyPayload(values){
     const payload = values || {};
     cfg$('cfg-ollama-host').value = payload.OLLAMA_HOST || '';
@@ -7659,9 +8797,9 @@ def _configure_page_body() -> str:
     cfg$('cfg-splunk-mcp').value = payload.SPLUNK_MCP_URL || '';
     cfg$('cfg-splunk-token').value = payload.SPLUNK_LAB_BEARER_TOKEN || '';
     cfgTokenMasked = String(payload.SPLUNK_LAB_BEARER_TOKEN || '') === '__KEEP_EXISTING_SPLUNK_TOKEN__';
-    cfgTokenReveal = false;
-    cfg$('cfg-splunk-token').type = 'password';
-    cfg$('cfg-token-toggle').textContent = 'Reveal Token';
+    cfgTokenActual = '';
+    cfgTokenFetched = false;
+    cfgShowMaskedTokenEditor();
     cfg$('cfg-auth-enabled').value = payload.SOC_UI_AUTH_ENABLED || '1';
     cfg$('cfg-edge-enabled').value = payload.EDGE_LLM_ENABLED || '0';
     cfg$('cfg-edge-host').value = payload.EDGE_LLM_HOST || '';
@@ -7683,15 +8821,15 @@ def _configure_page_body() -> str:
     const present = Boolean(meta.splunk_token_present);
     const masked = String(meta.splunk_token_masked || '').trim();
     cfg$('cfg-token-state').textContent = present
-      ? `Saved token detected (${cfgEscape(masked || 'masked')}). Leave the field as-is to keep it, replace it to rotate it, or clear it to remove it.`
+      ? `Saved token detected (${masked || 'masked'}). Leave the field as-is to keep it, replace it to rotate it, or clear it to remove it.`
       : 'No saved token detected.';
   }
   const cfgDefaultAssignments = {
     OLLAMA_MODEL_QUERY_PLANNER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
     OLLAMA_MODEL_QUERY_WRITER: 'deepseek-coder-v2:lite',
     OLLAMA_MODEL_QUERY_REPAIR: 'deepseek-coder-v2:lite',
-    OLLAMA_MODEL_EVIDENCE_REVIEWER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
-    OLLAMA_MODEL_SECURITY_REVIEWER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
+    OLLAMA_MODEL_EVIDENCE_REVIEWER: 'hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest',
+    OLLAMA_MODEL_SECURITY_REVIEWER: 'hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest',
     OLLAMA_MODEL_PEER_REVIEWER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
     OLLAMA_MODEL_PEER_REVIEWER_2: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
     OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER: 'hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest',
@@ -8130,51 +9268,84 @@ def _configure_page_body() -> str:
   }
   async function cfgSave(mode='full'){
     const edgeOnly = mode === 'edge';
+    const saveBtn = cfg$('cfg-save');
+    const priorSaveLabel = saveBtn ? saveBtn.textContent : '';
+    if(saveBtn){
+      saveBtn.disabled = true;
+      saveBtn.textContent = edgeOnly ? 'Saving Edge...' : 'Saving...';
+    }
     cfg$('cfg-status').textContent = edgeOnly ? 'Saving edge helper...' : 'Saving...';
     if(edgeOnly){
       cfg$('cfg-edge-status').textContent = 'Saving edge helper...';
     }
-    let payload = cfgCollectPayload();
-    const validationResp = await fetch('/api/config/validate', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(edgeOnly ? {values: payload, scope: 'edge'} : {values: payload})
-    });
-    const validationData = await validationResp.json();
-    if(!validationResp.ok){
-      const detail = validationData.error || `pre-save validation failed (${validationResp.status})`;
+    try {
+      let payload = cfgCollectPayload();
+      const validationResp = await fetch('/api/config/validate', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(edgeOnly ? {values: payload, scope: 'edge'} : {values: payload})
+      });
+      const validationData = await validationResp.json();
+      if(!validationResp.ok){
+        const detail = validationData.error || `pre-save validation failed (${validationResp.status})`;
+        cfg$('cfg-status').textContent = detail;
+        if(edgeOnly){
+          cfg$('cfg-edge-status').textContent = detail;
+        }
+        return;
+      }
+      if(edgeOnly){
+        cfgRenderEdgeModelOptions(validationData.edge_ollama_available_models || []);
+        cfgRenderEdgeValidation(validationData);
+        cfg$('cfg-edge-checks').textContent = validationData.connectivity_checks?.edge_ollama_tags || 'Edge helper disabled or not configured.';
+      }
+      payload = cfgAutoAssignDefaults(payload, validationData.ollama_available_models || []);
+      const resp = await fetch('/api/config/runtime', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({values: payload})
+      });
+      const data = await resp.json();
+      if(!resp.ok){
+        const detail = data.error || `save failed (${resp.status})`;
+        cfg$('cfg-status').textContent = detail;
+        if(edgeOnly){
+          cfg$('cfg-edge-status').textContent = detail;
+        }
+        return;
+      }
+      const savedStatus = edgeOnly ? 'Saved edge helper settings to config/ui.env.' : 'Saved to config/ui.env.';
+      cfg$('cfg-status').textContent = savedStatus;
+      if(edgeOnly){
+        cfg$('cfg-edge-status').textContent = 'Edge helper saved to config/ui.env.';
+      }
+      try {
+        cfgRender(data);
+      } catch (renderErr) {
+        console.error('cfgRender failed after save', renderErr);
+        cfg$('cfg-status').textContent = `${savedStatus} UI refresh was partial; reload if fields look stale.`;
+      }
+      try {
+        await cfgValidate();
+      } catch (validateErr) {
+        console.error('cfgValidate failed after save', validateErr);
+        if(cfg$('cfg-status').textContent === 'Validating live connections...'){
+          cfg$('cfg-status').textContent = `${savedStatus} Validation refresh failed; use Validate Current Config to retry.`;
+        }
+      }
+    } catch (err) {
+      console.error('cfgSave failed', err);
+      const detail = err?.message ? `save failed: ${err.message}` : 'save failed';
       cfg$('cfg-status').textContent = detail;
       if(edgeOnly){
         cfg$('cfg-edge-status').textContent = detail;
       }
-      return;
-    }
-    if(edgeOnly){
-      cfgRenderEdgeModelOptions(validationData.edge_ollama_available_models || []);
-      cfgRenderEdgeValidation(validationData);
-      cfg$('cfg-edge-checks').textContent = validationData.connectivity_checks?.edge_ollama_tags || 'Edge helper disabled or not configured.';
-    }
-    payload = cfgAutoAssignDefaults(payload, validationData.ollama_available_models || []);
-    const resp = await fetch('/api/config/runtime', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({values: payload})
-    });
-    const data = await resp.json();
-    if(!resp.ok){
-      const detail = data.error || `save failed (${resp.status})`;
-      cfg$('cfg-status').textContent = detail;
-      if(edgeOnly){
-        cfg$('cfg-edge-status').textContent = detail;
+    } finally {
+      if(saveBtn){
+        saveBtn.disabled = false;
+        saveBtn.textContent = priorSaveLabel || 'Save Configuration';
       }
-      return;
     }
-    cfgRender(data);
-    cfg$('cfg-status').textContent = edgeOnly ? 'Saved edge helper settings to config/ui.env.' : 'Saved to config/ui.env.';
-    if(edgeOnly){
-      cfg$('cfg-edge-status').textContent = 'Edge helper saved to config/ui.env.';
-    }
-    await cfgValidate();
   }
   cfg$('cfg-save').onclick = async () => { await cfgSave('full'); };
   cfg$('cfg-personalize').onclick = async () => {
@@ -8215,26 +9386,61 @@ def _configure_page_body() -> str:
   cfg$('cfg-mcp-probe').onclick = cfgProbeMcp;
   cfg$('cfg-token-toggle').onclick = () => {
     const tokenInput = cfg$('cfg-splunk-token');
-    if(cfgTokenMasked && String(tokenInput.value || '').trim() === '__KEEP_EXISTING_SPLUNK_TOKEN__'){
-      cfg$('cfg-token-state').textContent = 'Saved token stays masked server-side. Enter a replacement value if you want to rotate it.';
+    if(cfgTokenReveal){
+      cfgShowMaskedTokenEditor();
       return;
     }
-    cfgTokenReveal = !cfgTokenReveal;
-    tokenInput.type = cfgTokenReveal ? 'text' : 'password';
-    cfg$('cfg-token-toggle').textContent = cfgTokenReveal ? 'Hide Token' : 'Reveal Token';
+    const currentValue = String(tokenInput.value || '').trim();
+    if(cfgTokenMasked && currentValue === '__KEEP_EXISTING_SPLUNK_TOKEN__'){
+      cfg$('cfg-token-state').textContent = 'Loading saved token into the secure read-only viewer...';
+      cfgFetchRuntimeSecret()
+        .then((value) => {
+          cfgShowRevealedToken(value);
+          cfg$('cfg-token-state').textContent = value
+            ? 'Saved token revealed in a wrapped read-only view. Hide it to return to the masked editor.'
+            : 'No saved token detected.';
+        })
+        .catch((err) => {
+          cfg$('cfg-token-state').textContent = String(err && err.message ? err.message : err);
+        });
+      return;
+    }
+    cfgTokenActual = currentValue;
+    cfgShowRevealedToken(currentValue);
+  };
+  cfg$('cfg-token-copy').onclick = async () => {
+    try {
+      let tokenValue = '';
+      const currentValue = String(cfg$('cfg-splunk-token').value || '').trim();
+      if(cfgTokenMasked && currentValue === '__KEEP_EXISTING_SPLUNK_TOKEN__'){
+        tokenValue = cfgTokenFetched ? cfgTokenActual : await cfgFetchRuntimeSecret();
+      } else {
+        tokenValue = cfgTokenReveal ? cfgTokenActual : currentValue;
+      }
+      if(!tokenValue){
+        cfg$('cfg-token-state').textContent = 'No token value is available to copy.';
+        return;
+      }
+      await navigator.clipboard.writeText(tokenValue);
+      cfg$('cfg-token-state').textContent = 'Token copied to clipboard.';
+    } catch (err) {
+      cfg$('cfg-token-state').textContent = String(err && err.message ? err.message : err);
+    }
   };
   cfg$('cfg-token-clear').onclick = () => {
     cfg$('cfg-splunk-token').value = '';
-    cfg$('cfg-splunk-token').type = 'password';
     cfgTokenMasked = false;
-    cfgTokenReveal = false;
-    cfg$('cfg-token-toggle').textContent = 'Reveal Token';
+    cfgTokenActual = '';
+    cfgTokenFetched = false;
+    cfgShowMaskedTokenEditor();
     cfg$('cfg-token-state').textContent = 'Token cleared in the draft form. Save Configuration to remove it from runtime.';
   };
   cfg$('cfg-splunk-token').addEventListener('input', () => {
     const tokenInput = cfg$('cfg-splunk-token');
     if(String(tokenInput.value || '').trim() !== '__KEEP_EXISTING_SPLUNK_TOKEN__'){
       cfgTokenMasked = false;
+      cfgTokenActual = String(tokenInput.value || '');
+      cfgTokenFetched = false;
     }
   });
   cfgLoad();
@@ -9359,6 +10565,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(HTTPStatus.OK, _config_snapshot())
 
+    def _api_config_runtime_secret_get(self, parsed) -> None:
+        if not self._require_ops_role({}):
+            return
+        params = parse_qs(parsed.query or "")
+        name = str((params.get("name", [""])[0] or "")).strip()
+        if name != "SPLUNK_LAB_BEARER_TOKEN":
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "unsupported secret name"})
+            return
+        self._json(HTTPStatus.OK, {"name": name, "value": get_runtime_secret(name, "")})
+
     def _api_config_dependencies_get(self) -> None:
         if not self._require_ops_role({}):
             return
@@ -9981,6 +11197,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/config/runtime":
             self._api_config_runtime_get()
+            return
+        if parsed.path == "/api/config/runtime-secret":
+            self._api_config_runtime_secret_get(parsed)
             return
         if parsed.path == "/api/config/dependencies":
             self._api_config_dependencies_get()

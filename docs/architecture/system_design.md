@@ -15,13 +15,13 @@ This document is the concise implementation reference for A.G.E.N.T. Smith. It d
 flowchart LR
     A[Analyst Question] --> B[Linux Controller Host]
     B --> C[LangGraph Orchestration]
-    C --> D[Networked Tasker Roles]
+    C --> D[Qwen Planner + DeepSeek Writer + Foundation-Sec Review]
     D --> E[Deterministic Policy Gate]
     E --> F[Splunk MCP]
     F --> G[Splunk Data]
-    G --> H[Evidence Reviewer]
-    H --> I[Continuation Control]
-    I --> J[Final Summary]
+    G --> H[Evidence Reviewer<br/>Foundation-Sec]
+    H --> I[Continuation Control<br/>Foundation-Sec]
+    I --> J[Final Summary<br/>Foundation-Sec]
     J --> K[Analyst UI]
 ```
 
@@ -55,14 +55,14 @@ flowchart LR
 - Remain the source of truth for evidence
 
 ## Active Model Roles
-- Planner
-- SPL Writer
-- Security Reviewer
-- Peer Reviewer 1 when needed
-- Peer Reviewer 2 when needed
-- Evidence Reviewer
-- Continuation Reviewer
-- Final Summary
+- Planner: Qwen
+- SPL Writer: DeepSeek
+- Security Reviewer: Foundation-Sec
+- Peer Reviewer 1 when needed: Qwen
+- Peer Reviewer 2 when needed: Qwen
+- Evidence Reviewer: Foundation-Sec
+- Continuation Reviewer: Foundation-Sec
+- Final Summary: Foundation-Sec
 - Optional Edge Router / Splitter
 
 ## Control Model
@@ -81,17 +81,17 @@ flowchart TD
     ER -->|simple route or split hint| P[Planner]
     Q -->|edge helper disabled| P
     P --> W[SPL Writer]
-    W --> S[Security Reviewer]
+    W --> S[Security Reviewer<br/>Foundation-Sec]
     S -->|clean approval| G[Deterministic Gate]
     S -->|contested or revised| P1[Peer Reviewer 1]
     P1 --> P2[Peer Reviewer 2]
     P2 --> G
     G --> X[Splunk MCP Execution]
-    X --> E[Evidence Reviewer]
-    E --> C[Continuation Reviewer]
+    X --> E[Evidence Reviewer<br/>Foundation-Sec]
+    E --> C[Continuation Reviewer<br/>Foundation-Sec]
     C -->|one auto follow-up max| G
     C -->|deeper than first follow-up| A[Analyst Approval]
-    C --> F[Final Summary]
+    C --> F[Final Summary<br/>Foundation-Sec]
 ```
 
 ## Data And RAG Layers

@@ -76,14 +76,16 @@ That means LangGraph is not just "one model call." It is the coded workflow that
 The current SPL path is intentionally split across specialized roles.
 
 Primary model roles:
-- `Planner / Reviewer`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
+- `Planner`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
 - `SPL Writer`: `deepseek-coder-v2:lite`
 - `Query Repair`: `deepseek-coder-v2:lite`
-- `Final Summary / Agentic Summary`: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+- `Security Review / Evidence Review / Continuation Review / Final Summary`: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
+- `Peer Review`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
 
 Current reasoning for that split:
-- Qwen is better at intent interpretation, critique, and review
+- Qwen is better at intent interpretation and adjudication between competing plans
 - DeepSeek-Coder is better at practical query composition
+- Foundation-Sec is better at security-oriented critique, evidence judgment, continuation decisions, and analyst-facing security summaries
 - deterministic validation is still trusted more than either model
 
 This keeps the project from asking one model to:
@@ -105,18 +107,18 @@ flowchart TD
     E -->|no| P[Planner]
     ER --> P
     P --> W[SPL Writer]
-    W --> R[Security Reviewer]
+    W --> R[Security Reviewer<br/>Foundation-Sec]
     R -->|clean approval| V[Deterministic Validation]
     R -->|disputed or revised| P1[Peer Review 1]
     P1 --> P2[Peer Review 2]
     P2 --> V
     V -->|blocked| X[Fail Closed]
     V -->|approved| M[Splunk MCP Execution]
-    M --> EV[Evidence Review]
-    EV --> C[Continuation Review]
+    M --> EV[Evidence Review<br/>Foundation-Sec]
+    EV --> C[Continuation Review<br/>Foundation-Sec]
     C -->|one bounded follow-up| V
     C -->|anything deeper| A[Require Analyst Approval]
-    C --> S[Final Summary]
+    C --> S[Final Summary<br/>Foundation-Sec]
 ```
 
 ### Stage-by-stage behavior
