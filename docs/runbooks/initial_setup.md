@@ -8,12 +8,18 @@ The optional edge-helper model described in the architecture docs is not require
 Install the required host tools first if this is a fresh Linux machine:
 ```bash
 sudo apt-get update
-sudo apt-get install -y git curl make docker.io docker-compose-plugin
+sudo apt-get install -y git curl make docker.io
+sudo systemctl enable --now docker
+if ! docker compose version >/dev/null 2>&1; then
+  sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose-plugin
+fi
 sudo usermod -aG docker $USER
 newgrp docker
 ```
 
 `$USER` is the current shell username. You do not need to replace it manually.
+
+If the shell still says the `docker` group does not exist, the Docker install step did not finish cleanly. Fix that first, then log out and back in before retrying `newgrp docker`.
 
 Then:
 ```bash
@@ -46,11 +52,17 @@ If the deployment is fresh, A.G.E.N.T. Smith will force a first-run credential s
    - Quick install on Debian / Ubuntu / Raspberry Pi OS:
      ```bash
      sudo apt-get update
-     sudo apt-get install -y git curl make docker.io docker-compose-plugin
+     sudo apt-get install -y git curl make docker.io
+     sudo systemctl enable --now docker
+     if ! docker compose version >/dev/null 2>&1; then
+       sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose-plugin
+     fi
      sudo usermod -aG docker $USER
      newgrp docker
      ```
    - `$USER` auto-expands to the username of the current shell session.
+   - If `docker compose version` still fails after `docker.io` is installed, install the Compose plugin separately before continuing.
+   - If `newgrp docker` says the group does not exist, Docker was not installed successfully yet.
    - Quick check:
      ```bash
      git --version

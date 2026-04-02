@@ -1,6 +1,6 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.2.1`
+Current release: `v1.2.3`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
@@ -19,12 +19,18 @@ For a clean first run, use the deployment container:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git curl make docker.io docker-compose-plugin
+sudo apt-get install -y git curl make docker.io
+sudo systemctl enable --now docker
+if ! docker compose version >/dev/null 2>&1; then
+  sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose-plugin
+fi
 sudo usermod -aG docker $USER
 newgrp docker
 ```
 
 `$USER` is the current shell username. You do not need to replace it manually.
+
+If `newgrp docker` fails because the shell session does not see the new group yet, sign out and back in once, then re-run `docker --version` and `docker compose version`.
 
 Then:
 
@@ -45,27 +51,32 @@ Then:
 - run the first investigation
 
 ## Screenshots
-These screenshots reflect the current `v1.2.1` interface.
+These screenshots reflect the current `v1.2.3` interface.
 
 ### Login
-`v1.2.1` login flow for the analyst console.
+`v1.2.3` login flow for the analyst console.
 
-![A.G.E.N.T. Smith v1.2.1 login](docs/images/screenshots/v1.2.1/agtsmith-v1.2.1-login.png)
+![A.G.E.N.T. Smith v1.2.3 login](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-login.png)
 
 ### Investigation Workspace
-`v1.2.1` Splunk-first investigation workflow with sticky analyst controls, current assessment, timeline, pivots, and ATT&CK context.
+`v1.2.3` Splunk-first investigation workflow with sticky analyst controls, current assessment, timeline, pivots, and ATT&CK context.
 
-![A.G.E.N.T. Smith v1.2.1 investigation workspace](docs/images/screenshots/v1.2.1/agtsmith-v1.2.1-investigation.png)
+![A.G.E.N.T. Smith v1.2.3 investigation workspace](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-investigation.png)
 
 ### Architecture View
-`v1.2.1` system architecture and role separation view for the bounded Splunk investigation pipeline.
+`v1.2.3` system architecture and role separation view for the bounded Splunk investigation pipeline.
 
-![A.G.E.N.T. Smith v1.2.1 architecture view](docs/images/screenshots/v1.2.1/agtsmith-v1.2.1-architecture.png)
+![A.G.E.N.T. Smith v1.2.3 architecture view](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-architecture.png)
 
 ### Data Domains And Personalization
-`v1.2.1` environment-aware Data Domains view showing the Linux domain expanded into Apache `access_combined` telemetry with field inventory used for query grounding and personalization.
+`v1.2.3` environment-aware Data Domains view showing the Linux domain expanded into Apache `access_combined` telemetry with field inventory used for query grounding and personalization.
 
-![A.G.E.N.T. Smith v1.2.1 Data Domains personalization view](docs/images/screenshots/v1.2.1/agtsmith-v1.2.1-data-domains.png)
+![A.G.E.N.T. Smith v1.2.3 Data Domains personalization view](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-data-domains.png)
+
+### Guarded Local Learning
+`v1.2.3` Guarded Local Learning showing run mode, measured SPL-writing improvement, cache reuse, and explicit no-gain messaging when the current environment baseline already covers the tested cases.
+
+![A.G.E.N.T. Smith v1.2.3 Guarded Local Learning](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-learning.png)
 
 ## How It Works
 The default SPL path is a split-role pipeline:
@@ -109,6 +120,11 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - updated the docs, architecture graphs, and model strategy guidance to reflect the split-role investigation pipeline
 - added a canonical next-release planning document for `v1.3.0`, including persistent follow-up context as a planned standard-pivot enhancement
 - fixed the runtime configuration save flow so changing Ollama/Splunk hosts does not leave the UI stuck on `Saving...`
+
+## What's New In v1.2.3
+- clarified Guarded Local Learning so the operator can see which learning mode ran and why a no-gain run finished without keeping new hints
+- added explicit learned-state, benchmark cache, candidate filtering, and run-duration feedback to the Learning page
+- fixed the Learning page so `Run Self Learn` is no longer blocked by the admin onboarding modal or by a client-side JavaScript parse error
 
 ## What's New In v1.1.0
 - Guarded local learning with reviewable, airgapped environment-specific memory

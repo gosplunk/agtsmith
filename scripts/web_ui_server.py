@@ -34,6 +34,7 @@ from local_learning import (
     ensure_learning_registry,
     generate_self_learn_candidates,
     learning_registry_summary,
+    load_learning_progress,
     set_learning_record_status,
 )
 from minimal_question_to_answer import run_splunk_query_args
@@ -87,6 +88,7 @@ PERSONALIZATION_STATE = ARTIFACTS_ROOT / "knowledge" / "personalization_status.j
 LOCAL_LEARNING_LOCK = ARTIFACTS_ROOT / "learning" / ".learning.lock"
 LOCAL_LEARNING_LOG = ARTIFACTS_ROOT / "learning" / "local_learning_web.log"
 LOCAL_LEARNING_STATE = ARTIFACTS_ROOT / "learning" / "local_learning_status.json"
+LOCAL_LEARNING_STALE_SECONDS = 5 * 60
 AUDIT_ROOT = ARTIFACTS_ROOT / "audit"
 QUERY_AUDIT_LOG = AUDIT_ROOT / "query_runs.jsonl"
 LOG_SOURCE_REGISTRY = RemoteLogSourceRegistry()
@@ -1099,7 +1101,7 @@ def _local_learning_in_progress() -> bool:
         age = time.time() - LOCAL_LEARNING_LOCK.stat().st_mtime
     except Exception:
         return False
-    if age > 60 * 60:
+    if age > LOCAL_LEARNING_STALE_SECONDS:
         try:
             LOCAL_LEARNING_LOCK.unlink()
         except Exception:
@@ -1195,17 +1197,50 @@ def _personalization_status() -> dict[str, Any]:
 def _local_learning_status() -> dict[str, Any]:
     path = ensure_learning_registry()
     summary = learning_registry_summary()
+    progress = load_learning_progress()
     state = _read_json(LOCAL_LEARNING_STATE)
     if state:
+        stale_progress = False
+        if str(state.get("state", "")).strip() == "in_progress":
+            try:
+                updated_epoch = int(state.get("updated_epoch", 0) or 0)
+            except Exception:
+                updated_epoch = 0
+            stale_progress = bool(updated_epoch) and (time.time() - updated_epoch > LOCAL_LEARNING_STALE_SECONDS)
+        if str(state.get("state", "")).strip() == "in_progress" and (not _local_learning_in_progress() or stale_progress):
+            state = {
+                "state": "error",
+                "detail": "The previous guarded local learning run did not finish cleanly. Start a new run to continue.",
+                "progress_pct": 100,
+                "phase": "interrupted",
+                "updated_epoch": int(time.time()),
+            }
+            _write_json(LOCAL_LEARNING_STATE, state)
         if LOCAL_LEARNING_LOG.exists():
             try:
                 state["log_path"] = display_path(LOCAL_LEARNING_LOG)
                 state["output"] = LOCAL_LEARNING_LOG.read_text(encoding="utf-8")[-12000:]
             except Exception:
                 pass
+        if isinstance(progress, dict) and progress:
+            state["improvement"] = progress
         state.setdefault("path", display_path(path))
         state.update(summary)
         return state
+    if _local_learning_in_progress():
+        payload = {
+            "state": "in_progress",
+            "detail": "Starting guarded local learning run...",
+            "path": display_path(path),
+            "progress_pct": 5,
+            "phase": "starting",
+            "log_path": display_path(LOCAL_LEARNING_LOG),
+            "output": "",
+            **summary,
+        }
+        if isinstance(progress, dict) and progress:
+            payload["improvement"] = progress
+        return payload
     counts = summary.get("counts", {}) if isinstance(summary, dict) else {}
     approved = int(counts.get("approved", 0) or 0)
     if approved > 0:
@@ -1220,7 +1255,7 @@ def _local_learning_status() -> dict[str, Any]:
             "Approved records can influence SPL planning and review through the local learning context; "
             "pending, rejected, and stale records do not affect runtime behavior."
         )
-    return {
+    payload = {
         "state": "ready",
         "detail": detail,
         "path": display_path(path),
@@ -1230,6 +1265,9 @@ def _local_learning_status() -> dict[str, Any]:
         "output": "",
         **summary,
     }
+    if isinstance(progress, dict) and progress:
+        payload["improvement"] = progress
+    return payload
 
 
 def _environment_profile_refresh_status() -> dict[str, Any]:
@@ -1425,11 +1463,13 @@ def _run_local_learning_refresh() -> None:
 
     try:
         result = generate_self_learn_candidates(progress_cb=_progress, log_cb=_log)
+        avg_delta = float(((result.get("improvement", {}) or {}).get("comparison", {}) or {}).get("avg_score_delta", 0.0) or 0.0)
         detail = (
             f"Guarded local learning complete. "
-            f"created={int(result.get('created', 0))} "
-            f"stale_marked={int(result.get('stale_marked', 0))} "
-            f"considered={int(result.get('considered', 0))}"
+            f"generated={int(result.get('generated', 0))} "
+            f"kept={int(result.get('selected', 0))} "
+            f"considered={int(result.get('considered', 0))} "
+            f"avg_score_delta={avg_delta:+.2f}"
         )
         _set_local_learning_state(
             "ready",
@@ -1440,6 +1480,10 @@ def _run_local_learning_refresh() -> None:
             created=int(result.get("created", 0)),
             stale_marked=int(result.get("stale_marked", 0)),
             considered=int(result.get("considered", 0)),
+            generated=int(result.get("generated", 0)),
+            selected=int(result.get("selected", 0)),
+            timeout_warnings=int(result.get("timeout_warnings", 0)),
+            improvement=result.get("improvement", {}),
         )
     except Exception as exc:
         _log(f"[learning] exception: {exc}")
@@ -6741,7 +6785,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       const role = document.body.getAttribute('data-smith-role') || '';
       const username = document.body.getAttribute('data-smith-user') || '';
       const path = window.location.pathname || '';
-      if(role !== 'admin' || !username || path === '/configure') {{
+      if(role !== 'admin' || !username || path !== '/') {{
         return;
       }}
       const snoozeKey = `smith-admin-config-snooze:${{username}}`;
@@ -9669,6 +9713,20 @@ def _learning_page_body() -> str:
     .learning-badges{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;}
     .learning-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid #294560;background:#0b2130;color:#dbeafe;font-size:12px;font-weight:800;}
     .learning-notes{display:grid;gap:6px;color:#9fb4cc;font-size:12px;}
+    .learning-why{margin-top:14px;border:1px solid #26435c;border-radius:14px;background:#071523;padding:12px 14px;}
+    .learning-why-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:8px;}
+    .learning-why-list{display:grid;gap:8px;color:#dbeafe;font-size:13px;line-height:1.5;}
+    .learning-why-list strong{color:#f8fafc;}
+    .learning-impact{margin-top:14px;border:1px solid #26435c;border-radius:14px;background:#071523;padding:12px 14px;}
+    .learning-impact-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:8px;}
+    .learning-impact-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;}
+    .learning-impact-card{border:1px solid #27415a;border-radius:12px;background:#081729;padding:10px;}
+    .learning-impact-label{font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#8fb4cf;margin-bottom:6px;}
+    .learning-impact-value{font-size:20px;font-weight:900;color:#f8fafc;}
+    .learning-impact-copy{margin-top:8px;color:#9fb4cc;font-size:12px;line-height:1.5;}
+    .learning-impact-history{margin-top:8px;color:#9fb4cc;font-size:12px;line-height:1.5;}
+    .learning-impact-warning{margin-top:8px;color:#fecaca;font-size:12px;line-height:1.5;}
+    .learning-impact-meta{margin-top:8px;color:#9fb4cc;font-size:12px;line-height:1.5;}
     .learning-list{display:grid;gap:10px;}
     .learning-item{border:1px solid #27415a;border-radius:12px;background:#081729;padding:12px;}
     .learning-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;}
@@ -9688,22 +9746,45 @@ def _learning_page_body() -> str:
     .learning-progress-track{width:100%;height:10px;border-radius:999px;border:1px solid #1f2937;background:#0b2130;overflow:hidden;}
     .learning-progress-bar{width:0%;height:100%;border-radius:999px;background:linear-gradient(90deg,#22c55e,#10b981);transition:width .2s ease;}
     .learning-progress-log{margin-top:8px;max-height:200px;overflow:auto;white-space:pre-wrap;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;line-height:1.45;color:#dbeafe;background:#030b17;border:1px solid #26435c;border-radius:10px;padding:10px;}
-    @media (max-width: 980px){.learning-grid{grid-template-columns:1fr;}}
+    .learning-progress-wrap.is-idle .learning-progress-log{display:none;}
+    @media (max-width: 980px){.learning-grid{grid-template-columns:1fr;}.learning-impact-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
   </style>
   <div class="learning-shell">
     <div class="learning-hero">
       <h1>Guarded Local Learning</h1>
-      <p>Review airgapped, typed learning suggestions created from this environment’s Data Domains and recent investigations. Nothing becomes active until you approve it. Approved hints are layered under the environment profile and can improve future SPL planning and review for this install only.</p>
+      <p>This page proposes small, local-only improvements to how A.G.E.N.T. Smith searches Splunk in <em>this</em> environment. It looks at your Data Domains profile and recent investigations, suggests reusable hints, and waits for an operator to approve them before they affect future planning or review.</p>
     </div>
     <div class="learning-grid">
       <section class="learning-panel">
-        <h2>Learning Control</h2>
-        <p class="learning-help">Use <strong>Run Self Learn</strong> after Data Domains exist and you have some real investigations to learn from. This creates pending suggestions only. It does not rewrite code, expand permissions, or bypass deterministic validation.</p>
+        <h2>What This Does</h2>
+        <p class="learning-help"><strong>Run Self Learn</strong> inspects the local Data Domains profile and recent successful investigations, then proposes small environment-specific hints such as better fields, sources, or follow-up pivots. It does <strong>not</strong> rewrite code, open write access, change Splunk permissions, or bypass deterministic validation.</p>
         <div id="learning-summary" class="learning-badges"></div>
         <div class="learning-actions">
           <button id="learning-run">Run Self Learn</button>
           <a class="btn-secondary" href="/configure">Back to Configuration</a>
           <span id="learning-status" class="learning-status">Not started.</span>
+        </div>
+        <div class="learning-why">
+          <div class="learning-why-title">Why This Helps</div>
+          <div class="learning-why-list">
+            <div><strong>Better local grounding:</strong> A.G.E.N.T. Smith can remember which fields, indexes, and sourcetypes are actually useful in this install.</div>
+            <div><strong>Less repeated trial-and-error:</strong> Approved hints reduce the need to rediscover the same local Splunk details every run.</div>
+            <div><strong>Still reviewable:</strong> Nothing becomes active until a human approves it, and all suggestions stay local to this deployment.</div>
+          </div>
+        </div>
+        <div class="learning-impact">
+          <div class="learning-impact-title">Measured Improvement</div>
+          <div id="learning-impact-grid" class="learning-impact-grid">
+            <div class="learning-impact-card"><div class="learning-impact-label">Baseline Score</div><div id="learning-impact-baseline" class="learning-impact-value">--</div></div>
+            <div class="learning-impact-card"><div class="learning-impact-label">Latest Score</div><div id="learning-impact-latest" class="learning-impact-value">--</div></div>
+            <div class="learning-impact-card"><div class="learning-impact-label">Delta</div><div id="learning-impact-delta" class="learning-impact-value">--</div></div>
+            <div class="learning-impact-card"><div class="learning-impact-label">Hints Kept</div><div id="learning-impact-kept" class="learning-impact-value">0</div></div>
+            <div class="learning-impact-card"><div class="learning-impact-label">Best Score</div><div id="learning-impact-best" class="learning-impact-value">--</div></div>
+          </div>
+          <div id="learning-impact-copy" class="learning-impact-copy">No baseline comparison has been recorded yet.</div>
+          <div id="learning-impact-meta" class="learning-impact-meta">Active learned state will appear here after the first benchmarked run.</div>
+          <div id="learning-impact-history" class="learning-impact-history">Run history will appear here after the first completed benchmarked learning run.</div>
+          <div id="learning-impact-warning" class="learning-impact-warning" style="display:none;"></div>
         </div>
         <div class="learning-progress-wrap">
           <div class="learning-progress-head">
@@ -9716,18 +9797,18 @@ def _learning_page_body() -> str:
         <div class="learning-notes" style="margin-top:12px;">
           <div id="learning-detail">Loading local learning registry...</div>
           <div id="learning-path">Registry path will appear here.</div>
-          <div>Allowed learning kinds: preferred_sources, preferred_fields, preferred_filters, post_result_pivot_hint</div>
+          <div>Suggestion types: source preferences, field preferences, safe filters, and post-result pivot hints.</div>
         </div>
       </section>
       <section class="learning-panel">
         <h2>Pending Suggestions</h2>
-        <p class="learning-help">Pending suggestions should be approved only when the reasoning and evidence look correct for this environment. Approved items can influence local SPL planning and review. Rejected or stale items stay local and do not affect runtime behavior.</p>
+        <p class="learning-help">Each suggestion is a proposed local hint for future investigations. Approve it only if the reasoning looks right for this environment and the proposal would genuinely improve future Splunk searches. Rejected or stale items remain local history only and do not affect runtime behavior.</p>
         <div id="learning-pending" class="learning-list"><div class="learning-item"><div class="learning-item-meta">No pending learning records.</div></div></div>
         <details class="learning-history" style="margin-top:14px;">
           <summary>
             <div>
-              <div class="learning-history-title">Show Approved, Rejected, and Stale Learning</div>
-              <div class="learning-history-copy">Historical local-learning records stay here for review without taking over the main pending workflow.</div>
+              <div class="learning-history-title">Show Approved, Rejected, and Stale Suggestions</div>
+              <div class="learning-history-copy">Old learning records stay here for audit and review without cluttering the active queue.</div>
             </div>
             <span class="learning-badge" id="learning-history-count">history=0</span>
           </summary>
@@ -9740,43 +9821,197 @@ def _learning_page_body() -> str:
   </div>
   <script>
     const learning$ = (id) => document.getElementById(id);
+    let learningRunRequestedAt = 0;
     function learningEscape(v){ return String(v ?? ''); }
+    function learningFormatClock(iso){
+      const text = String(iso || '').trim();
+      if(!text){ return ''; }
+      const dt = new Date(text);
+      if(Number.isNaN(dt.getTime())){ return text; }
+      return dt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    }
+    function learningApiUrl(){
+      return `/api/config/local-learning?_=${Date.now()}`;
+    }
+    function learningCompletedStatus(runClock, runDurationSec, detail){
+      const prefix = 'Self Learn finished at ' + String(runClock || '');
+      const duration = runDurationSec > 0 ? (' in ' + runDurationSec.toFixed(2) + 's') : '';
+      const suffix = detail ? (' ' + String(detail).trim()) : '';
+      return (prefix + duration + '.' + suffix).trim();
+    }
+    function ensureLearningPoll(){
+      if(learningPoll){ return; }
+      learningPoll = window.setInterval(pollLearningPage, 1500);
+    }
+    function stopLearningPoll(){
+      if(!learningPoll){ return; }
+      window.clearInterval(learningPoll);
+      learningPoll = null;
+    }
+    function learningPhaseLabel(state, phase){
+      const st = String(state || '').trim();
+      const ph = String(phase || '').trim();
+      if(st === 'in_progress'){
+        if(ph === 'starting'){ return 'Preparing learning run'; }
+        if(ph === 'collecting_evidence'){ return 'Collecting local evidence'; }
+        if(ph === 'reviewing_bundle'){ return 'Reviewing suggestions'; }
+        if(ph === 'candidate_accepted'){ return 'Accepted suggestion'; }
+        if(ph === 'benchmarking_factory'){ return 'Benchmarking factory baseline'; }
+        if(ph === 'benchmarking_baseline'){ return 'Benchmarking baseline'; }
+        if(ph === 'benchmarking_candidates'){ return 'Benchmarking candidates'; }
+        if(ph === 'writing_registry'){ return 'Writing learning registry'; }
+      }
+      if(st === 'ready'){ return 'Ready to run'; }
+      if(st === 'error' && ph === 'interrupted'){ return 'Previous run interrupted'; }
+      if(st === 'error'){ return 'Run needs attention'; }
+      return 'Idle';
+    }
     function renderLearningPage(payload){
       const data = payload || {};
       const counts = data.counts || {};
       const latest = Array.isArray(data.latest) ? data.latest : [];
       const pending = latest.filter((item) => String(item?.status || '') === 'pending');
-      const history = latest.filter((item) => String(item?.status || '') !== 'pending');
-      learning$('learning-summary').innerHTML = [
-        `pending=${Number(counts.pending || 0)}`,
-        `approved=${Number(counts.approved || 0)}`,
-        `rejected=${Number(counts.rejected || 0)}`,
-        `stale=${Number(counts.stale || 0)}`
-      ].map((v) => `<span class="learning-badge">${learningEscape(v)}</span>`).join('');
-      learning$('learning-detail').textContent = data.detail || 'No local learning detail available.';
-      learning$('learning-path').textContent = data.path ? `Registry path: ${data.path}` : 'Registry path will appear here.';
+      const recordHistory = latest.filter((item) => String(item?.status || '') !== 'pending');
+      const state = String(data.state || 'ready');
       const pct = Math.max(0, Math.min(100, Number(data.progress_pct || 0)));
-      learning$('learning-phase').textContent = `phase=${learningEscape(data.phase || 'idle')}`;
-      learning$('learning-pct').textContent = `${Math.round(pct)}%`;
+      const runBtn = learning$('learning-run');
+      const improvement = (data.improvement && typeof data.improvement === 'object') ? data.improvement : {};
+      const comparison = (improvement.comparison && typeof improvement.comparison === 'object') ? improvement.comparison : {};
+      const overallLevel = (improvement.overall_learning_level && typeof improvement.overall_learning_level === 'object') ? improvement.overall_learning_level : {};
+      const selectedCandidates = Array.isArray(improvement.selected_candidates) ? improvement.selected_candidates : [];
+      const runHistory = Array.isArray(improvement.history) ? improvement.history : [];
+      const bestRun = (improvement.best_run && typeof improvement.best_run === 'object') ? improvement.best_run : {};
+      const approvedState = (improvement.approved_learning_state && typeof improvement.approved_learning_state === 'object') ? improvement.approved_learning_state : {};
+      const cacheMetrics = (improvement.cache_metrics && typeof improvement.cache_metrics === 'object') ? improvement.cache_metrics : {};
+      const candidateFiltering = (improvement.candidate_filtering && typeof improvement.candidate_filtering === 'object') ? improvement.candidate_filtering : {};
+      const timeoutWarnings = Number(data.timeout_warnings ?? improvement.timeout_warnings ?? 0);
+      const runDurationSec = Number(improvement.run_duration_sec ?? 0);
+      const runTimestamp = String(improvement.timestamp_utc || '').trim();
+      learning$('learning-summary').innerHTML = [
+        `Pending ${Number(counts.pending || 0)}`,
+        `Approved ${Number(counts.approved || 0)}`,
+        `Rejected ${Number(counts.rejected || 0)}`,
+        `Stale ${Number(counts.stale || 0)}`
+      ].map((v) => `<span class="learning-badge">${learningEscape(v)}</span>`).join('');
+      learning$('learning-detail').textContent =
+        (data.detail && String(data.detail).trim())
+          ? String(data.detail).trim()
+          : 'No learning run is active. Start a run when you want A.G.E.N.T. Smith to propose new local hints from this environment.';
+      learning$('learning-path').textContent = data.path ? `Registry path: ${data.path}` : 'Registry path will appear here.';
+      learning$('learning-phase').textContent = learningPhaseLabel(state, data.phase || 'idle');
+      learning$('learning-pct').textContent = state === 'ready' ? 'Ready' : `${Math.round(pct)}%`;
       learning$('learning-bar').style.width = `${pct}%`;
       learning$('learning-log').textContent = data.output || 'No learning output yet.';
-      learning$('learning-history-count').textContent = `history=${history.length}`;
+      learning$('learning-log').parentElement.classList.toggle('is-idle', state === 'ready' && !String(data.output || '').trim());
+      const baselineScore = Number(comparison.baseline_avg_score ?? improvement.baseline?.avg_score ?? 0);
+      const latestScore = Number(comparison.current_avg_score ?? improvement.latest?.avg_score ?? 0);
+      const avgDelta = Number(comparison.avg_score_delta ?? 0);
+      const overallDelta = Number(overallLevel.avg_score_delta ?? 0);
+      const factoryBaselineScore = Number(overallLevel.baseline_avg_score ?? improvement.factory_baseline?.avg_score ?? 0);
+      const selectedCountRaw = data.selected ?? improvement.selected_candidate_count ?? selectedCandidates.length ?? 0;
+      const selectedCount = Number(selectedCountRaw || 0);
+      const bestScore = Number(bestRun.current_avg_score ?? 0);
+      learning$('learning-impact-baseline').textContent = improvement.baseline ? baselineScore.toFixed(2) : '--';
+      learning$('learning-impact-latest').textContent = improvement.latest ? latestScore.toFixed(2) : '--';
+      learning$('learning-impact-delta').textContent = improvement.comparison ? `${avgDelta >= 0 ? '+' : ''}${avgDelta.toFixed(2)}` : '--';
+      learning$('learning-impact-kept').textContent = String(selectedCount);
+      learning$('learning-impact-best').textContent = bestRun.current_avg_score != null && runHistory.length ? bestScore.toFixed(2) : '--';
+      const changedCases = Array.isArray(comparison.changed_cases) ? comparison.changed_cases : [];
+      if(improvement.baseline && improvement.latest){
+        const considered = Number(data.considered ?? 0);
+        const generated = Number(data.generated ?? improvement.generated_candidate_count ?? 0);
+        const latestLabel = selectedCount > 0 ? 'projected latest' : 'latest';
+        let copy = `Current run baseline ${baselineScore.toFixed(2)} -> ${latestLabel} ${latestScore.toFixed(2)} across ${Number(improvement.latest?.case_count || 0)} benchmark cases. Generated ${generated} candidate hints, kept ${selectedCount}, considered ${considered}. Changed cases: ${changedCases.length}.`;
+        if(improvement.factory_baseline && Number.isFinite(factoryBaselineScore)){
+          copy += ` Current learned level is ${overallDelta >= 0 ? '+' : ''}${overallDelta.toFixed(2)} over the factory baseline (${factoryBaselineScore.toFixed(2)}).`;
+        }
+        if(selectedCount === 0 && avgDelta === 0){
+          copy += ' No new learning was kept because the current environment-backed hints did not improve SPL-writing quality beyond the existing baseline.';
+        }
+        learning$('learning-impact-copy').textContent = copy;
+      } else {
+        learning$('learning-impact-copy').textContent = 'No baseline comparison has been recorded yet.';
+      }
+      const approvedCount = Number(approvedState.approved_count ?? counts.approved ?? 0);
+      const pendingCount = Number(counts.pending || 0);
+      const cacheHits = Number(cacheMetrics.hits ?? 0);
+      const cacheMisses = Number(cacheMetrics.misses ?? 0);
+      const skippedDuplicates = Number(candidateFiltering.skipped_duplicate_count ?? 0);
+      const skippedApproved = Number(candidateFiltering.skipped_already_approved_count ?? 0);
+      const skippedNonWriter = Number(candidateFiltering.skipped_non_writer_count ?? 0);
+      const skippedNoGain = Number(candidateFiltering.skipped_no_gain_count ?? 0);
+      let meta = `Active learned hints: ${approvedCount}. Pending review: ${pendingCount}.`;
+      const deterministicOnlyMode = !timeoutWarnings && skippedNoGain >= 1 && cacheMisses <= 4;
+      meta += deterministicOnlyMode
+        ? ' Run mode: Fast Local Learn (deterministic environment review with cached SPL-writing benchmark checks).'
+        : ' Run mode: Guarded model-assisted learning.';
+      if(approvedState.active){
+        const activeIntents = Array.isArray(approvedState.intents) ? approvedState.intents.slice(0, 4) : [];
+        if(activeIntents.length){
+          meta += ` Active intents: ${activeIntents.join(', ')}.`;
+        }
+      } else {
+        meta += ' No approved hints are influencing SPL writing yet.';
+      }
+      if(selectedCount > 0){
+        meta += ` ${selectedCount} newly kept hint(s) are still pending approval, so the projected latest score is not active until you approve them.`;
+      }
+      if(cacheHits || cacheMisses){
+        meta += ` Benchmark cache hits/misses: ${cacheHits}/${cacheMisses}.`;
+      }
+      if(skippedDuplicates || skippedApproved || skippedNonWriter || skippedNoGain){
+        meta += ` Skipped candidates - duplicate: ${skippedDuplicates}, already approved: ${skippedApproved}, non-writer: ${skippedNonWriter}, no gain: ${skippedNoGain}.`;
+      }
+      learning$('learning-impact-meta').textContent = meta;
+      if(runHistory.length){
+        const recent = runHistory.slice(-3).map((row) => {
+          const score = Number(row.current_avg_score ?? 0).toFixed(2);
+          const delta = Number(row.avg_score_delta ?? 0);
+          const dur = Number(row.run_duration_sec ?? 0);
+          return `${score} (${delta >= 0 ? '+' : ''}${delta.toFixed(2)}, ${dur.toFixed(2)}s)`;
+        });
+        let historyText = `Recent runs: ${recent.join(' -> ')}. Best recorded score: ${bestScore.toFixed(2)}.`;
+        if(runHistory.length){
+          const latestRun = runHistory[runHistory.length - 1] || {};
+          const learnedDelta = Number(latestRun.factory_to_current_avg_delta ?? overallDelta ?? 0);
+          historyText += ` Learned level vs factory baseline: ${learnedDelta >= 0 ? '+' : ''}${learnedDelta.toFixed(2)}.`;
+        }
+        if(runDurationSec > 0){
+          historyText += ` Last run duration: ${runDurationSec.toFixed(2)}s.`;
+        }
+        learning$('learning-impact-history').textContent = historyText;
+      } else {
+        learning$('learning-impact-history').textContent = 'Run history will appear here after the first completed benchmarked learning run.';
+      }
+      const warningEl = learning$('learning-impact-warning');
+      if(timeoutWarnings > 0){
+        warningEl.style.display = '';
+        warningEl.textContent = `Learning slowed by remote model timeout. Timeout-related fallbacks or skips: ${timeoutWarnings}.`;
+      } else {
+        warningEl.style.display = 'none';
+        warningEl.textContent = '';
+      }
+      if(runBtn){
+        runBtn.disabled = state === 'in_progress';
+        runBtn.textContent = state === 'in_progress' ? 'Learning Running...' : 'Run Self Learn';
+      }
+      learning$('learning-history-count').textContent = `history=${recordHistory.length}`;
       const renderItem = (item) => `
         <div class="learning-item">
           <div class="learning-item-head">
             <div class="learning-item-name">${learningEscape(item.intent || 'unknown_intent')}</div>
-            <span class="learning-badge">status=${learningEscape(item.status || 'pending')}</span>
+            <span class="learning-badge">${learningEscape(String(item.status || 'pending').toUpperCase())}</span>
           </div>
-          <div class="learning-item-meta">kind=${learningEscape(item.kind || 'unknown')}</div>
-          <div class="learning-item-meta">proposal=${learningEscape(JSON.stringify(item.proposal || {}))}</div>
-          <div class="learning-item-meta">${learningEscape(item.reason || '')}</div>
-          ${item.supporting_question ? `<div class="learning-item-meta">question=${learningEscape(item.supporting_question)}</div>` : ''}
-          <div class="learning-item-meta">created_at=${learningEscape(item.created_at || '')}</div>
+          <div class="learning-item-meta"><strong>Suggestion type:</strong> ${learningEscape(item.kind || 'unknown')}</div>
+          <div class="learning-item-meta"><strong>Proposed local hint:</strong> ${learningEscape(JSON.stringify(item.proposal || {}))}</div>
+          <div class="learning-item-meta"><strong>Why it was suggested:</strong> ${learningEscape(item.reason || '')}</div>
+          ${item.supporting_question ? `<div class="learning-item-meta"><strong>Supporting question:</strong> ${learningEscape(item.supporting_question)}</div>` : ''}
+          <div class="learning-item-meta"><strong>Created:</strong> ${learningEscape(item.created_at || '')}</div>
           ${String(item.status || '') === 'pending' ? `<div class="learning-item-actions"><button class="learning-item-btn" data-action="approve" data-id="${learningEscape(item.id || '')}">Approve</button><button class="learning-item-btn" data-action="reject" data-id="${learningEscape(item.id || '')}">Reject</button></div>` : ''}
         </div>
       `;
       learning$('learning-pending').innerHTML = pending.length ? pending.map(renderItem).join('') : '<div class="learning-item"><div class="learning-item-meta">No pending learning records.</div></div>';
-      learning$('learning-history-list').innerHTML = history.length ? history.map(renderItem).join('') : '<div class="learning-item"><div class="learning-item-meta">No historical learning records yet.</div></div>';
+      learning$('learning-history-list').innerHTML = recordHistory.length ? recordHistory.map(renderItem).join('') : '<div class="learning-item"><div class="learning-item-meta">No historical learning records yet.</div></div>';
       document.querySelectorAll('[data-action][data-id]').forEach((btn) => {
         btn.onclick = async () => {
           const action = String(btn.getAttribute('data-action') || '').trim();
@@ -9798,21 +10033,7 @@ def _learning_page_body() -> str:
       });
     }
     async function loadLearningPage(){
-      const resp = await fetch('/api/config/local-learning');
-      const data = await resp.json();
-      if(!resp.ok){
-        learning$('learning-status').textContent = data.error || `load failed (${resp.status})`;
-        return;
-      }
-      renderLearningPage(data.local_learning || {});
-      learning$('learning-status').textContent = 'Loaded local learning registry.';
-      if(String(data.local_learning?.state || '') === 'in_progress'){
-        await pollLearningPage();
-      }
-    }
-    let learningPoll = null;
-    async function pollLearningPage(){
-      const resp = await fetch('/api/config/local-learning');
+      const resp = await fetch(learningApiUrl(), { cache:'no-store' });
       const data = await resp.json();
       if(!resp.ok){
         learning$('learning-status').textContent = data.error || `load failed (${resp.status})`;
@@ -9820,25 +10041,67 @@ def _learning_page_body() -> str:
       }
       renderLearningPage(data.local_learning || {});
       const state = String(data.local_learning?.state || 'ready');
+      const improvement = (data.local_learning?.improvement && typeof data.local_learning.improvement === 'object') ? data.local_learning.improvement : {};
+      const runDurationSec = Number(improvement.run_duration_sec ?? 0);
+      const runClock = learningFormatClock(improvement.timestamp_utc || '');
       if(state === 'in_progress'){
         learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning is running...';
-        if(!learningPoll){
-          learningPoll = window.setInterval(pollLearningPage, 1200);
+        ensureLearningPoll();
+      } else if(state === 'ready'){
+        if(learningRunRequestedAt && runClock){
+          learning$('learning-status').textContent = learningCompletedStatus(runClock, runDurationSec, data.local_learning?.detail || '');
+          learningRunRequestedAt = 0;
+        } else {
+          learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning complete.';
         }
-        return;
-      }
-      if(learningPoll){
-        window.clearInterval(learningPoll);
-        learningPoll = null;
-      }
-      if(state === 'ready'){
-        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning complete.';
+        stopLearningPoll();
       } else if(state === 'error'){
         learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning failed.';
+        stopLearningPoll();
+      } else {
+        learning$('learning-status').textContent = 'Loaded local learning registry.';
+      }
+    }
+    let learningPoll = null;
+    async function pollLearningPage(){
+      const resp = await fetch(learningApiUrl(), { cache:'no-store' });
+      const data = await resp.json();
+      if(!resp.ok){
+        learning$('learning-status').textContent = data.error || `load failed (${resp.status})`;
+        stopLearningPoll();
+        return;
+      }
+      renderLearningPage(data.local_learning || {});
+      const state = String(data.local_learning?.state || 'ready');
+      const improvement = (data.local_learning?.improvement && typeof data.local_learning.improvement === 'object') ? data.local_learning.improvement : {};
+      const runDurationSec = Number(improvement.run_duration_sec ?? 0);
+      const runClock = learningFormatClock(improvement.timestamp_utc || '');
+      if(state === 'in_progress'){
+        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning is running...';
+        ensureLearningPoll();
+        return;
+      }
+      stopLearningPoll();
+      if(state === 'ready'){
+        if(learningRunRequestedAt && runClock){
+          learning$('learning-status').textContent = learningCompletedStatus(runClock, runDurationSec, data.local_learning?.detail || '');
+          learningRunRequestedAt = 0;
+        } else {
+          learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning complete.';
+        }
+      } else if(state === 'error'){
+        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning failed.';
+        learningRunRequestedAt = 0;
       }
     }
     learning$('learning-run').onclick = async () => {
+      learningRunRequestedAt = Date.now();
+      learning$('learning-run').disabled = true;
+      learning$('learning-run').textContent = 'Learning Running...';
       learning$('learning-status').textContent = 'Starting guarded local learning...';
+      learning$('learning-phase').textContent = 'Preparing learning run';
+      learning$('learning-pct').textContent = '5%';
+      learning$('learning-bar').style.width = '5%';
       const resp = await fetch('/api/config/local-learning', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -9846,13 +10109,21 @@ def _learning_page_body() -> str:
       });
       const data = await resp.json();
       if(!resp.ok){
+        learning$('learning-run').disabled = false;
+        learning$('learning-run').textContent = 'Run Self Learn';
         learning$('learning-status').textContent = data.error || `self learn failed (${resp.status})`;
         return;
       }
       renderLearningPage(data.local_learning || {});
       learning$('learning-status').textContent = data.detail || 'Guarded local learning started.';
+      ensureLearningPoll();
       await pollLearningPage();
     };
+    document.addEventListener('visibilitychange', () => {
+      if(document.visibilityState === 'visible'){
+        loadLearningPage();
+      }
+    });
     loadLearningPage();
   </script>
 </div>
@@ -10833,7 +11104,15 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "status": "started",
                     "detail": "Guarded local learning started.",
-                    "local_learning": _local_learning_status(),
+                    "local_learning": {
+                        "state": "in_progress",
+                        "detail": "Starting guarded local learning run...",
+                        "progress_pct": 5,
+                        "phase": "starting",
+                        "path": display_path(ensure_learning_registry()),
+                        "log_path": display_path(LOCAL_LEARNING_LOG),
+                        **learning_registry_summary(),
+                    },
                 },
             )
             return

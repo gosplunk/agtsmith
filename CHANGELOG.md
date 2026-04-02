@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.2.3
+
+- clarified Guarded Local Learning operator messaging so the page explicitly reports whether the run used the fast deterministic mode or the guarded model-assisted path
+- added clearer no-gain messaging when a learning run finds no environment-aware SPL-writing improvement beyond the current baseline
+- added active learned-state, cache hit/miss, candidate filtering, and run-duration visibility so operators can tell what changed between runs
+- hardened the Learning page client behavior by fixing the onboarding modal click interception on `/learning` and removing the JavaScript parse error that made `Run Self Learn` appear dead
+- added the current `v1.2.3` Learning page screenshot to the public README screenshot set
+
+## v1.2.2
+
+- improved Guarded Local Learning messaging so operators can understand what it does, why it helps, and what approving a suggestion actually changes
+- cleaned local learning history handling by auto-staling older pending suggestions and stripping legacy truncated sourcetype references from learned proposals
+- bounded Guarded Local Learning runs to a smaller, faster working set and shortened per-model timeouts so the page no longer appears stuck at the same bundle for long periods
+- hardened local learning run-state handling so interrupted runs surface as interrupted instead of appearing to remain in progress indefinitely
+- rebuilt and refreshed the public `v1.2.1` screenshot set from the live `v1.2.1` container so the repo visuals match the actual running UI
+
 ## v1.2.1
 
 - aligned the live investigation runtime to the saved role model assignments instead of falling back to process defaults
