@@ -221,6 +221,17 @@ flowchart LR
 
 This is why the system can improve SPL quality without turning into an unconstrained "model knows best" pipeline.
 
+## 7.1 SPL Optimization AI Engine
+The current product also includes a bounded SPL optimization workflow outside the live investigation request path.
+
+That workflow:
+- generates candidate reusable SPL assets for this environment
+- benchmarks whether those assets improve future SPL writing
+- records the resulting assets in a local SPL asset repository
+- requires operator approval before any asset becomes active
+
+This keeps optimization local, reviewable, and measurable. The repository is not a hidden prompt cache. It is an explicit analyst-facing control surface for reusable environment-specific SPL patterns.
+
 ## 8. Configuration Surface
 The current runtime is intentionally configurable from the Control Center rather than being hidden in source code alone.
 

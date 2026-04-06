@@ -100,6 +100,16 @@ flowchart TD
 - Personalization merges portable RAG with the environment profile
 - Query writing, repair, and validation use the resulting skillpack
 
+## SPL Optimization AI Engine
+- The live runtime now includes a repository-backed SPL optimization surface
+- The optimization engine generates reusable SPL asset drafts, benchmarks whether they improve future environment-aware SPL writing, and records them for operator review
+- Approved assets move into the active SPL asset repository and are fed back into future SPL writing and investigation guidance
+- The optimization workflow is still guarded:
+  - drafts are reviewable
+  - approval is explicit
+  - runtime influence comes only from approved assets
+  - repository history remains visible for audit and comparison
+
 ## Local Access And Audit
 - First-run setup creates the initial local operator account before the rest of the UI is exposed
 - Local roles are split as:

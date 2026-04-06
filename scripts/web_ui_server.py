@@ -732,7 +732,8 @@ def _global_nav(active: str) -> str:
                 ("/langgraph-graph", "LangGraph Graph", "Canonical workflow, active topology, and run path"),
                 ("/docs", "Docs", "Whitepapers, guides, and references"),
                 ("/configure", "Configuration", "Endpoints, models, validation"),
-                ("/learning", "Local Learning", "Guarded airgapped learning review"),
+                ("/learning", "SPL Optimization", "AI-driven SPL improvement and review"),
+                ("/spl-assets", "SPL Asset Repository", "Approved reusable SPL assets"),
                 ("/users", "Users", "Local users and audit trail"),
             ]
             item_links = "".join(
@@ -769,7 +770,8 @@ def _control_subnav(active: str) -> str:
         ("/langgraph-graph", "LangGraph Graph"),
         ("/docs", "Docs"),
         ("/configure", "Configuration"),
-        ("/learning", "Local Learning"),
+        ("/learning", "SPL Optimization"),
+        ("/spl-assets", "SPL Asset Repository"),
         ("/users", "Users"),
     ]
     links: list[str] = []
@@ -1210,7 +1212,7 @@ def _local_learning_status() -> dict[str, Any]:
         if str(state.get("state", "")).strip() == "in_progress" and (not _local_learning_in_progress() or stale_progress):
             state = {
                 "state": "error",
-                "detail": "The previous guarded local learning run did not finish cleanly. Start a new run to continue.",
+                "detail": "The previous SPL Optimization AI Engine run did not finish cleanly. Start a new optimization cycle to continue.",
                 "progress_pct": 100,
                 "phase": "interrupted",
                 "updated_epoch": int(time.time()),
@@ -1230,7 +1232,7 @@ def _local_learning_status() -> dict[str, Any]:
     if _local_learning_in_progress():
         payload = {
             "state": "in_progress",
-            "detail": "Starting guarded local learning run...",
+            "detail": "Starting SPL Optimization AI Engine run...",
             "path": display_path(path),
             "progress_pct": 5,
             "phase": "starting",
@@ -1245,15 +1247,15 @@ def _local_learning_status() -> dict[str, Any]:
     approved = int(counts.get("approved", 0) or 0)
     if approved > 0:
         detail = (
-            "Guarded local learning is active for this install. "
-            "Approved records can influence SPL planning and review through the local learning context; "
-            "pending, rejected, and stale records do not affect runtime behavior."
+            "The SPL Optimization AI Engine is active for this install. "
+            "Approved SPL assets and local hints can influence SPL planning and review through the optimization context; "
+            "pending, rejected, and not applied records do not affect runtime behavior."
         )
     else:
         detail = (
-            "Guarded local learning is initialized for this install. "
-            "Approved records can influence SPL planning and review through the local learning context; "
-            "pending, rejected, and stale records do not affect runtime behavior."
+            "The SPL Optimization AI Engine is initialized for this install. "
+            "Approved SPL assets and local hints can influence SPL planning and review through the optimization context; "
+            "pending, rejected, and not applied records do not affect runtime behavior."
         )
     payload = {
         "state": "ready",
@@ -1449,7 +1451,7 @@ def _run_local_learning_refresh() -> None:
         LOCAL_LEARNING_LOG.write_text("", encoding="utf-8")
     except Exception:
         pass
-    _set_local_learning_state("in_progress", "Starting guarded local learning run...", 5, "starting")
+    _set_local_learning_state("in_progress", "Starting SPL Optimization AI Engine run...", 5, "starting")
 
     def _progress(detail: str, pct: int, phase: str) -> None:
         _set_local_learning_state("in_progress", detail, pct, phase)
@@ -1465,11 +1467,12 @@ def _run_local_learning_refresh() -> None:
         result = generate_self_learn_candidates(progress_cb=_progress, log_cb=_log)
         avg_delta = float(((result.get("improvement", {}) or {}).get("comparison", {}) or {}).get("avg_score_delta", 0.0) or 0.0)
         detail = (
-            f"Guarded local learning complete. "
+            f"SPL Optimization AI Engine complete. "
             f"generated={int(result.get('generated', 0))} "
             f"kept={int(result.get('selected', 0))} "
             f"considered={int(result.get('considered', 0))} "
-            f"avg_score_delta={avg_delta:+.2f}"
+            f"avg_score_delta={avg_delta:+.2f} "
+            f"active_assets={int(((result.get('repository', {}) or {}).get('active_assets', 0)) or 0)}"
         )
         _set_local_learning_state(
             "ready",
@@ -1487,7 +1490,7 @@ def _run_local_learning_refresh() -> None:
         )
     except Exception as exc:
         _log(f"[learning] exception: {exc}")
-        _set_local_learning_state("error", f"Guarded local learning failed: {exc}", 100, "failed")
+        _set_local_learning_state("error", f"SPL Optimization AI Engine failed: {exc}", 100, "failed")
     finally:
         try:
             LOCAL_LEARNING_LOCK.unlink()
@@ -2438,6 +2441,15 @@ APP_HTML = """<!doctype html>
     .btn-followup:hover {
       box-shadow:0 14px 28px rgba(14,165,233,.30), inset 0 1px 0 rgba(255,255,255,.2);
     }
+    .btn-splunk {
+      background:linear-gradient(135deg,#22c55e,#16a34a);
+      color:#03210d;
+      border-color:rgba(134,239,172,.24);
+      box-shadow:0 10px 22px rgba(20,184,106,.24), inset 0 1px 0 rgba(255,255,255,.18);
+    }
+    .btn-splunk:hover {
+      box-shadow:0 14px 28px rgba(20,184,106,.30), inset 0 1px 0 rgba(255,255,255,.2);
+    }
     .btn-danger { background:#7f1d1d; color:#fee2e2; }
     button:disabled { opacity:.6; cursor:wait; }
     .run-progress-wrap {
@@ -2470,6 +2482,32 @@ APP_HTML = """<!doctype html>
       border-radius:999px;
       background:linear-gradient(90deg,#22c55e,#10b981);
       transition:width .2s ease;
+    }
+    .run-progress-detail-row {
+      display:flex;
+      justify-content:space-between;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top:8px;
+    }
+    .run-progress-detail {
+      font-size:12px;
+      color:#9fb4cc;
+    }
+    .run-progress-note {
+      margin-top:8px;
+      font-size:12px;
+      line-height:1.5;
+      color:#dbeafe;
+      border:1px solid #27415a;
+      border-radius:10px;
+      background:#081729;
+      padding:8px 10px;
+    }
+    .run-progress-actions {
+      display:flex;
+      justify-content:flex-end;
+      margin-top:8px;
     }
     pre {
       white-space: pre-wrap; background:#020617; border:1px solid var(--line);
@@ -2769,6 +2807,7 @@ APP_HTML = """<!doctype html>
       min-width:0;
       flex:1 1 220px;
       max-width:320px;
+      overflow:hidden;
     }
     .persona .p-head {
       display:flex;
@@ -2798,6 +2837,7 @@ APP_HTML = """<!doctype html>
       line-height:1.4;
       display:grid;
       gap:4px;
+      overflow-wrap:anywhere;
     }
     .persona .p-model {
       color:#8fb7ff;
@@ -2938,6 +2978,7 @@ APP_HTML = """<!doctype html>
     .role-line.judge strong { color:#fcd34d; }
     .role-line.judge2 strong { color:#f9a8d4; }
     .role-line.policy strong { color:#d8b4fe; }
+    .role-model{font-weight:900;color:#f8fafc;overflow-wrap:anywhere;}
     .decision-subhead {
       margin:10px 0 6px;
       color:#9fb4cc;
@@ -2957,6 +2998,10 @@ APP_HTML = """<!doctype html>
       padding:0;
       overflow:hidden;
     }
+    .advanced-shell:not([open]){
+      border-color:#23384f;
+      box-shadow:0 -12px 26px rgba(2,6,23,.28);
+    }
     .advanced-shell summary {
       cursor:pointer;
       font-weight:800;
@@ -2968,6 +3013,10 @@ APP_HTML = """<!doctype html>
       align-items:center;
       gap:10px;
       padding:8px 14px;
+    }
+    .advanced-shell:not([open]) summary{
+      padding:10px 14px;
+      background:linear-gradient(180deg,rgba(7,19,32,.98),rgba(6,14,24,.98));
     }
     .advanced-shell summary::-webkit-details-marker{display:none;}
     .advanced-shell[open] .advanced-drawer-toggle{
@@ -3019,6 +3068,11 @@ APP_HTML = """<!doctype html>
       background:rgba(8,23,37,.84);
       white-space:nowrap;
     }
+    .drawer-jump-links .jump-link.active{
+      background:linear-gradient(135deg,#0ea5e9,#1d4ed8);
+      border-color:#60a5fa;
+      color:#f8fafc;
+    }
     .drawer-spl-toggle{
       margin-top:0;
       white-space:nowrap;
@@ -3041,7 +3095,7 @@ APP_HTML = """<!doctype html>
       border:1px solid #315a79;
       background:#0a2034;
       color:#dbeafe;
-      font-size:12px;
+      font-size:15px;
       font-weight:900;
       flex:0 0 auto;
       transition:transform .18s ease;
@@ -3050,15 +3104,16 @@ APP_HTML = """<!doctype html>
       display:inline-flex;
       align-items:center;
       justify-content:center;
-      width:24px;
-      height:24px;
+      width:32px;
+      height:28px;
       border-radius:999px;
       border:1px solid #315a79;
       background:#0a2034;
       color:#dbeafe;
-      font-size:11px;
+      font-size:14px;
       font-weight:900;
       flex:0 0 auto;
+      padding:0;
     }
     .advanced-shell:not([open]) .advanced-drawer-expand{
       opacity:.45;
@@ -3069,11 +3124,16 @@ APP_HTML = """<!doctype html>
       display:grid;
       gap:14px;
       padding:0 16px 16px;
-      max-height:30vh;
+      max-height:38vh;
       overflow:auto;
+    }
+    .advanced-shell[data-mode="medium"] .advanced-body{
+      max-height:38vh;
     }
     .advanced-shell[data-mode="full"]{
       top:76px;
+      left:24px;
+      right:24px;
     }
     .advanced-shell[data-mode="full"] .advanced-body{
       max-height:calc(100vh - 124px);
@@ -3084,6 +3144,54 @@ APP_HTML = """<!doctype html>
       background:#081729;
       padding:10px;
     }
+    .advanced-panel[data-tray-panel]{display:none;}
+    .advanced-panel[data-tray-panel].active{display:block;}
+    .drawer-clone-grid{display:grid;gap:12px;}
+    .drawer-clone-card{border:1px solid #27415a;border-radius:12px;background:#071523;padding:12px;}
+    .drawer-clone-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px;}
+    .drawer-clone-copy{color:#dbeafe;font-size:13px;line-height:1.55;}
+    .drawer-spl-pre{white-space:pre-wrap;background:#030b17;border:1px solid #26435c;border-radius:10px;padding:10px;overflow:auto;line-height:1.45;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;color:#dbeafe;max-height:240px;}
+    .drawer-trust-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;}
+    .drawer-trust-card{border:1px solid #27415a;border-radius:12px;background:#071523;padding:10px 12px;}
+    .drawer-trust-label{font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#9fb4cc;margin-bottom:6px;}
+    .drawer-trust-value{color:#f8fafc;font-size:14px;font-weight:800;line-height:1.35;}
+    .drawer-trust-note{margin-top:4px;color:#a9bdd4;font-size:12px;line-height:1.45;}
+    .drawer-action-list{display:grid;gap:10px;}
+    .drawer-action-card{display:grid;grid-template-columns:minmax(0,1.4fr) repeat(3,minmax(120px,.9fr)) auto;gap:10px;align-items:center;border:1px solid #27415a;border-radius:12px;background:#071523;padding:10px 12px;}
+    .drawer-action-head{display:block;min-width:0;}
+    .drawer-action-title{font-size:13px;font-weight:800;color:#f8fafc;line-height:1.35;}
+    .drawer-action-kicker{font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:4px;}
+    .drawer-action-copy{color:#c8d6e5;font-size:12px;line-height:1.45;margin-top:4px;}
+    .drawer-action-meta{display:contents;}
+    .drawer-action-meta-item{border:1px solid #1f3348;border-radius:10px;background:rgba(7,21,35,.88);padding:8px;min-width:0;}
+    .drawer-action-meta-item strong{display:block;color:#dbeafe;font-size:10px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px;}
+    .drawer-action-buttons{display:flex;flex-direction:column;gap:8px;align-items:stretch;}
+    .drawer-action-buttons button,.drawer-action-buttons a{margin-top:0;width:auto;}
+    .drawer-inline-note{border:1px dashed #315a79;border-radius:12px;padding:10px 12px;background:rgba(8,23,37,.56);color:#b9cbe0;font-size:12px;line-height:1.5;}
+    .drawer-entity-table{width:100%;border-collapse:separate;border-spacing:0 8px;}
+    .drawer-entity-table th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#89a5c0;text-align:left;padding:0 10px 2px;}
+    .drawer-entity-table td{background:#071523;border-top:1px solid #27415a;border-bottom:1px solid #27415a;padding:9px 10px;color:#dbeafe;font-size:13px;vertical-align:top;}
+    .drawer-entity-table tr.drawer-row-link{cursor:pointer;}
+    .drawer-entity-table tr.drawer-row-link:hover td{background:#0b1d30;}
+    .drawer-entity-table td:first-child{border-left:1px solid #27415a;border-radius:10px 0 0 10px;}
+    .drawer-entity-table td:last-child{border-right:1px solid #27415a;border-radius:0 10px 10px 0;}
+    .drawer-value-tag{display:inline-flex;max-width:100%;padding:4px 8px;border-radius:999px;border:1px solid #315a79;font-size:12px;font-weight:700;line-height:1.35;overflow-wrap:anywhere;}
+    .drawer-empty{color:#9fb4cc;font-size:13px;line-height:1.55;}
+    .drawer-timeline-mini{display:grid;gap:10px;}
+    .drawer-timeline-step{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:start;border:1px solid #27415a;border-radius:12px;background:#071523;padding:10px 12px;}
+    .drawer-timeline-index{width:24px;height:24px;border-radius:999px;background:#0a2034;border:1px solid #315a79;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;color:#dbeafe;}
+    .drawer-timeline-title{font-size:13px;font-weight:800;color:#f8fafc;}
+    .drawer-timeline-copy{color:#b9cbe0;font-size:12px;line-height:1.5;margin-top:4px;}
+    .drawer-timeline-tag{font-size:11px;font-weight:800;color:#c8d6e5;background:#102235;border:1px solid #27415a;border-radius:999px;padding:4px 8px;white-space:nowrap;}
+    .drawer-chip-row{display:flex;flex-wrap:wrap;gap:8px;}
+    .drawer-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;border:1px solid #27415a;background:#081729;color:#dbeafe;font-size:12px;font-weight:700;}
+    .drawer-technique-grid{display:grid;gap:10px;}
+    .drawer-technique-card{--mitre-accent:#5b7f9c;border:1px solid color-mix(in srgb, var(--mitre-accent) 40%, #2a4056);border-left:3px solid color-mix(in srgb, var(--mitre-accent) 85%, #2a4056);border-radius:12px;background:linear-gradient(180deg, color-mix(in srgb, var(--mitre-accent) 9%, #071523), #071523 72%);padding:12px;}
+    .drawer-technique-title{font-size:13px;font-weight:900;color:#f8fafc;line-height:1.35;}
+    .drawer-technique-kicker{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#8fb6d9;font-weight:800;margin-bottom:4px;}
+    .drawer-technique-copy{color:#c8d6e5;font-size:12px;line-height:1.5;margin-top:6px;}
+    .drawer-technique-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}
+    .drawer-technique-pill{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;border:1px solid #315a79;background:#0a2034;color:#dbeafe;font-size:11px;font-weight:700;}
     .advanced-subhead {
       margin:0 0 8px;
       font-size:13px;
@@ -3415,6 +3523,47 @@ APP_HTML = """<!doctype html>
       font-size:12px;
       line-height:1.5;
     }
+    .phase-strip{
+      margin-top:10px;
+      display:grid;
+      gap:8px;
+    }
+    .phase-strip-row{
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:8px;
+    }
+    .phase-pill-mini{
+      border:1px solid #294560;
+      border-radius:10px;
+      background:#091423;
+      padding:8px 10px;
+      min-width:0;
+    }
+    .phase-pill-mini .phase-mini-name{
+      display:block;
+      color:#8fb6d9;
+      font-size:10px;
+      font-weight:800;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      margin-bottom:4px;
+    }
+    .phase-pill-mini .phase-mini-state{
+      display:block;
+      color:#e5eefc;
+      font-size:12px;
+      font-weight:800;
+      line-height:1.35;
+    }
+    .phase-pill-mini.complete{border-color:#166534;background:#071b12;}
+    .phase-pill-mini.complete .phase-mini-state{color:#bbf7d0;}
+    .phase-pill-mini.in_progress{border-color:#b45309;background:#221105;}
+    .phase-pill-mini.in_progress .phase-mini-state{color:#fde68a;}
+    .phase-pill-mini.planned{border-color:#1d4ed8;background:#0f1f4a;}
+    .phase-pill-mini.planned .phase-mini-state{color:#bfdbfe;}
+    .phase-pill-mini.blocked,.phase-pill-mini.awaiting_human_approval{border-color:#b91c1c;background:#2a0b0b;}
+    .phase-pill-mini.blocked .phase-mini-state,.phase-pill-mini.awaiting_human_approval .phase-mini-state{color:#fecaca;}
     .brief-grid{
       display:grid;
       grid-template-columns:1.2fr .95fr;
@@ -3497,12 +3646,21 @@ APP_HTML = """<!doctype html>
       gap:8px;
     }
     .mitre-card{
-      border:1px solid #2a4056;
+      --mitre-accent:#5b7f9c;
+      border:1px solid color-mix(in srgb, var(--mitre-accent) 40%, #2a4056);
+      border-left:3px solid color-mix(in srgb, var(--mitre-accent) 85%, #2a4056);
       border-radius:10px;
-      background:#081729;
+      background:linear-gradient(180deg, color-mix(in srgb, var(--mitre-accent) 10%, #081729), #081729 72%);
       padding:9px 10px;
       position:relative;
     }
+    .mitre-tone-discovery{--mitre-accent:#4ea8de;}
+    .mitre-tone-credential-access{--mitre-accent:#7cc48a;}
+    .mitre-tone-execution{--mitre-accent:#d1a75d;}
+    .mitre-tone-defense-evasion{--mitre-accent:#a88ccf;}
+    .mitre-tone-collection{--mitre-accent:#73c0b8;}
+    .mitre-tone-command-and-control{--mitre-accent:#cf8aa1;}
+    .mitre-tone-default{--mitre-accent:#5b7f9c;}
     .mitre-head{
       display:flex;
       align-items:flex-start;
@@ -3987,6 +4145,33 @@ APP_HTML = """<!doctype html>
       font-size:13px;
       line-height:1.55;
     }
+    .pivot-meta strong{
+      display:block;
+      color:#8fb6d9;
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      font-weight:800;
+      margin-bottom:6px;
+    }
+    .pivot-meta span{
+      display:block;
+      color:#e5eefc;
+      font-size:12px;
+      line-height:1.5;
+      overflow-wrap:anywhere;
+    }
+    .pivot-meta code{
+      display:inline-block;
+      padding:4px 8px;
+      border-radius:8px;
+      border:1px solid #315a79;
+      background:#071829;
+      color:#bbf7d0;
+      font-family:"Consolas","SFMono-Regular",Menlo,monospace;
+      font-size:12px;
+      font-weight:700;
+    }
     .pivot-actions{
       display:flex;
       gap:8px;
@@ -3999,6 +4184,8 @@ APP_HTML = """<!doctype html>
     @media (max-width: 900px) {
       .persona-grid { display:grid; grid-template-columns:1fr; }
       .persona{max-width:none;}
+      .drawer-action-card{grid-template-columns:1fr;}
+      .drawer-action-buttons{flex-direction:row;flex-wrap:wrap;}
       .persona-arrow{display:none;}
     }
     @media (max-width: 900px) { .hero-head { grid-template-columns: 1fr; } }
@@ -4015,6 +4202,7 @@ APP_HTML = """<!doctype html>
       .invest-sidebar { position:static; }
       .workspace-utility { position:static; }
       .advanced-shell { left:12px; right:12px; }
+      .advanced-shell[data-mode="full"]{ left:12px; }
     }
     @media (max-width: 1100px) { .ops-field.wide { grid-column: span 1; } }
     @media (max-width: 900px) { .row { grid-template-columns: 1fr 1fr; } }
@@ -4037,7 +4225,8 @@ APP_HTML = """<!doctype html>
           <a class=\"nav-submenu-item\" href=\"/architecture\"><span class=\"nav-submenu-title\">Architecture</span><span class=\"nav-submenu-copy\">System flow and trust boundaries</span></a>
           <a class=\"nav-submenu-item\" href=\"/docs\"><span class=\"nav-submenu-title\">Docs</span><span class=\"nav-submenu-copy\">Whitepapers, guides, and references</span></a>
           <a class=\"nav-submenu-item\" href=\"/configure\"><span class=\"nav-submenu-title\">Configuration</span><span class=\"nav-submenu-copy\">Endpoints, models, validation</span></a>
-          <a class=\"nav-submenu-item\" href=\"/learning\"><span class=\"nav-submenu-title\">Local Learning</span><span class=\"nav-submenu-copy\">Guarded airgapped learning review</span></a>
+          <a class=\"nav-submenu-item\" href=\"/learning\"><span class=\"nav-submenu-title\">SPL Optimization</span><span class=\"nav-submenu-copy\">AI-driven SPL improvement and review</span></a>
+          <a class=\"nav-submenu-item\" href=\"/spl-assets\"><span class=\"nav-submenu-title\">SPL Asset Repository</span><span class=\"nav-submenu-copy\">Approved reusable SPL assets</span></a>
           <a class=\"nav-submenu-item\" href=\"/users\"><span class=\"nav-submenu-title\">Users</span><span class=\"nav-submenu-copy\">Local users and audit trail</span></a>
         </div>
       </div>
@@ -4068,10 +4257,10 @@ APP_HTML = """<!doctype html>
         </details>
         <div id=\"selected-followup-panel\" class=\"followup-panel empty\">
           <div class=\"followup-head\">
-            <div class=\"brief-kicker\">Pivot Drawer</div>
+            <div class=\"brief-kicker\">Follow-Up Drawer</div>
             <span id=\"selected-followup-badge\" class=\"badge\">Nothing selected</span>
           </div>
-          <div id=\"selected-followup-text\" class=\"followup-body muted\">Select a pivot from Recommended Next Pivots in the main investigation column to open it here. This drawer is the single place to review and run a follow-up.</div>
+          <div id=\"selected-followup-text\" class=\"followup-body muted\">Select a follow-up step from Recommended Next Steps in the main investigation column to open it here. This drawer is the single place to review and run a follow-up.</div>
           <div id=\"selected-followup-meta\" class=\"followup-meta\" style=\"display:none;\"></div>
           <div class=\"followup-actions\">
             <button id=\"selected-followup-run\" class=\"btn-followup\" type=\"button\" style=\"display:none;\">Run This Follow-Up</button>
@@ -4131,13 +4320,21 @@ APP_HTML = """<!doctype html>
           </div>
         </details>
         <button id=\"run\" type=\"button\" onclick=\"window.runInvestigationSafe && window.runInvestigationSafe(); return false;\" title=\"Execute selected investigation pipeline with current settings\">Run Investigation</button>
-        <div id=\"run-progress-wrap\" class=\"run-progress-wrap\" style=\"display:none;\">
-          <div class=\"run-progress-meta\">
-            <span id=\"run-progress-label\">Preparing investigation...</span>
-            <span id=\"run-progress-pct\">0%</span>
+        <div id="run-progress-wrap" class="run-progress-wrap" style="display:none;">
+          <div class="run-progress-meta">
+            <span id="run-progress-label">Preparing investigation...</span>
+            <span id="run-progress-pct">0%</span>
           </div>
-          <div class=\"run-progress-track\">
-            <div id=\"run-progress-bar\" class=\"run-progress-bar\"></div>
+          <div class="run-progress-track">
+            <div id="run-progress-bar" class="run-progress-bar"></div>
+          </div>
+          <div class="run-progress-detail-row">
+            <span id="run-progress-stage" class="run-progress-detail">Stage: waiting to start</span>
+            <span id="run-progress-elapsed" class="run-progress-detail">Elapsed: 0s</span>
+          </div>
+          <div id="run-progress-note" class="run-progress-note">This panel shows whether the delay is coming from planning, Splunk retrieval, or evidence review.</div>
+          <div class="run-progress-actions">
+            <button id="cancel-run" type="button" class="btn-secondary" style="display:none; margin-top:0;">Cancel In Browser</button>
           </div>
         </div>
         <div class=\"control-status\">
@@ -4146,6 +4343,10 @@ APP_HTML = """<!doctype html>
             <span id=\"brief-supported\" class=\"badge\">Idle</span>
           </div>
           <div id=\"status\" class=\"control-status-copy\">Ready.</div>
+          <div id=\"phase-strip\" class=\"phase-strip\">
+            <div class=\"brief-kicker\" style=\"margin-top:8px;\">Phase Status</div>
+            <div id=\"phase-strip-row\" class=\"phase-strip-row\"></div>
+          </div>
         </div>
       </div>
         </div>
@@ -4158,7 +4359,7 @@ APP_HTML = """<!doctype html>
               <div>
                 <div class=\"brief-kicker\">Splunk Investigation Workspace</div>
                 <h2>Current Investigation</h2>
-                <div class=\"muted\">Splunk evidence remains the source of truth. Structured reasoning, ATT&amp;CK context, and pivots are layered on top of the executed search.</div>
+                <div class=\"muted\">Splunk evidence remains the source of truth. Structured reasoning, ATT&amp;CK context, and next investigation steps are layered on top of the executed search.</div>
               </div>
             </div>
           </div>
@@ -4211,7 +4412,7 @@ APP_HTML = """<!doctype html>
                 <div id=\"coverage-visibility\" class=\"coverage-grid\"></div>
               </div>
               <div class=\"pivot-card-shell\" id=\"pivots-section\">
-                <div class=\"brief-head\"><div class=\"brief-kicker\">Recommended Next Pivots</div></div>
+                <div class=\"brief-head\"><div class=\"brief-kicker\">Recommended Next Steps</div></div>
                 <div id=\"pivot-cards\" class=\"pivot-grid\"></div>
               </div>
               </section>
@@ -4232,36 +4433,49 @@ APP_HTML = """<!doctype html>
               <div class=\"advanced-summary-main\">
                 <div class=\"advanced-drawer-head\">
                   <span>Investigation Drawer</span>
-                  <span class=\"advanced-drawer-copy\">Audit and review trace.</span>
+                  <span class=\"advanced-drawer-copy\">Pivot back into Splunk or inspect the review trace.</span>
                 </div>
                 <div class=\"advanced-summary-controls\">
                   <div class=\"drawer-jump-links\">
-                    <a class=\"jump-link\" href=\"#assessment-section\">Assessment</a>
-                    <a class=\"jump-link\" href=\"#timeline-section\">Timeline</a>
-                    <a class=\"jump-link\" href=\"#spl-section\">SPL</a>
-                    <a class=\"jump-link\" href=\"#pivots-section\">Pivots</a>
-                    <a class=\"jump-link\" href=\"#coverage-section\">Coverage</a>
-                    <a class=\"jump-link\" href=\"#mitre-section\">ATT&amp;CK</a>
+                    <button class=\"jump-link active\" type=\"button\" data-tray-tab=\"pivot\">Pivot</button>
+                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"evidence\">Evidence</button>
+                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"spl\">SPL</button>
+                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"timeline\">Case Flow</button>
+                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"attack\">ATT&amp;CK</button>
+                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"review\">Decision Trace</button>
+                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"json\">JSON</button>
                   </div>
-                  <button id=\"drawer-spl-toggle\" class=\"btn-secondary drawer-spl-toggle\" type=\"button\">Show SPL Executed</button>
+                  <a id=\"drawer-spl-link\" class=\"btn-splunk drawer-spl-toggle\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none;text-decoration:none;align-items:center;justify-content:center;\">Open In Splunk</a>
                 </div>
               </div>
               <div class=\"advanced-drawer-actions\">
-                <button id=\"advanced-full-toggle\" class=\"advanced-drawer-expand\" type=\"button\" title=\"Expand the drawer to full height\">&#9633;</button>
-                <span class=\"advanced-drawer-toggle\">&#9650;</span>
+                <button id=\"advanced-full-toggle\" class=\"advanced-drawer-expand\" type=\"button\" title=\"Expand the drawer into full review mode\" aria-label=\"Toggle full review mode\">⤢</button>
+                <span class=\"advanced-drawer-toggle\">⌃</span>
               </div>
             </summary>
             <div class=\"advanced-body\">
-              <div class=\"advanced-panel\">
-                <div class=\"advanced-subhead\">Decision Support</div>
-                <div id=\"model-personas\" class=\"persona-grid\"></div>
+              <div class=\"advanced-panel active\" data-tray-panel=\"pivot\">
+                <div class=\"advanced-subhead\">Pivot | Recommended Next Steps</div>
+                <div id=\"drawer-pivot-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">Recommended next steps will appear here after Splunk evidence is returned and reviewed.</div></div></div>
               </div>
-              <div class=\"advanced-panel\">
-                <div class=\"advanced-subhead\">Execution Audit</div>
-                <div id=\"model-decisions\" class=\"decision-log\"></div>
+              <div class=\"advanced-panel\" data-tray-panel=\"evidence\">
+                <div class=\"advanced-subhead\">Evidence Review</div>
+                <div class=\"drawer-clone-grid\">
+                  <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Current Assessment</div><div id=\"drawer-evidence-summary\" class=\"drawer-clone-copy\">Run an investigation to see the current assessment here.</div></div>
+                  <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Coverage And Visibility</div><div id=\"drawer-evidence-coverage\" class=\"drawer-clone-copy\">Coverage detail will appear here after Splunk evidence is returned.</div></div>
+                </div>
               </div>
-              <div class=\"advanced-panel\">
-                <div class=\"advanced-subhead\">TDI(R) Case Progression</div>
+              <div class=\"advanced-panel\" data-tray-panel=\"spl\">
+                <div class=\"advanced-subhead\">Executed SPL</div>
+                <div class=\"drawer-clone-grid\">
+                  <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Search Intent</div><div id=\"drawer-spl-summary\" class=\"drawer-clone-copy\">Run an investigation to see the search intent and evidence strategy.</div></div>
+                  <div class=\"drawer-clone-card\"><div style=\"display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;\"><div class=\"drawer-clone-title\" style=\"margin-bottom:0;\">Executed Query</div><a id=\"drawer-spl-inline-link\" class=\"btn-splunk drawer-spl-toggle\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none;text-decoration:none;align-items:center;justify-content:center;\">Open In Splunk</a></div><pre id=\"drawer-spl-query\" class=\"drawer-spl-pre\">(No Splunk query captured yet)</pre></div>
+                  <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Sample Results</div><pre id=\"drawer-spl-results\" class=\"drawer-spl-pre\">(No SPL result rows captured yet)</pre></div>
+                </div>
+              </div>
+              <div class=\"advanced-panel\" data-tray-panel=\"timeline\">
+                <div class=\"advanced-subhead\">Case Flow</div>
+                <div id=\"drawer-timeline-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">Timeline detail will appear here after the investigation progresses.</div></div></div>
                 <div id=\"tdir-card\" class=\"tdir-card\" style=\"display:none;\">
                   <div id=\"tdir-head\" class=\"tdir-head\"></div>
                   <div id=\"tdir-meta\" class=\"tdir-meta\"></div>
@@ -4270,24 +4484,34 @@ APP_HTML = """<!doctype html>
                 <div id=\"workflow-track\" class=\"flow-track\"></div>
                 <div id=\"workflow-meta\" class=\"flow-meta\"></div>
               </div>
-              <div class=\"advanced-panel\">
-                <div class=\"advanced-subhead\">Advanced Review Trace</div>
-                <pre id=\"journey\"></pre>
-                <div id=\"continue-shell\" class=\"continue-shell\" style=\"display:none;\">
-                  <div class=\"continue-title\">Deeper Investigation Control <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Shows the bounded continuation state: one automatic deeper-investigation round is allowed when justified, then further continuation requires analyst approval. Duplicate pivots and low-confidence follow-ups are blocked.</span></span></div>
-                  <div id=\"continue-copy\" class=\"continue-copy\"></div>
-                  <div class=\"continue-actions\">
-                    <span id=\"continue-pill\" class=\"continue-pill\"></span>
-                    <button id=\"continue-btn\" class=\"btn-secondary\" style=\"display:none; margin-top:0;\">Run Deeper Investigation</button>
+              <div class=\"advanced-panel\" data-tray-panel=\"attack\">
+                <div class=\"advanced-subhead\">MITRE ATT&amp;CK</div>
+                <div id=\"drawer-mitre-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">ATT&amp;CK context will appear after evidence review completes.</div></div></div>
+              </div>
+              <div class=\"advanced-panel\" data-tray-panel=\"review\">
+                <div class=\"advanced-subhead\">Decision Trace</div>
+                <div id=\"model-personas\" class=\"persona-grid\"></div>
+                <div class=\"advanced-panel\" style=\"margin-top:10px;\">
+                  <div class=\"advanced-subhead\">Execution Audit</div>
+                  <div id=\"model-decisions\" class=\"decision-log\"></div>
+                </div>
+                <div class=\"advanced-panel\" style=\"margin-top:10px;\">
+                  <div class=\"advanced-subhead\">Advanced Review Trace</div>
+                  <pre id=\"journey\"></pre>
+                  <div id=\"continue-shell\" class=\"continue-shell\" style=\"display:none;\">
+                    <div class=\"continue-title\">Deeper Investigation Control <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Shows the bounded continuation state: one automatic deeper-investigation round is allowed when justified, then further continuation requires analyst approval. Duplicate pivots and low-confidence follow-ups are blocked.</span></span></div>
+                    <div id=\"continue-copy\" class=\"continue-copy\"></div>
+                    <div class=\"continue-actions\">
+                      <span id=\"continue-pill\" class=\"continue-pill\"></span>
+                      <button id=\"continue-btn\" class=\"btn-secondary\" style=\"display:none; margin-top:0;\">Run Deeper Investigation</button>
+                    </div>
                   </div>
                 </div>
               </div>
-              <div class=\"advanced-panel\">
-                <div class=\"section-head\">
-                  <div class=\"advanced-subhead\">Raw Result JSON</div>
-                  <button id=\"toggle-json\" class=\"btn-secondary\" style=\"margin-top:0;\">Show JSON</button>
-                </div>
-                <pre id=\"output\" style=\"display:none;\"></pre>
+              <div class=\"advanced-panel\" data-tray-panel=\"json\">
+                <div class=\"advanced-subhead\">Raw Result JSON</div>
+                <div style=\"display:flex;justify-content:flex-end;margin-bottom:8px;\"><button id=\"drawer-json-toggle\" class=\"btn-secondary drawer-spl-toggle\" type=\"button\">Hide JSON</button></div>
+                <pre id=\"output\"></pre>
               </div>
             </div>
           </details>
@@ -4326,6 +4550,7 @@ APP_HTML = """<!doctype html>
           write_artifact: artifactEl ? Boolean(artifactEl.checked) : false,
           pipeline: pipelineEl ? pipelineEl.value : 'multi_model',
         };
+        runAbortController = new AbortController();
         const resp = await fetch('/api/ask', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4357,11 +4582,18 @@ APP_HTML = """<!doctype html>
     const $ = (id) => document.getElementById(id);
     const runBtn = $('run');
     const continueBtn = $('continue-btn');
+    const cancelRunBtn = $('cancel-run');
+    const drawerJsonToggleBtn = $('drawer-json-toggle');
     let runProgressTimer = null;
     let runProgressValue = 0;
+    let runStartAt = 0;
+    let runAbortController = null;
     let lastAskResult = null;
     let pendingContinuationState = null;
     let selectedFollowup = null;
+    let activeTrayTab = 'pivot';
+    const trayModeStorageKey = 'agtsmith_investigation_tray_mode';
+    const trayTabStorageKey = 'agtsmith_investigation_tray_tab';
 
     const esc = (v) => String(v ?? '')
       .replaceAll('&', '&amp;')
@@ -4430,7 +4662,7 @@ APP_HTML = """<!doctype html>
         panel.classList.add('empty');
         badge.textContent = 'Nothing selected';
         text.className = 'followup-body muted';
-        text.textContent = 'Select a pivot from Recommended Next Pivots in the main investigation column to open it here. This drawer is the single place to review and run a follow-up.';
+        text.textContent = 'Select a follow-up step from Recommended Next Steps in the main investigation column to open it here. This drawer is the single place to review and run a follow-up.';
         meta.style.display = 'none';
         meta.textContent = '';
         runBtn.style.display = 'none';
@@ -4445,6 +4677,18 @@ APP_HTML = """<!doctype html>
       meta.textContent = selectedFollowup.origin ? `From ATT&CK: ${selectedFollowup.origin}` : 'Recommended follow-up question';
       runBtn.style.display = 'inline-flex';
       clearBtn.style.display = 'inline-flex';
+    }
+
+    function drawerPreferredTab(result) {
+      const supported = result?.supported !== false;
+      const hasPivots = /pivot-card|pivot-action|follow-up target/i.test(String($('pivot-cards')?.innerHTML || ''));
+      const hasRows = hasEvidenceRows(result || {});
+      const hasSpl = Boolean(String($('spl-query')?.textContent || '').trim());
+      if (!supported) return 'review';
+      if (hasPivots) return 'pivot';
+      if (hasRows) return 'evidence';
+      if (hasSpl) return 'spl';
+      return 'pivot';
     }
 
     function selectFollowup(text, index, origin) {
@@ -4520,6 +4764,320 @@ APP_HTML = """<!doctype html>
       return 'Not derived';
     }
 
+    function reviewClaimSupport(result) {
+      if (result?.supported === false) return { value: 'Blocked', note: 'The final plan did not pass guarded execution checks.' };
+      if (!result || typeof result !== 'object') return { value: 'Not started', note: 'Run an investigation to see evidence support.' };
+      const summary = String(result?.summary || '').toLowerCase();
+      const rows = Number(result?.rows_returned || 0);
+      if (rows <= 0) return { value: 'No supporting evidence', note: 'The bounded Splunk search completed, but no matching rows were returned.' };
+      if (summary.includes('did not confirm') || summary.includes('do not prove') || summary.includes('no evidence of failures') || summary.includes('indirect')) {
+        return { value: 'Partial / indirect', note: 'The evidence is related, but the current summary says it does not fully prove the original claim.' };
+      }
+      return { value: 'Directly supported', note: 'Returned rows support the current investigation conclusion.' };
+    }
+
+    function baseSplSearchSegment(spl) {
+      const source = String(spl || '').trim();
+      if (!source) return '';
+      const base = source.split('|')[0].trim();
+      if (!base) return '';
+      return /^search\b/i.test(base) ? base : `search ${base}`;
+    }
+
+    function bestFieldForRowKey(rowKey, spl, row) {
+      const key = String(rowKey || '').trim();
+      const lowerSpl = String(spl || '').toLowerCase();
+      const candidates = {
+        user_name: ['user_name', 'user', 'Account_Name', 'TargetUserName', 'dest_user'],
+        host: ['host', 'ComputerName', 'dest', 'dvc'],
+        src_ip: ['src_ip', 'src', 'clientip', 'Source_Network_Address'],
+        clientip: ['clientip', 'src_ip', 'src', 'ip'],
+        index: ['index'],
+        source: ['source'],
+        sourcetype: ['sourcetype'],
+        method: ['method'],
+        status: ['status'],
+        file: ['file'],
+        uri_path: ['uri_path', 'uri'],
+        uri: ['uri', 'uri_path'],
+        user: ['user', 'user_name'],
+      };
+      const options = candidates[key] || [key];
+      for (const candidate of options) {
+        const pattern = new RegExp(`(^|[^A-Za-z0-9_])${candidate}([^A-Za-z0-9_]|$)`, 'i');
+        if (pattern.test(lowerSpl)) return candidate;
+      }
+      if (options.length > 1) {
+        for (const candidate of options) {
+          if (candidate in (row || {})) return candidate;
+        }
+      }
+      return options[0];
+    }
+
+    function rowFieldOverride(rowKey, coverage, row) {
+      const key = String(rowKey || '').trim();
+      const platforms = Array.isArray(coverage?.platforms) ? coverage.platforms.map((item) => String(item || '').toLowerCase()) : [];
+      const lowerSources = Array.isArray(coverage?.rawSources) ? coverage.rawSources.map((item) => String(item || '').toLowerCase()) : [];
+      const isLinuxAuth = platforms.includes('linux') || lowerSources.some((item) => item.includes('/var/log/auth.log') || item.includes('/var/log/secure'));
+      if (isLinuxAuth && key === 'user_name') return 'user';
+      return '';
+    }
+
+    function collectPivotItems(result) {
+      const mitrePivots = Array.isArray(result?.mitre_attack?.next_pivots) ? result.mitre_attack.next_pivots : [];
+      const tdirPivots = Array.isArray(result?.tdir_case?.recommended_next_pivots) ? result.tdir_case.recommended_next_pivots : [];
+      return (mitrePivots.length ? mitrePivots : tdirPivots).map((item) => String(item || '').trim()).filter(Boolean);
+    }
+
+    function collectEvidenceRows(result) {
+      const raw =
+        (Array.isArray(result?.__ui_sample_rows) && result.__ui_sample_rows.length
+          ? result.__ui_sample_rows
+          : (
+            Array.isArray(result?.spl_results_preview) && result.spl_results_preview.length
+              ? result.spl_results_preview
+              : (
+                Array.isArray(result?.evidence?.top_entities)
+                  ? result.evidence.top_entities
+                  : []
+              )
+          ));
+      return raw.filter((row) => row && typeof row === 'object').slice(0, 6);
+    }
+
+    function buildSplunkSearchUrlForRow(result, row, coverage) {
+      const splunkBase = String(result?.splunk_search_url_base || '').trim();
+      if (!splunkBase || !row || typeof row !== 'object') return '#';
+      const originalSpl = extractExecutedSPL(result || {});
+      const baseSearch = baseSplSearchSegment(originalSpl);
+      const earliest = String(
+        result?.query_args?.earliest_time ||
+        result?.final_adjudication?.selected_args?.earliest_time ||
+        result?.evidence?.time_window?.earliest_time ||
+        '-24h@h'
+      );
+      const latest = String(
+        result?.query_args?.latest_time ||
+        result?.final_adjudication?.selected_args?.latest_time ||
+        result?.evidence?.time_window?.latest_time ||
+        'now'
+      );
+      const preferredFields = ['index', 'host', 'user_name', 'user', 'TargetUserName', 'Account_Name', 'src_ip', 'clientip', 'source', 'sourcetype', 'file', 'method', 'status'];
+      const clauses = [];
+      const rowIndex = String(row.index || '').trim();
+      const fallbackIndex = coverage.indexes[0] || '';
+      if (rowIndex) clauses.push(`index=${rowIndex}`);
+      else if (fallbackIndex) clauses.push(`index=${fallbackIndex}`);
+      preferredFields.forEach((field) => {
+        const value = String(row[field] ?? '').trim();
+        if (!value || field === 'index') return;
+        if (field === 'user_name' && ('user' in row) && String(row.user || '').trim()) return;
+        const safe = value.replace(/"/g, '\\"');
+        const actualField = rowFieldOverride(field, coverage, row) || bestFieldForRowKey(field, originalSpl, row);
+        clauses.push(`${actualField}=\"${safe}\"`);
+      });
+      const query = `${baseSearch || 'search'} ${clauses.join(' ')} | head 200`.replace(/^search\\s+search\\b/i, 'search');
+      const params = new URLSearchParams({
+        q: query,
+        'display.page.search.mode': 'smart',
+        'dispatch.sample_ratio': '1',
+        workload_pool: '',
+        earliest,
+        latest,
+        'display.page.search.tab': 'statistics',
+        'display.general.type': 'statistics',
+      });
+      return `${splunkBase}?${params.toString()}`;
+    }
+
+    function compactEvidenceTable(rows, result, coverage) {
+      if (!rows.length) return '<div class="drawer-empty">No sample entities or row highlights are available yet.</div>';
+      const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row || {})))).slice(0, 4);
+      const colorForValue = (column, value) => {
+        const text = String(value || '').trim();
+        if (!text || text === '—' || text === '-') return esc(text || '—');
+        let hash = 0;
+        const source = `${String(column || '')}:${text.toLowerCase()}`;
+        for (let i = 0; i < source.length; i += 1) hash = ((hash << 5) - hash) + source.charCodeAt(i);
+        const hue = Math.abs(hash) % 360;
+        const bg = `hsla(${hue}, 64%, 16%, 0.92)`;
+        const border = `hsla(${hue}, 72%, 42%, 0.82)`;
+        const fg = `hsla(${hue}, 85%, 86%, 1)`;
+        return `<span class="drawer-value-tag" style="background:${bg};border-color:${border};color:${fg};">${esc(text)}</span>`;
+      };
+      const head = columns.map((col) => `<th>${esc(col)}</th>`).join('');
+      const body = rows.map((row) => {
+        const rowHref = buildSplunkSearchUrlForRow(result, row, coverage);
+        return `<tr class="${rowHref !== '#' ? 'drawer-row-link' : ''}"${rowHref !== '#' ? ` data-row-href="${esc(rowHref)}"` : ''}>${columns.map((col) => {
+        const text = compactValue(row[col]);
+        return `<td>${text ? colorForValue(col, text) : '&mdash;'}</td>`;
+      }).join('')}</tr>`;
+      }).join('');
+      return `<table class="drawer-entity-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+    }
+
+    function buildDrawerPivotMarkup(result) {
+      if (!result || typeof result !== 'object') {
+        return '<div class="drawer-empty">Run an investigation to see the best next pivot back into Splunk.</div>';
+      }
+      if (result?.supported === false) {
+        return '<div class="drawer-inline-note">This request was blocked before a valid pivot path could be approved. Refine the question first, then return here for Splunk follow-up actions.</div>';
+      }
+      const pivots = collectPivotItems(result);
+      if (!pivots.length) {
+        return '<div class="drawer-inline-note">No next-step pivots are available yet. When evidence review completes, this tab will highlight the best follow-up move back into Splunk.</div>';
+      }
+      return `<div class="drawer-action-list">${pivots.slice(0, 3).map((item, index) => {
+        const meta = classifyPivot(item);
+        return `
+          <div class="drawer-action-card">
+            <div class="drawer-action-head">
+              <div>
+                <div class="drawer-action-kicker">Best next move ${index + 1}</div>
+                <div class="drawer-action-title">${esc(meta.title)}</div>
+              </div>
+              <span class="drawer-chip">${esc(meta.scope)}</span>
+            </div>
+            <div class="drawer-action-meta-item"><strong>Why</strong>${esc(meta.why)}</div>
+            <div class="drawer-action-meta-item"><strong>Pivot target</strong><code>${esc(meta.entity)}</code></div>
+            <div class="drawer-action-meta-item"><strong>Expected value</strong>${esc(meta.expected)}</div>
+            <div class="drawer-action-buttons">
+              <button type="button" class="btn-secondary drawer-pivot-open" data-drawer-pivot-index="${index}">Load Into Follow-Up Drawer</button>
+              <button type="button" class="btn-followup drawer-pivot-run" data-drawer-pivot-index="${index}">Run This Pivot</button>
+            </div>
+          </div>
+        `;
+      }).join('')}</div>`;
+    }
+
+    function buildDrawerEvidenceMarkup(result, coverage) {
+      if (!result || typeof result !== 'object') {
+        return {
+          summary: '<div class="drawer-empty">Run an investigation to see execution status, evidence return, and claim support.</div>',
+          coverage: '<div class="drawer-empty">Coverage and entity highlights will appear here after an investigation runs.</div>',
+        };
+      }
+      const support = reviewClaimSupport(result);
+      const rows = Number(result?.rows_returned || 0);
+      const entity = deriveHighestPriorityEntity(result);
+      const trust = `
+        <div class="drawer-trust-strip">
+          <div class="drawer-trust-card"><div class="drawer-trust-label">Execution</div><div class="drawer-trust-value">${esc(result?.supported === false ? 'Blocked' : 'Complete')}</div><div class="drawer-trust-note">${esc(result?.supported === false ? 'The request never became a valid execution path.' : 'The bounded investigation path executed read-only retrieval.')}</div></div>
+          <div class="drawer-trust-card"><div class="drawer-trust-label">Evidence Returned</div><div class="drawer-trust-value">${esc(rows > 0 ? `${rows} row(s)` : 'No rows')}</div><div class="drawer-trust-note">${esc(coverage.coverageStatus || 'Coverage unknown')}</div></div>
+          <div class="drawer-trust-card"><div class="drawer-trust-label">Claim Support</div><div class="drawer-trust-value">${esc(support.value)}</div><div class="drawer-trust-note">${esc(support.note)}</div></div>
+          <div class="drawer-trust-card"><div class="drawer-trust-label">Best Entity</div><div class="drawer-trust-value">${esc(entity)}</div><div class="drawer-trust-note">${esc(rows > 0 ? 'Highest-salience value derived from the returned evidence preview.' : 'No high-salience entity could be derived yet.')}</div></div>
+        </div>
+      `;
+      const rowsMarkup = compactEvidenceTable(collectEvidenceRows(result), result, coverage);
+      const coverageMarkup = `
+        <div class="drawer-inline-note">
+          <strong>Data path:</strong> ${esc(coverage.platforms.length ? coverage.platforms.join(', ') : 'Not derived')}<br>
+          <strong>Indexes:</strong> ${esc(coverage.indexes.length ? coverage.indexes.join(', ') : 'Not derived')}<br>
+          <strong>Sourcetypes:</strong> ${esc(coverage.sourcetypes.length ? coverage.sourcetypes.join(', ') : 'Not derived')}
+        </div>
+        ${rowsMarkup}
+      `;
+      return { summary: trust, coverage: coverageMarkup };
+    }
+
+    function buildDrawerSplMarkup(result, coverage, spl, latestRun) {
+      if (!result || typeof result !== 'object') {
+        return {
+          summary: 'Run an investigation to see the exact query path and why it was chosen.',
+          query: '(No Splunk query captured yet)',
+          results: '(No SPL result rows captured yet)',
+        };
+      }
+      const rows = Number(result?.rows_returned ?? latestRun?.rows_returned ?? 0);
+      const runtime = latestRun?.execution_ms ? `${latestRun.execution_ms} ms` : 'n/a';
+      const summary = `
+        <div class="drawer-trust-strip">
+          <div class="drawer-trust-card"><div class="drawer-trust-label">Goal</div><div class="drawer-trust-value">${esc(result?.intent || 'Unknown')}</div><div class="drawer-trust-note">${esc(String(result?.search_strategy_summary || result?.intent_summary || 'Bounded query strategy selected for this question.'))}</div></div>
+          <div class="drawer-trust-card"><div class="drawer-trust-label">Query Runtime</div><div class="drawer-trust-value">${esc(runtime)}</div><div class="drawer-trust-note">${esc(rows > 0 ? `${rows} row(s) returned.` : 'No matching rows returned.')}</div></div>
+          <div class="drawer-trust-card"><div class="drawer-trust-label">Search Scope</div><div class="drawer-trust-value">${esc(coverage.indexes.length ? coverage.indexes.join(', ') : 'Derived scope')}</div><div class="drawer-trust-note">${esc(coverage.rawSources.length ? coverage.rawSources.join(', ') : 'No explicit source path extracted')}</div></div>
+        </div>
+      `;
+      const rawSplHref = String($('spl-link')?.getAttribute('href') || '').trim();
+      return {
+        summary,
+        query: spl || '(No Splunk query captured yet)',
+        results: $('spl-results')?.textContent || '(No SPL result rows captured yet)',
+        splHref: rawSplHref && rawSplHref !== '#' ? rawSplHref : '#',
+      };
+    }
+
+    function buildDrawerTimelineMarkup(result) {
+      if (!result || typeof result !== 'object') {
+        return '<div class="drawer-empty">Timeline detail will appear here after the investigation progresses.</div>';
+      }
+      const items = [
+        ['Question accepted', 'The controller validated read-only scope and chose the bounded investigation path.', result?.intent ? `Intent selected: ${result.intent}` : 'Intent not recorded.'],
+        ['SPL plan chosen', 'Planner, writer, and reviewers selected the query path used for retrieval.', result?.selected_tool ? `Execution path: ${result.selected_tool}` : 'Execution path not recorded.'],
+        ['Evidence returned', Number(result?.rows_returned || 0) > 0 ? `Splunk returned ${String(result?.rows_returned || 0)} row(s) for analyst review.` : 'The search completed without matching rows.', reviewClaimSupport(result).note],
+      ];
+      if (result?.continuation_reviewer_output?.should_continue === true) {
+        items.push(['Recommended next move', 'A deeper follow-up investigation was recommended.', String(result?.continuation_reviewer_output?.next_best_question || 'Review the highest-value next pivot.')]);
+      }
+      return `<div class="drawer-timeline-mini">${items.map((item, index) => `
+        <div class="drawer-timeline-step">
+          <div class="drawer-timeline-index">${index + 1}</div>
+          <div><div class="drawer-timeline-title">${esc(item[0])}</div><div class="drawer-timeline-copy">${esc(item[1])}<br>${esc(item[2])}</div></div>
+          <div class="drawer-timeline-tag">${esc(item[0])}</div>
+        </div>
+      `).join('')}</div>`;
+    }
+
+    function renderPhaseStrip(phases) {
+      const shell = $('phase-strip-row');
+      if (!shell) return;
+      const source = phases && typeof phases === 'object' ? phases : {
+        detect: 'planned',
+        triage: 'planned',
+        investigate: 'planned',
+      };
+      const ordered = [
+        ['detect', source.detect || 'planned'],
+        ['triage', source.triage || 'planned'],
+        ['investigate', source.investigate || 'planned'],
+      ];
+      shell.innerHTML = ordered.map(([name, state]) => `
+        <div class="phase-pill-mini ${esc(String(state).replaceAll(' ', '_'))}">
+          <span class="phase-mini-name">${esc(name)}</span>
+          <span class="phase-mini-state">${esc(String(state).replaceAll('_', ' '))}</span>
+        </div>
+      `).join('');
+    }
+
+    function buildDrawerMitreMarkup(result) {
+      if (!result || typeof result !== 'object') {
+        return '<div class="drawer-empty">ATT&CK context will appear here after evidence review completes.</div>';
+      }
+      const bundle = (result?.mitre_attack && typeof result.mitre_attack === 'object') ? result.mitre_attack : {};
+      const techniques = Array.isArray(bundle?.techniques) ? bundle.techniques : [];
+      const nextPivots = Array.isArray(bundle?.next_pivots) ? bundle.next_pivots : [];
+      if (!techniques.length && !nextPivots.length) {
+        return '<div class="drawer-inline-note">No ATT&CK mapping was produced for this investigation result.</div>';
+      }
+      return `
+        <div class="drawer-technique-grid">
+          ${techniques.slice(0, 3).map((item) => `
+            <div class="drawer-technique-card ${esc(mitreTone(item?.tactic || item?.kill_chain || ''))}">
+              <div class="drawer-technique-kicker">${esc(String(item?.tactic || item?.kill_chain || 'ATT&CK technique'))}</div>
+              <div class="drawer-technique-title">${esc(String(item?.technique_id || '').trim())} ${esc(String(item?.technique || '').trim())}</div>
+              <div class="drawer-technique-copy">${esc(String(item?.why || item?.rationale || item?.description || 'Mapped from the current evidence and analyst-facing summary.'))}</div>
+              <div class="drawer-technique-meta">
+                ${item?.confidence ? `<span class="drawer-technique-pill">Confidence ${esc(String(item.confidence))}</span>` : ''}
+                ${item?.kill_chain ? `<span class="drawer-technique-pill">${esc(String(item.kill_chain))}</span>` : ''}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        ${bundle.frame ? `<div class="drawer-inline-note" style="margin-top:10px;">${esc(bundle.frame)}</div>` : ''}
+        ${nextPivots.length ? `<div class="drawer-inline-note" style="margin-top:10px;"><strong>ATT&CK-linked pivot:</strong> ${esc(nextPivots[0])}<br>This stays separate from the Pivot tab so ATT&CK remains context, while Pivot remains the direct action surface back into Splunk.</div>` : ''}
+      `;
+    }
+
     function renderCaseHeader(result, coverage, latestRun) {
       const confidence = result?.final_confidence || result?.selected_confidence || 'n/a';
       $('case-header-chips').innerHTML = `
@@ -4533,6 +5091,69 @@ APP_HTML = """<!doctype html>
       bindSplToggleButtons();
     }
 
+    function investigationOutcomeNote(result) {
+      const intent = String(result?.intent || '').toLowerCase();
+      const summary = String(result?.summary || '').toLowerCase();
+      if (intent === 'failed_login_activity' && (summary.includes('no evidence of failures') || summary.includes('successful authentication attempts'))) {
+        return 'Returned rows did not confirm failed-login activity. The query returned authentication-related records, but the current evidence summary says they do not prove failed logins.';
+      }
+      return '';
+    }
+
+    function renderBlockedOutcome(result) {
+      const latestRun = Array.isArray(result?.selected_spl_details) && result.selected_spl_details.length
+        ? (result.selected_spl_details[result.selected_spl_details.length - 1] || {})
+        : {};
+      const spl = extractExecutedSPL(result || {});
+      const coverage = extractCoverage(result || {}, spl);
+      renderCaseHeader(result || {}, coverage, latestRun);
+      renderSplEvidence(result || {}, coverage, spl, latestRun);
+      renderCoverageVisibility(result || {}, coverage);
+      $('decision-support-summary').innerHTML = `
+        <div class="support-item"><div class="support-label">Policy outcome</div><div class="support-value">Blocked</div></div>
+        <div class="support-item"><div class="support-label">Why</div><div class="support-value">${esc(String(result?.guardrail_reason || result?.final_adjudication?.validation_reason || 'Request failed deterministic validation.'))}</div></div>
+      `;
+      renderPhaseStrip({ detect: 'blocked', triage: 'planned', investigate: 'planned' });
+      $('investigation-timeline').innerHTML = `
+        <details class="timeline-phase" open>
+          <summary>
+            <div class="timeline-phase-main">
+              <div class="timeline-phase-name">Detect</div>
+              <div class="timeline-phase-summary">The request was accepted, classified, and then stopped by policy.</div>
+            </div>
+            <div class="timeline-phase-status">blocked</div>
+          </summary>
+          <div class="timeline-phase-body">
+            <div class="timeline-detail-grid">
+              <div class="timeline-detail"><div class="timeline-detail-title">Why it stopped</div><div class="timeline-detail-copy">${esc(String(result?.guardrail_reason || result?.final_adjudication?.validation_reason || 'The final query did not pass deterministic validation.'))}</div></div>
+              <div class="timeline-detail"><div class="timeline-detail-title">What ran</div><div class="timeline-detail-copy">Planning and review completed, but the bounded execution plan was not allowed to proceed.</div></div>
+              <div class="timeline-detail"><div class="timeline-detail-title">What to do next</div><div class="timeline-detail-copy">Refine the question, verify the expected source/index assumptions, or use a narrower environment-supported pivot.</div></div>
+            </div>
+          </div>
+        </details>
+      `;
+      $('pivot-cards').innerHTML = '<div class="brief-body muted">No follow-up pivots are shown because the request was blocked before a valid investigation path could be approved.</div>';
+      $('brief-mitre').innerHTML = '<div class="brief-body muted">ATT&CK framing is hidden for blocked requests. Start with the policy reason and refine the question into an allowed investigation path.</div>';
+      $('summary').innerHTML = '<div class="brief-body"><strong>The request was blocked before execution.</strong><br>' + esc(String(result?.guardrail_reason || result?.final_adjudication?.validation_reason || 'The final query did not pass deterministic validation.')) + '<br><br><strong>Suggested next step:</strong> tighten the question around supported indexes, sources, or sourcetypes and run it again.</div>';
+      $('tdir-card').style.display = 'none';
+      $('tdir-case').textContent = '';
+      $('journey').textContent = 'This request did not become an investigation because policy blocked the final execution path.';
+      setSplVisibility(false);
+      syncDrawerMirrors();
+      setActiveTrayTab(drawerPreferredTab(result));
+    }
+
+    function mitreTone(tactic){
+      const value = String(tactic || '').toLowerCase().trim();
+      if(value.includes('discovery')) return 'mitre-tone-discovery';
+      if(value.includes('credential')) return 'mitre-tone-credential-access';
+      if(value.includes('execution')) return 'mitre-tone-execution';
+      if(value.includes('defense evasion')) return 'mitre-tone-defense-evasion';
+      if(value.includes('collection')) return 'mitre-tone-collection';
+      if(value.includes('command and control')) return 'mitre-tone-command-and-control';
+      return 'mitre-tone-default';
+    }
+
     function renderMitreBrief(result) {
       const bundle = (result?.mitre_attack && typeof result.mitre_attack === 'object') ? result.mitre_attack : {};
       const items = Array.isArray(bundle?.techniques) ? bundle.techniques : [];
@@ -4543,7 +5164,7 @@ APP_HTML = """<!doctype html>
         ? `
           ${frame ? `<div class="mitre-card"><div class="mitre-copy">${esc(frame)}</div></div>` : ''}
           ${items.map((item) => `
-            <div class="mitre-card">
+            <div class="mitre-card ${mitreTone(item.tactic)}">
               <div class="mitre-head">
                 <div class="mitre-title">${esc(item.technique || 'Technique')}</div>
                 <div class="mitre-tip" tabindex="0">?
@@ -4565,6 +5186,44 @@ APP_HTML = """<!doctype html>
         : '<div class="brief-body muted">No ATT&CK mapping was derived for this investigation yet.</div>';
     }
 
+    window.__splAssetManifest = window.__splAssetManifest || [];
+
+    function assetFamilyForIntent(intent) {
+      const value = String(intent || '').trim().toLowerCase();
+      const families = {
+        failed_login_activity: ['failed_login_activity', 'linux_auth_failures', 'windows_auth_failures', 'failed', 'login', 'auth'],
+        linux_auth_failures: ['failed_login_activity', 'linux_auth_failures', 'linux', 'auth', 'failed', 'login'],
+        windows_auth_failures: ['failed_login_activity', 'windows_auth_failures', 'windows', 'auth', 'failed', 'login'],
+        apache_access_top_ips: ['apache_access_top_ips', 'apache', 'access', 'clientip', 'web'],
+        aws_cloudtrail_activity: ['aws_cloudtrail_activity', 'cloudtrail', 'aws', 'discovery'],
+      };
+      return families[value] || [value];
+    }
+
+    function matchingActiveAssetsForResult(result) {
+      const direct = Array.isArray(result?.matching_active_spl_assets) ? result.matching_active_spl_assets : [];
+      if (direct.length) return direct;
+      const manifest = Array.isArray(window.__splAssetManifest) ? window.__splAssetManifest : [];
+      const family = new Set(assetFamilyForIntent(result?.intent));
+      return manifest.filter((row) => {
+        const rowIntent = String(row?.intent || '').trim().toLowerCase();
+        const tokens = Array.isArray(row?.match_tokens) ? row.match_tokens.map((item) => String(item || '').trim().toLowerCase()) : [];
+        if (family.has(rowIntent)) return true;
+        return tokens.some((token) => family.has(token));
+      }).slice(0, 3);
+    }
+
+    async function loadSplAssetManifest() {
+      try {
+        const resp = await fetch('/api/config/local-learning');
+        const data = await resp.json();
+        const records = data?.local_learning?.repository?.records;
+        window.__splAssetManifest = Array.isArray(records) ? records : [];
+      } catch (_) {
+        window.__splAssetManifest = [];
+      }
+    }
+
     function renderDecisionSupportSummary(result) {
       const reviewer = result?.security_reviewer_output || result?.security_reviewer?.output || {};
       const evidenceReviewer = result?.evidence_reviewer_output || result?.evidence_reviewer?.output || {};
@@ -4577,6 +5236,12 @@ APP_HTML = """<!doctype html>
         ['Final adjudication', adjudication.validation_ok === false ? 'Blocked' : (adjudication.selected_tool || result?.selected_tool || 'Complete')],
         ['Continuation', continuationReviewer.should_continue === true ? 'Recommended' : 'Not recommended'],
       ];
+      const matchingAssets = matchingActiveAssetsForResult(result);
+      if (matchingAssets.length) {
+        const match = matchingAssets[0] || {};
+        const assetLabel = match?.use_when || match?.intent || 'Matched local SPL asset';
+        items.push(['Active SPL asset', assetLabel]);
+      }
       $('decision-support-summary').innerHTML = items.map(([label, value]) => `
         <div class="support-item">
           <div class="support-label">${esc(label)}</div>
@@ -4696,10 +5361,11 @@ APP_HTML = """<!doctype html>
     function renderCoverageVisibility(result, coverage) {
       const rows = Number(result?.rows_returned || 0);
       const noGapText = 'No explicit telemetry gap was called out in the returned result.';
+      const mismatchNote = investigationOutcomeNote(result);
       const items = [
         ['Platforms and indexes searched', `${coverage.platforms.length ? coverage.platforms.join(', ') : 'Not derived'} | ${coverage.indexes.length ? coverage.indexes.join(', ') : 'No explicit index extracted'}`],
         ['Sourcetypes and source paths', `${coverage.sourcetypes.length ? coverage.sourcetypes.join(', ') : 'Not derived'} | ${coverage.rawSources.length ? coverage.rawSources.join(', ') : 'No explicit source path extracted'}`],
-        ['Evidence return and coverage status', `${rows > 0 ? 'Evidence rows were returned.' : 'No rows were returned for the expected sources in this window.'} ${coverage.coverageStatus || 'Unknown'}`],
+        ['Evidence return and coverage status', `${rows > 0 ? 'Evidence rows were returned.' : 'No rows were returned for the expected sources in this window.'} ${coverage.coverageStatus || 'Unknown'}${mismatchNote ? ` ${mismatchNote}` : ''}`],
         ['Visibility gaps and follow-up checks', coverage.gaps.length ? coverage.gaps.join(' ') : noGapText],
       ];
       $('coverage-visibility').innerHTML = items.map(([label, value]) => `
@@ -4734,6 +5400,10 @@ APP_HTML = """<!doctype html>
     }
 
     function renderPivotCards(result) {
+      if (result?.supported === false) {
+        $('pivot-cards').innerHTML = '<div class="brief-body muted">Follow-up pivots are hidden because the request did not pass the guarded execution checks.</div>';
+        return [];
+      }
       const mitrePivots = Array.isArray(result?.mitre_attack?.next_pivots) ? result.mitre_attack.next_pivots : [];
       const tdirPivots = Array.isArray(result?.tdir_case?.recommended_next_pivots) ? result.tdir_case.recommended_next_pivots : [];
       const pivots = (mitrePivots.length ? mitrePivots : tdirPivots).map((item) => String(item || '').trim()).filter(Boolean);
@@ -4753,8 +5423,8 @@ APP_HTML = """<!doctype html>
                 </div>
                 <div class="pivot-card-copy">${esc(item)}</div>
                 <div class="pivot-meta-grid">
-                  <div class="pivot-meta"><strong>Why this pivot matters</strong><span>${esc(meta.why)}</span></div>
-                  <div class="pivot-meta"><strong>Pivot on</strong><span>${esc(meta.entity)}</span></div>
+                  <div class="pivot-meta"><strong>Why this step matters</strong><span>${esc(meta.why)}</span></div>
+                  <div class="pivot-meta"><strong>Follow-up target</strong><span><code>${esc(meta.entity)}</code></span></div>
                   <div class="pivot-meta"><strong>Expected value</strong><span>${esc(meta.expected)}</span></div>
                   <div class="pivot-meta"><strong>Estimated scope</strong><span>${esc(meta.scope)}</span></div>
                 </div>
@@ -4765,14 +5435,14 @@ APP_HTML = """<!doctype html>
               </div>
             `;
           }).join('')
-        : '<div class="brief-body muted">No additional Splunk-grounded pivots were derived for this investigation yet.</div>';
+        : '<div class="brief-body muted">No additional Splunk-grounded follow-up steps were derived for this investigation yet.</div>';
       document.querySelectorAll('.pivot-open-btn').forEach((btn) => {
         btn.onclick = () => {
           const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
           const text = pivots[idx] || '';
           if (!text) return;
           selectFollowup(text, idx, primaryTechnique);
-          $('status').textContent = 'Pivot opened in the left drawer. Review it there, then run when ready.';
+          $('status').textContent = 'Follow-up step opened in the left drawer. Review it there, then run when ready.';
           window.scrollTo({ top: 0, behavior: 'smooth' });
         };
       });
@@ -4813,7 +5483,7 @@ APP_HTML = """<!doctype html>
       renderCoverageVisibility(result || {}, coverage);
       renderDecisionSupportSummary(result || {});
       renderSplunkTimeline(result || {}, coverage, 'Splunk completed the query, but no rows matched the current time window and filters.');
-      $('pivot-cards').innerHTML = '<div class="brief-body muted">No pivots were generated because the completed Splunk search returned no matching evidence. Validate coverage, widen the time range, or refine the search scope.</div>';
+      $('pivot-cards').innerHTML = '<div class="brief-body muted">No follow-up steps were generated because the completed Splunk search returned no matching evidence. Validate coverage, widen the time range, or refine the search scope.</div>';
       setSplVisibility(false);
       $('summary').innerHTML =
         '<div class="brief-body">' +
@@ -4826,6 +5496,13 @@ APP_HTML = """<!doctype html>
       $('tdir-card').style.display = 'none';
       $('tdir-case').textContent = '';
       $('journey').textContent = 'Investigation completed with no matching evidence rows. No ATT&CK classification or deeper pivot chain was produced.';
+      renderPhaseStrip({
+        detect: 'complete',
+        triage: 'complete',
+        investigate: 'no_evidence',
+      });
+      syncDrawerMirrors();
+      setActiveTrayTab(drawerPreferredTab(result));
     }
 
     function syncUtilityBarVisibility() {
@@ -4856,6 +5533,15 @@ APP_HTML = """<!doctype html>
       const latestRun = splRuns.length ? (splRuns[splRuns.length - 1] || {}) : {};
       const spl = extractExecutedSPL(result);
       const coverage = extractCoverage(result, spl);
+      if (result?.supported === false) {
+        renderBlockedOutcome(result || {});
+        $('model-personas').innerHTML = '';
+        $('model-decisions').innerHTML = '';
+        $('workflow-track').innerHTML = '';
+        $('workflow-meta').textContent = '';
+        clearContinuationControls();
+        return;
+      }
       renderCaseHeader(result, coverage, latestRun);
       renderMitreBrief(result);
       renderDecisionSupportSummary(result);
@@ -4863,7 +5549,19 @@ APP_HTML = """<!doctype html>
       renderCoverageVisibility(result, coverage);
       renderPivotCards(result);
       renderSplunkTimeline(result, coverage, String(result?.summary || '').trim());
+      renderPhaseStrip({
+        detect: 'complete',
+        triage: String(result?.tdir_case?.phase_status?.triage || 'complete'),
+        investigate: String(result?.tdir_case?.phase_status?.investigate || (hasEvidenceRows(result) ? 'complete' : 'no_evidence')),
+      });
       setSplVisibility(false);
+      const outcomeNote = investigationOutcomeNote(result);
+      if (outcomeNote) {
+        $('summary').innerHTML =
+          '<div class="brief-body"><strong>Returned rows did not confirm the requested activity.</strong><br>' +
+          esc(outcomeNote) +
+          '<br><br>' + renderSummaryText(result?.summary || '') + '</div>';
+      }
 
       const workflow = Array.isArray(result.model_workflow) ? result.model_workflow : [];
       const workflowStagesPresent = new Set(
@@ -4986,7 +5684,7 @@ APP_HTML = """<!doctype html>
         const timingValue = timingKey ? nodeTimings[timingKey] : null;
         const timingText = timingValue !== null && timingValue !== undefined ? ` (duration=${fmtMs(timingValue)})` : '';
         workflowHtml.push(
-          `<div class="role-line ${esc(roleClass)}"><strong>${esc(roleLabel)}:</strong> ${esc(model)}${esc(respText)}${esc(timingText)}</div>`
+          `<div class="role-line ${esc(roleClass)}"><strong>${esc(roleLabel)}:</strong> <span class="role-model">${esc(model || 'not recorded')}</span>${esc(respText)}${esc(timingText)}</div>`
         );
       }
 
@@ -5159,6 +5857,8 @@ APP_HTML = """<!doctype html>
       $('model-decisions').innerHTML =
         `${workflowHtml.length ? `<div class="decision-subhead">Pipeline Roles</div>${workflowHtml.join('')}` : ''}` +
         `${detailHtml ? `<div class="decision-subhead">Key Outputs</div>${detailHtml}` : ''}`;
+      syncDrawerMirrors();
+      setActiveTrayTab(drawerPreferredTab(result));
     }
 
     function renderInvestigationJourney(result) {
@@ -5313,25 +6013,17 @@ APP_HTML = """<!doctype html>
         setSplVisibility(!rawShell.classList.contains('open'));
       };
       const toolbarToggle = $('spl-visibility-toggle');
-      const drawerToggle = $('drawer-spl-toggle');
       if (toolbarToggle) toolbarToggle.onclick = handler;
-      if (drawerToggle) drawerToggle.onclick = handler;
     }
 
     function bindAdvancedSummaryControls() {
       const summary = document.querySelector('.advanced-shell > summary');
       if (!summary) return;
-      summary.querySelectorAll('a.jump-link').forEach((node) => {
+      summary.querySelectorAll('[data-tray-tab]').forEach((node) => {
         node.addEventListener('click', (event) => {
           event.preventDefault();
           event.stopPropagation();
-          const href = node.getAttribute('href') || '';
-          if (!href.startsWith('#')) return;
-          const target = document.querySelector(href);
-          if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-          if (history && typeof history.replaceState === 'function') {
-            history.replaceState(null, '', href);
-          }
+          setActiveTrayTab(String(node.getAttribute('data-tray-tab') || 'pivot'));
         });
       });
       summary.querySelectorAll('button').forEach((node) => {
@@ -5348,19 +6040,144 @@ APP_HTML = """<!doctype html>
       if (!drawer || !fullToggle) return;
       const sync = () => {
         const full = drawer.dataset.mode === 'full';
-        fullToggle.textContent = full ? '↙' : '□';
-        fullToggle.title = full ? 'Return the drawer to normal height' : 'Expand the drawer to full height';
+        fullToggle.textContent = full ? '⤡' : '⤢';
+        fullToggle.title = full ? 'Return the drawer to normal review height' : 'Expand the drawer into full review mode';
+        try {
+          sessionStorage.setItem(trayModeStorageKey, drawer.open ? drawer.dataset.mode : 'collapsed');
+        } catch (_err) {}
       };
       drawer.addEventListener('toggle', () => {
-        if (!drawer.open) drawer.dataset.mode = 'normal';
+        if (!drawer.open) drawer.dataset.mode = 'medium';
         sync();
       });
       fullToggle.onclick = () => {
         if (!drawer.open) return;
-        drawer.dataset.mode = drawer.dataset.mode === 'full' ? 'normal' : 'full';
+        drawer.dataset.mode = drawer.dataset.mode === 'full' ? 'medium' : 'full';
         sync();
       };
+      let rememberedMode = '';
+      try {
+        rememberedMode = sessionStorage.getItem(trayModeStorageKey) || '';
+      } catch (_err) {}
+      if (rememberedMode === 'collapsed') drawer.open = false;
+      else if (rememberedMode === 'full') {
+        drawer.open = true;
+        drawer.dataset.mode = 'full';
+      } else {
+        drawer.dataset.mode = drawer.dataset.mode || 'medium';
+      }
       sync();
+    }
+
+    function setActiveTrayTab(tab) {
+      const drawer = $('advanced-section');
+      const body = drawer ? drawer.querySelector('.advanced-body') : null;
+      if (drawer && !drawer.open) {
+        drawer.open = true;
+        drawer.dataset.mode = 'medium';
+      }
+      activeTrayTab = String(tab || 'pivot');
+      document.querySelectorAll('[data-tray-tab]').forEach((node) => {
+        node.classList.toggle('active', String(node.getAttribute('data-tray-tab') || '') === activeTrayTab);
+      });
+      document.querySelectorAll('[data-tray-panel]').forEach((node) => {
+        node.classList.toggle('active', String(node.getAttribute('data-tray-panel') || '') === activeTrayTab);
+      });
+      if (body) body.scrollTop = 0;
+      try {
+        sessionStorage.setItem(trayTabStorageKey, activeTrayTab);
+      } catch (_err) {}
+    }
+
+    function syncDrawerMirrors() {
+      const result = (lastAskResult && typeof lastAskResult === 'object') ? lastAskResult : null;
+      const spl = extractExecutedSPL(result || {});
+      const latestRun = Array.isArray(result?.selected_spl_details) && result.selected_spl_details.length
+        ? (result.selected_spl_details[result.selected_spl_details.length - 1] || {})
+        : {};
+      const coverage = extractCoverage(result || {}, spl);
+      const pivotContent = $('drawer-pivot-content');
+      const evidenceSummary = $('drawer-evidence-summary');
+      const evidenceCoverage = $('drawer-evidence-coverage');
+      const drawerMitre = $('drawer-mitre-content');
+      const drawerTimeline = $('drawer-timeline-content');
+      const drawerSplSummary = $('drawer-spl-summary');
+      const drawerSplQuery = $('drawer-spl-query');
+      const drawerSplResults = $('drawer-spl-results');
+      const splLink = $('spl-link');
+      const drawerSplLink = $('drawer-spl-link');
+      const drawerSplInlineLink = $('drawer-spl-inline-link');
+      const splModel = buildDrawerSplMarkup(result, coverage, spl, latestRun);
+      if (pivotContent) {
+        pivotContent.innerHTML = buildDrawerPivotMarkup(result);
+      }
+      if (evidenceSummary) {
+        evidenceSummary.innerHTML = buildDrawerEvidenceMarkup(result, coverage).summary;
+      }
+      if (evidenceCoverage) {
+        evidenceCoverage.innerHTML = buildDrawerEvidenceMarkup(result, coverage).coverage;
+      }
+      if (drawerMitre) {
+        drawerMitre.innerHTML = buildDrawerMitreMarkup(result);
+      }
+      if (drawerTimeline) {
+        drawerTimeline.innerHTML = buildDrawerTimelineMarkup(result);
+      }
+      if (drawerSplSummary) {
+        drawerSplSummary.innerHTML = splModel.summary;
+      }
+      if (drawerSplQuery) {
+        drawerSplQuery.textContent = splModel.query;
+      }
+      if (drawerSplResults) {
+        drawerSplResults.textContent = splModel.results;
+      }
+      const rawSplHref = splLink ? String(splLink.getAttribute('href') || '').trim() : '';
+      const splLinkVisible = splLink ? splLink.style.display !== 'none' : false;
+      const hasDrawerSpl = Boolean(($('spl-query')?.textContent || '').trim());
+      if (drawerSplLink && splLink && splLinkVisible && rawSplHref && rawSplHref !== '#') {
+        drawerSplLink.href = splLink.href;
+        drawerSplLink.style.display = 'inline-flex';
+      } else if (drawerSplLink) {
+        drawerSplLink.href = '#';
+        drawerSplLink.style.display = 'none';
+      }
+      if (drawerSplInlineLink && splModel.splHref && splModel.splHref !== '#') {
+        drawerSplInlineLink.href = splModel.splHref;
+        drawerSplInlineLink.style.display = 'inline-flex';
+      } else if (drawerSplInlineLink) {
+        drawerSplInlineLink.href = '#';
+        drawerSplInlineLink.style.display = 'none';
+      }
+      document.querySelectorAll('.drawer-pivot-open').forEach((btn) => {
+        btn.onclick = () => {
+          const idx = Number(btn.getAttribute('data-drawer-pivot-index') || '-1');
+          const pivots = collectPivotItems(result || {});
+          const text = pivots[idx] || '';
+          if (!text) return;
+          selectFollowup(text, idx, 'Pivot');
+          $('status').textContent = 'Follow-up step loaded into the left drawer for review.';
+        };
+      });
+      document.querySelectorAll('.drawer-pivot-run').forEach((btn) => {
+        btn.onclick = async () => {
+          const idx = Number(btn.getAttribute('data-drawer-pivot-index') || '-1');
+          const pivots = collectPivotItems(result || {});
+          const text = pivots[idx] || '';
+          if (!text) return;
+          selectFollowup(text, idx, 'Pivot');
+          $('question').value = text;
+          $('status').textContent = 'Running selected pivot from the investigation drawer...';
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+          await executeInvestigation({ question: text });
+        };
+      });
+      document.querySelectorAll('.drawer-row-link').forEach((row) => {
+        row.onclick = () => {
+          const href = String(row.getAttribute('data-row-href') || '').trim();
+          if (href && href !== '#') window.open(href, '_blank', 'noopener,noreferrer');
+        };
+      });
     }
 
     async function refreshDomainHints() {
@@ -5507,6 +6324,38 @@ APP_HTML = """<!doctype html>
       shell.style.display = 'block';
     }
 
+
+    function currentRunStage(value, elapsedMs) {
+      const pct = Number(value || 0);
+      const elapsed = Number(elapsedMs || 0);
+      if (pct < 18) return { title: 'Question intake and guardrails', note: 'The controller is checking that the request stays inside read-only investigation scope before any tool can run.', status: 'Checking request scope and selecting the investigation path.', timeline: 'Guardrails are validating the question and choosing the allowed path.' };
+      if (pct < 48) return { title: 'Planning and SPL drafting', note: elapsed > 20000 ? 'This delay is usually model-side planning or SPL drafting, not Splunk retrieval.' : 'The planner and writer are building a bounded SPL approach for this question.', status: 'Planner and writer are building the bounded SPL path.', timeline: 'Model roles are planning the search strategy and drafting the first SPL candidate.' };
+      if (pct < 76) return { title: 'Splunk retrieval and evidence collection', note: 'The approved read-only path is retrieving evidence or metadata from Splunk.', status: 'Retrieving evidence from Splunk and checking first-pass results.', timeline: 'The bounded plan is executing against Splunk and collecting evidence rows.' };
+      if (pct < 92) return { title: 'Evidence review and pivot generation', note: elapsed > 45000 ? 'This run is taking longer than usual. The delay is now more likely in evidence review or peer reasoning than in Splunk retrieval.' : 'Returned evidence is being reviewed and turned into analyst-facing pivots and ATT&CK context.', status: 'Reviewing evidence quality and forming the next analyst actions.', timeline: 'The evidence reviewers are checking the returned rows and deciding what matters.' };
+      return { title: 'Final analyst summary', note: elapsed > 45000 ? 'This run is taking longer than usual. You can keep waiting, or cancel in the browser and retry a narrower question or shorter time window.' : 'The final summary is being assembled for the analyst view.', status: 'Finalizing the analyst-facing answer and page sections.', timeline: 'The controller is packaging the final answer, coverage view, and pivots.' };
+    }
+
+    function refreshRunningUi() {
+      const elapsedMs = runStartAt ? (Date.now() - runStartAt) : 0;
+      const elapsedSec = Math.max(0, Math.round(elapsedMs / 1000));
+      const stage = currentRunStage(runProgressValue, elapsedMs);
+      if ($('run-progress-stage')) $('run-progress-stage').textContent = `Stage: ${stage.title}`;
+      if ($('run-progress-elapsed')) $('run-progress-elapsed').textContent = `Elapsed: ${elapsedSec}s`;
+      if ($('run-progress-note')) $('run-progress-note').textContent = stage.note;
+      $('status').textContent = stage.status;
+      $('spl-analyst-summary').innerHTML = `<div class="brief-body muted">${esc(stage.status)}</div>`;
+      $('coverage-visibility').innerHTML = `<div class="coverage-row"><div class="coverage-row-title">Coverage</div><div class="coverage-row-copy">${esc(stage.timeline)}</div></div>`;
+      $('decision-support-summary').innerHTML = `<div class="support-item"><div class="support-label">Current stage</div><div class="support-value">${esc(stage.title)}</div></div><div class="support-item"><div class="support-label">Delay source</div><div class="support-value">${esc(stage.note)}</div></div>`;
+      $('investigation-timeline').innerHTML = `<details class="timeline-phase" open><summary><div class="timeline-phase-main"><div class="timeline-phase-name">Current Stage</div><div class="timeline-phase-summary">${esc(stage.status)}</div></div><div class="timeline-phase-status">running</div></summary><div class="timeline-phase-body"><div class="timeline-detail-grid"><div class="timeline-detail"><div class="timeline-detail-title">What is happening now</div><div class="timeline-detail-copy">${esc(stage.timeline)}</div></div><div class="timeline-detail"><div class="timeline-detail-title">Elapsed time</div><div class="timeline-detail-copy">${esc(String(elapsedSec))} second(s)</div></div><div class="timeline-detail"><div class="timeline-detail-title">What you can do</div><div class="timeline-detail-copy">${esc(elapsedMs > 45000 ? 'This run is taking longer than usual. You can keep waiting, or cancel in the browser and retry a narrower question or shorter time window.' : 'Wait for completion. If this keeps growing, the delay is likely model-side rather than Splunk-side.')}</div></div></div></div></details>`;
+      $('summary').innerHTML = `<div class="brief-body muted">${esc(stage.status)} ${esc(stage.note)}</div>`;
+      const phaseState = runProgressValue < 18
+        ? { detect: 'in_progress', triage: 'planned', investigate: 'planned' }
+        : runProgressValue < 48
+          ? { detect: 'complete', triage: 'in_progress', investigate: 'planned' }
+          : { detect: 'complete', triage: 'complete', investigate: 'in_progress' };
+      renderPhaseStrip(phaseState);
+      syncDrawerMirrors();
+    }
     async function executeInvestigation(options = {}) {
       function setRunProgress(value, label='') {
         runProgressValue = Math.max(0, Math.min(100, Number(value || 0)));
@@ -5514,39 +6363,73 @@ APP_HTML = """<!doctype html>
         $('run-progress-bar').style.width = `${runProgressValue}%`;
         $('run-progress-pct').textContent = `${Math.round(runProgressValue)}%`;
         if (label) $('run-progress-label').textContent = label;
+        refreshRunningUi();
       }
 
       function startRunProgress() {
         if (runProgressTimer) clearInterval(runProgressTimer);
+        runStartAt = Date.now();
+        if (cancelRunBtn) cancelRunBtn.style.display = 'inline-flex';
         setRunProgress(2, 'Starting investigation...');
         runProgressTimer = setInterval(() => {
-          if (runProgressValue < 40) {
-            setRunProgress(runProgressValue + 2.8, 'Planning and validating query...');
+          if (runProgressValue < 18) {
+            setRunProgress(runProgressValue + 2.2, 'Checking read-only scope...');
             return;
           }
-          if (runProgressValue < 75) {
-            setRunProgress(runProgressValue + 1.2, 'Running Splunk tools...');
+          if (runProgressValue < 48) {
+            setRunProgress(runProgressValue + 1.6, 'Planning and drafting SPL...');
+            return;
+          }
+          if (runProgressValue < 76) {
+            setRunProgress(runProgressValue + 0.8, 'Retrieving evidence from Splunk...');
             return;
           }
           if (runProgressValue < 92) {
-            setRunProgress(runProgressValue + 0.45, 'Summarizing investigation evidence...');
+            setRunProgress(runProgressValue + 0.35, 'Reviewing evidence and pivots...');
+            return;
           }
-        }, 350);
+          if (runProgressValue < 96) {
+            setRunProgress(runProgressValue + 0.08, 'Finalizing analyst summary...');
+            return;
+          }
+          refreshRunningUi();
+        }, 1000);
       }
 
-      function stopRunProgress(finalOk) {
+      function stopRunProgress(finalOk, cancelled=false) {
         if (runProgressTimer) {
           clearInterval(runProgressTimer);
           runProgressTimer = null;
         }
-        setRunProgress(100, finalOk ? 'Investigation complete.' : 'Investigation failed.');
-        setTimeout(() => {
-          $('run-progress-wrap').style.display = 'none';
-        }, 700);
+        const elapsedMs = runStartAt ? (Date.now() - runStartAt) : 0;
+        const elapsedSec = Math.max(0, Math.round(elapsedMs / 1000));
+        if (cancelRunBtn) cancelRunBtn.style.display = 'none';
+        $('run-progress-wrap').style.display = 'block';
+        if (cancelled) {
+          runProgressValue = Math.max(runProgressValue || 0, 1);
+          $('run-progress-label').textContent = 'Investigation cancelled in browser.';
+          $('run-progress-pct').textContent = `${Math.round(runProgressValue)}%`;
+          $('run-progress-bar').style.width = `${runProgressValue}%`;
+          if ($('run-progress-stage')) $('run-progress-stage').textContent = 'Stage: Browser cancellation';
+          if ($('run-progress-elapsed')) $('run-progress-elapsed').textContent = `Elapsed: ${elapsedSec}s`;
+          if ($('run-progress-note')) $('run-progress-note').textContent = 'The browser stopped waiting for this run. The server may still complete it in the background. Retry a narrower question, reduce the time window, or target a more specific platform or index if needed.';
+        } else {
+          runProgressValue = 100;
+          $('run-progress-label').textContent = finalOk ? 'Investigation complete.' : 'Investigation failed.';
+          $('run-progress-pct').textContent = '100%';
+          $('run-progress-bar').style.width = '100%';
+          if ($('run-progress-stage')) $('run-progress-stage').textContent = `Stage: ${finalOk ? 'Completed' : 'Stopped before completion'}`;
+          if ($('run-progress-elapsed')) $('run-progress-elapsed').textContent = `Elapsed: ${elapsedSec}s`;
+          if ($('run-progress-note')) $('run-progress-note').textContent = finalOk
+            ? 'The run finished and the final investigation view is now rendered below.'
+            : 'The run stopped before a final investigation view could be completed. Check the status and output for the failure reason, then retry a narrower question or shorter time window if needed.';
+        }
+        runStartAt = 0;
       }
 
       runBtn.disabled = true;
-      $('status').textContent = 'Running...';
+      lastAskResult = null;
+      $('status').textContent = 'Starting investigation...';
       startRunProgress();
       $('case-header-chips').innerHTML = `
         <div class="utility-pill readonly"><span>Read-Only</span><strong>Splunk investigation mode</strong></div>
@@ -5556,26 +6439,28 @@ APP_HTML = """<!doctype html>
       bindSplToggleButtons();
       $('model-personas').innerHTML = '';
       $('spl-meta-strip').innerHTML = '';
-      $('spl-analyst-summary').innerHTML = '<div class="brief-body muted">Investigation in progress.</div>';
+      $('spl-analyst-summary').innerHTML = '<div class="brief-body muted">Starting investigation and selecting the bounded path.</div>';
       $('spl-link').style.display = 'none';
       $('copy-spl').style.display = 'none';
       $('spl-query').textContent = '';
       $('spl-results').textContent = '';
-      $('coverage-visibility').innerHTML = '<div class="coverage-row"><div class="coverage-row-title">Coverage</div><div class="coverage-row-copy">Awaiting Splunk evidence.</div></div>';
-      $('pivot-cards').innerHTML = '<div class="brief-body muted">Recommended next pivots will appear after Splunk evidence is returned and reviewed.</div>';
-      $('decision-support-summary').innerHTML = '<div class="support-item"><div class="support-label">Decision support</div><div class="support-value">Pending evidence review.</div></div>';
+      $('coverage-visibility').innerHTML = '<div class="coverage-row"><div class="coverage-row-title">Coverage</div><div class="coverage-row-copy">The page will show whether the delay is in planning, Splunk retrieval, or evidence review.</div></div>';
+      $('pivot-cards').innerHTML = '<div class="brief-body muted">Recommended next steps will appear after Splunk evidence is returned and reviewed.</div>';
+      $('decision-support-summary').innerHTML = '<div class="support-item"><div class="support-label">Current stage</div><div class="support-value">Question intake and guardrails</div></div><div class="support-item"><div class="support-label">Delay source</div><div class="support-value">The system is validating scope before any model or Splunk call runs.</div></div>';
       $('model-decisions').innerHTML = '';
       $('workflow-track').innerHTML = '';
       $('workflow-meta').textContent = '';
-      $('investigation-timeline').innerHTML = '<details class="timeline-phase" open><summary><div class="timeline-phase-main"><div class="timeline-phase-name">Detect</div><div class="timeline-phase-summary">Investigation in progress.</div></div><div class="timeline-phase-status">running</div></summary><div class="timeline-phase-body"><div class="timeline-detail-grid"><div class="timeline-detail"><div class="timeline-detail-title">Key Evidence</div><div class="timeline-detail-copy">Awaiting Splunk evidence.</div></div><div class="timeline-detail"><div class="timeline-detail-title">Relevant Splunk Action</div><div class="timeline-detail-copy">Preparing bounded search execution.</div></div><div class="timeline-detail"><div class="timeline-detail-title">Analyst-Facing Conclusion</div><div class="timeline-detail-copy">Investigation in progress.</div></div></div></div></details>';
+      $('investigation-timeline').innerHTML = '<details class="timeline-phase" open><summary><div class="timeline-phase-main"><div class="timeline-phase-name">Current Stage</div><div class="timeline-phase-summary">Checking request scope and selecting the investigation path.</div></div><div class="timeline-phase-status">running</div></summary><div class="timeline-phase-body"><div class="timeline-detail-grid"><div class="timeline-detail"><div class="timeline-detail-title">What is happening now</div><div class="timeline-detail-copy">Guardrails are validating the question and choosing the allowed path.</div></div><div class="timeline-detail"><div class="timeline-detail-title">Elapsed time</div><div class="timeline-detail-copy">0 second(s)</div></div><div class="timeline-detail"><div class="timeline-detail-title">What you can do</div><div class="timeline-detail-copy">Wait for completion. The page will explain whether any delay is coming from planning, Splunk retrieval, or evidence review.</div></div></div></div></details>';
       $('tdir-card').style.display = 'none';
       $('tdir-case').textContent = '';
       $('journey').textContent = '';
       $('output').textContent = '';
-      $('brief-mitre').innerHTML = '<div class="brief-body muted">Investigation in progress.</div>';
-      $('summary').innerHTML = '<div class="brief-body muted">Investigation in progress.</div>';
+      $('brief-mitre').innerHTML = '<div class="brief-body muted">ATT&CK context will appear after evidence review completes.</div>';
+      $('summary').innerHTML = '<div class="brief-body muted">The system is checking scope, building the bounded SPL path, and then retrieving evidence.</div>';
       $('brief-supported').textContent = 'Running';
       setSplVisibility(false);
+      syncDrawerMirrors();
+      setActiveTrayTab('pivot');
       clearContinuationControls();
       try {
         const payload = {
@@ -5587,10 +6472,12 @@ APP_HTML = """<!doctype html>
           approved_deeper_investigation: Boolean(options.approved_deeper_investigation),
           continuation_state: options.continuation_state || null,
         };
+        runAbortController = new AbortController();
         const resp = await fetch('/api/ask', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
+          signal: runAbortController.signal
         });
         setRunProgress(94, 'Finalizing investigation output...');
         const data = await resp.json();
@@ -5600,6 +6487,7 @@ APP_HTML = """<!doctype html>
           renderWorkflowTimeline(data.result || data || {});
           $('output').textContent = JSON.stringify(data, null, 2);
           renderContinuationControls(data.result || {});
+          runAbortController = null;
           stopRunProgress(false);
         } else {
           lastAskResult = data.result || {};
@@ -5633,12 +6521,23 @@ APP_HTML = """<!doctype html>
           stopRunProgress(true);
         }
       } catch (e) {
-        $('status').innerHTML = '<span class="warn">Request failed</span>';
-        $('journey').textContent = 'Unable to build investigation journey because the request failed before a structured result was returned.';
-        $('output').textContent = String(e);
-        stopRunProgress(false);
+        const aborted = e && e.name === 'AbortError';
+        if (aborted) {
+          $('status').textContent = 'Cancelled in browser. The server may still finish the current request.';
+          $('brief-supported').textContent = 'Cancelled';
+          $('summary').innerHTML = '<div class="brief-body muted">The browser stopped waiting for this run. Retry a narrower question, shorten the time window, or target a more specific platform or data source.</div>';
+          stopRunProgress(false, true);
+        } else {
+          $('status').innerHTML = '<span class="warn">Request failed</span>';
+          $('summary').innerHTML = '<div class="brief-body muted">The run stopped before a final investigation view could be completed. Retry a narrower question, shorten the time window, or target a more specific platform or data source.</div>';
+          $('journey').textContent = 'Unable to build investigation journey because the request failed before a structured result was returned.';
+          $('output').textContent = String(e);
+          stopRunProgress(false);
+        }
       } finally {
+        runAbortController = null;
         runBtn.disabled = false;
+        if (cancelRunBtn) cancelRunBtn.style.display = 'none';
       }
     }
 
@@ -5664,7 +6563,7 @@ APP_HTML = """<!doctype html>
     $('selected-followup-clear').onclick = () => {
       selectedFollowup = null;
       renderSelectedFollowup();
-      $('status').textContent = 'Pivot drawer cleared.';
+      $('status').textContent = 'Follow-up drawer cleared.';
     };
     $('pipeline').addEventListener('change', updatePipelineHelp);
     $('artifact').addEventListener('change', updateArtifactLabel);
@@ -5688,19 +6587,34 @@ APP_HTML = """<!doctype html>
     setSplVisibility(false);
     syncUtilityBarVisibility();
     renderSelectedFollowup();
+    loadSplAssetManifest();
+    syncDrawerMirrors();
+    try {
+      const rememberedTab = sessionStorage.getItem(trayTabStorageKey) || 'pivot';
+      setActiveTrayTab(rememberedTab);
+    } catch (_err) {
+      setActiveTrayTab('pivot');
+    }
     let hintTimer = null;
     $('question').addEventListener('input', () => {
       if (hintTimer) clearTimeout(hintTimer);
       hintTimer = setTimeout(refreshDomainHints, 220);
     });
     refreshDomainHints();
-    $('toggle-json').onclick = () => {
-      const out = $('output');
-      const btn = $('toggle-json');
-      const showing = out.style.display !== 'none';
-      out.style.display = showing ? 'none' : 'block';
-      btn.textContent = showing ? 'Show JSON' : 'Hide JSON';
-    };
+    if (cancelRunBtn) {
+      cancelRunBtn.onclick = () => {
+        if (runAbortController) runAbortController.abort();
+      };
+    }
+    if (drawerJsonToggleBtn) {
+      drawerJsonToggleBtn.onclick = () => {
+        const out = $('output');
+        if (!out) return;
+        const showing = out.style.display !== 'none';
+        out.style.display = showing ? 'none' : 'block';
+        drawerJsonToggleBtn.textContent = showing ? 'Show JSON' : 'Hide JSON';
+      };
+    }
   </script>
 </body>
 </html>
@@ -5735,7 +6649,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       background-size:cover;
       color:var(--fg);
     }}
-    .wrap {{ max-width: 1360px; min-height:calc(100vh - 28px); margin: 14px auto; padding: 0 14px 20px; box-sizing:border-box; }}
+    .wrap {{ max-width: 1740px; min-height:calc(100vh - 48px); margin: 24px auto; padding: 0 28px 32px; box-sizing:border-box; }}
     .topnav {{
       position:relative;
       z-index:220;
@@ -7859,7 +8773,7 @@ def _langgraph_graph_page_body() -> str:
     <section class="lg-hero">
       <div class="lg-kicker">Control Center</div>
       <h1>LangGraph Graph</h1>
-      <p>The canonical graph shows every possible stage in the controller-hosted workflow. The active graph reflects the current topology flags. The latest execution panel shows what actually ran in the newest multi-model artifact, and the experiment table shows the latest offline topology comparison when evals have been run.</p>
+      <p>This page has three layers. <strong>Live runtime</strong> shows what the controller can do right now. <strong>Possible topology</strong> shows the full graph and the currently active graph. <strong>Offline experiments</strong> show how alternative graph settings performed when evals were run.</p>
       <div class="lg-actions">
         <code>make langgraph-gold-build</code>
         <code>make langgraph-eval-prompts</code>
@@ -7877,6 +8791,7 @@ def _langgraph_graph_page_body() -> str:
     </section>
 
     <section class="lg-card">
+      <div class="badge" style="margin-bottom:8px;">Live Runtime</div>
       <h2>Current Topology Flags</h2>
       <p class="muted">These flags determine the active graph layout used by the live controller-hosted LangGraph workflow.</p>
       <div class="lg-flags">{flag_badges}</div>
@@ -7884,12 +8799,14 @@ def _langgraph_graph_page_body() -> str:
 
     <div class="lg-grid">
       <section class="lg-card lg-graph-card">
+        <div class="badge" style="margin-bottom:8px;">Possible Topology</div>
         <h2 title="Canonical Graph shows the full possible workflow, including optional branches that may be disabled or skipped in the active runtime.">Canonical Graph</h2>
         <p class="muted">Full possible graph, including conditional branches that may be bypassed in the active runtime.</p>
         <button class="lg-expand-btn" type="button" data-lg-open="canonical" title="Canonical Graph shows the full possible workflow, including optional branches that may be disabled or skipped in the active runtime.">Expand graph</button>
         <div class="lg-graph-preview">{canonical_mermaid}</div>
       </section>
       <section class="lg-card lg-graph-card">
+        <div class="badge" style="margin-bottom:8px;">Live Topology</div>
         <h2 title="Active Graph shows the workflow after applying current runtime settings and highlights the nodes that ran in the latest execution when available.">Active Graph</h2>
         <p class="muted">Graph after applying the current topology flags. Highlighted nodes ran in the latest multi-model artifact when one exists.</p>
         <button class="lg-expand-btn" type="button" data-lg-open="active" title="Active Graph shows the workflow after applying current runtime settings and highlights the nodes that ran in the latest execution when available.">Expand graph</button>
@@ -7898,6 +8815,7 @@ def _langgraph_graph_page_body() -> str:
     </div>
 
     <section class="lg-card">
+      <div class="badge" style="margin-bottom:8px;">Latest Live Run</div>
       <h2>Latest Executed Path</h2>
       <p class="muted">This comes from the newest multi-model run artifact and shows the actual stage order, timings, and whether peer review was skipped.</p>
       {latest_overlay_html}
@@ -7905,6 +8823,7 @@ def _langgraph_graph_page_body() -> str:
 
     <div class="lg-grid">
       <section class="lg-card">
+        <div class="badge" style="margin-bottom:8px;">Offline Experiments</div>
         <h2>Experiment Topology Ranking</h2>
         <p class="muted">Offline eval results appear here after <code>make langgraph-topology-eval</code> has been run against a gold corpus and prompt set.</p>
         {_experiment_summary_block()}
@@ -8008,32 +8927,116 @@ def _artifacts_page_body() -> str:
 """
     groups = sorted([p for p in ARTIFACTS_ROOT.iterdir() if p.is_dir()], key=lambda x: x.name)
     cards: list[str] = []
+    summary_cards: list[str] = []
+    group_explain = {
+        "audit": "Operator activity and local query audit trail.",
+        "environment": "Data Domains snapshots and environment-profile outputs used to ground SPL.",
+        "learning": "SPL Optimization AI Engine registry, reusable SPL assets, and optimization logs.",
+        "runs": "Investigation runs, evidence traces, and optional runtime outputs.",
+        "knowledge": "Environment-aware SPL guidance and personalization artifacts.",
+    }
+    group_labels = {
+        "audit": "Operator Audit",
+        "environment": "Environment Snapshots",
+        "learning": "Optimization Assets",
+        "runs": "Investigations",
+        "knowledge": "Personalization",
+    }
     for d in groups:
         files = sorted([f for f in d.rglob("*") if f.is_file()], key=lambda x: str(x))
         sample = files[:10]
+        label = group_labels.get(d.name, d.name.replace("_", " ").title())
         sample_items = "".join(
             f"<li><a href=\"/artifacts/raw?path={quote(str(f.relative_to(ARTIFACTS_ROOT)))}\">{html.escape(str(f.relative_to(ARTIFACTS_ROOT)))}</a></li>"
             for f in sample
         )
+        summary_cards.append(
+            "<div class=\"artifact-work-card\">"
+            f"<div class=\"artifact-work-title\">{html.escape(label)}</div>"
+            f"<div class=\"artifact-work-copy\">{html.escape(group_explain.get(d.name, 'Operational artifact group.'))}</div>"
+            f"<div class=\"artifact-work-meta\">{len(files)} file(s)</div>"
+            "</div>"
+        )
         cards.append(
-            "<details class=\"env-card\">"
+            "<details class=\"env-card artifact-card\">"
             "<summary>"
-            f"<span class=\"env-title\">{html.escape(d.name)}</span>"
+            f"<span class=\"env-title\">{html.escape(label)}</span>"
             f"<span class=\"badge\">files={len(files)}</span>"
             "</summary>"
             "<div class=\"env-body\">"
+            f"<p class=\"muted\">{html.escape(group_explain.get(d.name, 'Operational artifact group.'))}</p>"
             f"<ul>{sample_items or '<li class=\"muted\">(empty)</li>'}</ul>"
             "</div>"
             "</details>"
         )
     return (
-        "<div class=\"card\">"
+        "<div class=\"card artifact-shell\">"
+        "<style>"
+        ".artifact-shell{display:grid;gap:16px}"
+        ".artifact-hero{border:1px solid #244660;border-radius:18px;background:linear-gradient(160deg,#08182a,#091726 52%,#0a1d17);padding:18px}"
+        ".artifact-hero h1{margin:0 0 8px;font-size:28px;line-height:1.05}"
+        ".artifact-hero p{margin:0;color:#a8c0d8;font-size:14px;line-height:1.6}"
+        ".artifact-work-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}"
+        ".artifact-work-card{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px}"
+        ".artifact-work-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px}"
+        ".artifact-work-copy{color:#dbeafe;font-size:13px;line-height:1.5}"
+        ".artifact-work-meta{margin-top:8px;color:#9fb4cc;font-size:12px}"
+        ".artifact-section{border:1px solid #23445f;border-radius:18px;background:linear-gradient(180deg,#081525,#06111d);padding:18px}"
+        ".artifact-card ul{margin:10px 0 0;padding-left:18px}"
+        ".artifact-card li{margin:6px 0;color:#dbeafe}"
+        ".artifact-card a{color:#93c5fd;text-decoration:none}"
+        ".artifact-card a:hover{text-decoration:underline}"
+        "@media (max-width:980px){.artifact-work-grid{grid-template-columns:1fr 1fr}}"
+        "@media (max-width:640px){.artifact-work-grid{grid-template-columns:1fr}}"
+        "</style>"
+        "<div class=\"artifact-hero\">"
         "<h1>Artifact Repository</h1>"
-        "<p class=\"muted\">Operational run outputs are stored under artifacts/ and separated from documentation pages.</p>"
-        f"<p><code>{html.escape(str(ARTIFACTS_ROOT.relative_to(PROJECT_ROOT)))}</code></p>"
+        "<p>Use this page to answer one question quickly: what has the platform actually produced? Investigations, optimization assets, operator audit, and environment snapshots are grouped here by workflow instead of by raw filesystem structure.</p>"
+        f"<div class=\"learning-notes\" style=\"margin-top:10px;\"><div>Artifact root: <code>{html.escape(str(ARTIFACTS_ROOT.relative_to(PROJECT_ROOT)))}</code></div></div>"
+        "</div>"
+        "<section class=\"artifact-section\">"
+        "<h2 style=\"margin:0 0 12px;font-size:18px;\">Workflow Buckets</h2>"
+        f"<div class=\"artifact-work-grid\">{''.join(summary_cards) if summary_cards else '<div class=\"muted\">No artifact groups found.</div>'}</div>"
+        "</section>"
+        "<section class=\"artifact-section\">"
+        "<h2 style=\"margin:0 0 12px;font-size:18px;\">Browse Stored Files</h2>"
+        "<p class=\"muted\">Open a workflow bucket below to inspect the files it currently contains.</p>"
         f"<div class=\"env-list\">{''.join(cards) if cards else '<p class=\"muted\">No artifact groups found.</p>'}</div>"
+        "</section>"
         "</div>"
     )
+
+
+def _active_spl_asset_matches_for_intent(intent: str) -> list[dict[str, Any]]:
+    value = str(intent or "").strip().lower()
+    if not value:
+        return []
+
+    family_map: dict[str, set[str]] = {
+        "failed_login_activity": {"failed_login_activity", "linux_auth_failures", "windows_auth_failures"},
+        "linux_auth_failures": {"failed_login_activity", "linux_auth_failures"},
+        "windows_auth_failures": {"failed_login_activity", "windows_auth_failures"},
+        "apache_access_top_ips": {"apache_access_top_ips", "apache_web"},
+        "aws_cloudtrail_activity": {"aws_cloudtrail_activity", "cloudtrail", "aws_discovery"},
+    }
+    acceptable = family_map.get(value, {value})
+    try:
+        summary = learning_registry_summary()
+        repository = summary.get("repository", {}) if isinstance(summary, dict) else {}
+        rows = repository.get("records", []) if isinstance(repository, dict) else []
+        if not isinstance(rows, list):
+            return []
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_intent = str(row.get("intent", "")).strip().lower()
+            match_tokens = {str(item).strip().lower() for item in row.get("match_tokens", []) if str(item).strip()}
+            if row_intent in acceptable or acceptable.intersection(match_tokens):
+                matches.append(row)
+        return matches[:3]
+    except Exception:
+        return []
 
 
 def _environment_page_body() -> str:
@@ -8073,6 +9076,15 @@ def _environment_page_body() -> str:
         else {}
     )
     field_meta = profile.get("field_inventory_meta", {}) if isinstance(profile.get("field_inventory_meta"), dict) else {}
+
+    def _friendly_sourcetype_label(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "not recorded"
+        if "too_small" in text:
+            base = text.replace("_too_small", "").replace("-too_small", "")
+            return f"{base} (small sample placeholder)"
+        return text
 
     def _render_index_cards(rows_payload: list[dict[str, Any]]) -> str:
         cards: list[str] = []
@@ -8202,8 +9214,25 @@ def _environment_page_body() -> str:
     profile_json = html.escape(json.dumps(profile, indent=2))
     return f"""
 <div class=\"card\">
+  <style>
+    .env-summary-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0;}}
+    .env-summary-card{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px;}}
+    .env-summary-title{{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px;}}
+    .env-summary-value{{font-size:18px;font-weight:900;color:#f8fafc;}}
+    .env-summary-copy{{margin-top:4px;color:#9fb4cc;font-size:12px;line-height:1.45;}}
+    .env-work-panel{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px;margin:12px 0;}}
+    @media (max-width:900px){{.env-summary-grid{{grid-template-columns:1fr 1fr;}}}}
+    @media (max-width:620px){{.env-summary-grid{{grid-template-columns:1fr;}}}}
+  </style>
   <h1>Data Domains</h1>
-  <p class=\"muted\">Environment-aware index, sourcetype, and known-field map used by query planning, validation, and SPL RAG constraints.</p>
+  <p class=\"muted\">Use this page to understand what telemetry is available for hunting in this environment: which indexes exist, which sourcetypes are present, and which fields have enough signal to support grounded SPL.</p>
+  <div class=\"env-summary-grid\">
+    <div class=\"env-summary-card\"><div class=\"env-summary-title\">Current Coverage</div><div class=\"env-summary-value\">{html.escape(str(index_count))}</div><div class=\"env-summary-copy\">Indexes currently represented in the environment profile.</div></div>
+    <div class=\"env-summary-card\"><div class=\"env-summary-title\">Source Variety</div><div class=\"env-summary-value\">{html.escape(str(sourcetype_count))}</div><div class=\"env-summary-copy\">Sourcetypes available for planning and grounding.</div></div>
+    <div class=\"env-summary-card\"><div class=\"env-summary-title\">Field Fit</div><div class=\"env-summary-value\">{html.escape(str(counts.get('field_inventory_sourcetypes', 0)))}</div><div class=\"env-summary-copy\">Sourcetypes with field inventory captured for higher-confidence SPL.</div></div>
+    <div class=\"env-summary-card\"><div class=\"env-summary-title\">Time Window</div><div class=\"env-summary-value\">{html.escape(earliest)}</div><div class=\"env-summary-copy\">Profile window ending at {html.escape(latest)}.</div></div>
+  </div>
+  <div class=\"env-work-panel\"><strong>How to use this page:</strong> Start here when you want to know whether the environment actually has the telemetry needed for a hunt. The detailed index and sourcetype cards below are the proof surface. Most users can ignore maintenance internals unless a refresh is still catching up.</div>
   <div class=\"statline\">
     <span class=\"badge\">indexes={html.escape(str(index_count))}</span>
     <span class=\"badge\">sourcetypes={html.escape(str(sourcetype_count))}</span>
@@ -8211,7 +9240,13 @@ def _environment_page_body() -> str:
     <span class=\"badge\">window={html.escape(earliest)} -> {html.escape(latest)}</span>
     <span class=\"badge\">timestamp={html.escape(timestamp)}</span>
   </div>
-  <p class=\"muted\">Initial setup refreshes all missing sourcetypes in one run. After field inventory is established, maintenance refreshes incrementally to keep resource usage bounded. Last refreshed: <code>{html.escape(str(field_meta.get('last_refreshed_sourcetype', '')))}</code>. Next queued: <code>{html.escape(str(field_meta.get('next_sourcetype', '')))}</code>.</p>
+  <p class=\"muted\">The cards below show the hunt coverage the platform currently knows about. Maintenance refreshes happen in the background to keep the profile current; most operators only need the two status lines below if they are checking whether a refresh is still catching up.</p>
+  <div class=\"env-card\" style=\"margin-bottom:12px;\">
+    <div class=\"env-body\">
+      <p class=\"muted\" style=\"margin:0 0 6px;\"><strong>Most recently refreshed:</strong> <code>{html.escape(_friendly_sourcetype_label(field_meta.get('last_refreshed_sourcetype', '')))}</code></p>
+      <p class=\"muted\" style=\"margin:0;\"><strong>Queued next:</strong> <code>{html.escape(_friendly_sourcetype_label(field_meta.get('next_sourcetype', '')))}</code></p>
+    </div>
+  </div>
   <p>Maintenance commands:</p>
   <pre>make env-profile-refresh
 make env-profile-check</pre>
@@ -8509,9 +9544,40 @@ def _configure_page_body() -> str:
   </div>
   <div class="cfg-stack">
     <div class="cfg-step" open>
+      <div class="cfg-step-body" style="margin-top:0;">
+        <div class="cfg-panel">
+          <h2>Current State</h2>
+          <p class="cfg-help">Use this section first. It answers four operator questions: is the runtime reachable, are the model roles assigned, has Data Domains started, and what should I do next?</p>
+          <div class="cfg-compare">
+            <div class="cfg-compare-card">
+              <h4>Live Endpoint Health</h4>
+              <div class="cfg-compare-list">
+                <div class="cfg-compare-item">Ollama, Splunk Base, Splunk MCP, and Data Domains health appear in the status board above.</div>
+                <div class="cfg-compare-item warn">If any card above is amber or red, validate the runtime before editing deeper settings.</div>
+              </div>
+            </div>
+            <div class="cfg-compare-card">
+              <h4>Current Role Map</h4>
+              <div class="cfg-compare-list">
+                <div class="cfg-compare-item">Planner, SPL Writer, reviewers, and summary roles are assigned in Step 3.</div>
+                <div class="cfg-compare-item">Use this page to confirm that each live role points at the model you actually intend to use.</div>
+              </div>
+            </div>
+            <div class="cfg-compare-card">
+              <h4>Next Action</h4>
+              <div class="cfg-compare-list">
+                <div class="cfg-compare-item ok">New host: open Step 1, then validate runtime endpoints in Step 2.</div>
+                <div class="cfg-compare-item">Healthy host: refresh Data Domains in Step 5, then open SPL Optimization after you have real investigations.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cfg-step" open>
       <div class="cfg-step-label">
         <span class="cfg-step-num">1</span>
-        <div class="cfg-step-title">Open Initial Setup Guide</div>
+        <div class="cfg-step-title">First-Time Setup</div>
       </div>
       <div class="cfg-step-body">
         <p class="cfg-help">Use the setup guide first on a new machine. It is now Docker-first and is meant to get a fresh deployment online with the fewest possible steps.</p>
@@ -8530,7 +9596,7 @@ def _configure_page_body() -> str:
       <summary>
         <div class="cfg-step-label">
           <span class="cfg-step-num">2</span>
-          <div class="cfg-step-title">Runtime Endpoints</div>
+          <div class="cfg-step-title">Live Runtime Controls</div>
         </div>
         <span class="cfg-step-toggle"></span>
       </summary>
@@ -8586,7 +9652,7 @@ def _configure_page_body() -> str:
       <summary>
         <div class="cfg-step-label">
           <span class="cfg-step-num">3</span>
-          <div class="cfg-step-title">Expected Models and Commands</div>
+          <div class="cfg-step-title">Model Role Map</div>
         </div>
         <span class="cfg-step-toggle"></span>
       </summary>
@@ -8631,7 +9697,7 @@ def _configure_page_body() -> str:
       <summary>
         <div class="cfg-step-label">
           <span class="cfg-step-num">4</span>
-          <div class="cfg-step-title">Optional Edge Helper</div>
+          <div class="cfg-step-title">Optional Edge Routing</div>
         </div>
         <span class="cfg-step-toggle"></span>
       </summary>
@@ -8677,7 +9743,7 @@ def _configure_page_body() -> str:
       <summary>
         <div class="cfg-step-label">
           <span class="cfg-step-num">5</span>
-          <div class="cfg-step-title">Personalize SPL With Environmental Awareness</div>
+          <div class="cfg-step-title">Environment Grounding</div>
         </div>
         <span class="cfg-step-toggle"></span>
       </summary>
@@ -8751,16 +9817,16 @@ def _configure_page_body() -> str:
       <summary>
         <div class="cfg-step-label">
           <span class="cfg-step-num">6</span>
-          <div class="cfg-step-title">Guarded Local Learning</div>
+          <div class="cfg-step-title">Optimization And Review</div>
         </div>
         <span class="cfg-step-toggle"></span>
       </summary>
       <div class="cfg-step-body">
       <div class="cfg-panel" style="padding:0;border:0;background:transparent;box-shadow:none;">
-        <p class="cfg-help">Guarded Local Learning now has its own Control Center page so you can review pending suggestions, approve or reject them, and keep the local-learning history separate from endpoint setup.</p>
-        <div class="cfg-note">Design rule: shipped logic stays deterministic; local learning stays airgapped, typed, reviewable, and reversible.</div>
+        <p class="cfg-help">The SPL Optimization AI Engine now has its own Control Center page so you can review proposed SPL assets, approve or reject them, and keep optimization history separate from endpoint setup.</p>
+        <div class="cfg-note">Design rule: shipped logic stays deterministic; SPL optimization stays local, reviewable, benchmarked, and reversible.</div>
         <div class="cfg-actions" style="margin-top:12px;">
-          <a class="btn-secondary" href="/learning" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center;">Open Local Learning</a>
+          <a class="btn-secondary" href="/learning" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center;">Open SPL Optimization</a>
           <span class="cfg-status">Use this after Data Domains exist and you have some real investigations to learn from.</span>
         </div>
       </div>
@@ -9500,7 +10566,10 @@ def _users_page_body() -> str:
     .users-hero{border:1px solid #244660;border-radius:18px;background:linear-gradient(160deg,#08182a,#091726 52%,#0a1d17);padding:18px;}
     .users-hero h1{margin:0 0 8px;font-size:28px;line-height:1.05;}
     .users-hero p{margin:0;color:#a8c0d8;font-size:14px;line-height:1.65;}
-    .users-grid{display:grid;grid-template-columns:minmax(340px,.95fr) minmax(420px,1.05fr);gap:16px;}
+    .users-tabs{display:flex;gap:10px;flex-wrap:wrap;}
+    .users-tab{appearance:none;border:1px solid #315a79;border-radius:14px;padding:10px 14px;background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;font-weight:800;cursor:pointer;font-size:13px;}
+    .users-tab.active{background:linear-gradient(135deg,#22c55e,#16a34a);color:#03230f;border-color:#22c55e;}
+    .users-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;}
     .users-panel{border:1px solid #23445f;border-radius:18px;background:linear-gradient(180deg,#081525,#06111d);padding:18px;}
     .users-panel h2{margin:0 0 10px;font-size:18px;}
     .users-help{margin:0 0 12px;color:#9fb4cc;font-size:13px;line-height:1.55;}
@@ -9524,16 +10593,22 @@ def _users_page_body() -> str:
     .users-item-btn{appearance:none;border:1px solid #315a79;border-radius:10px;padding:8px 10px;background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;font-weight:800;cursor:pointer;font-size:12px;letter-spacing:.02em;}
     .users-item-btn:hover{border-color:#60a5fa;transform:translateY(-1px);}
     .users-item-btn.danger{border-color:#6b2a2a;background:linear-gradient(180deg,#3f1518,#271013);color:#fecaca;}
-    @media (max-width: 980px){.users-grid,.users-form-grid{grid-template-columns:1fr;}}
+    .users-section{display:none;}
+    .users-section.active{display:block;}
+    @media (max-width: 980px){.users-form-grid{grid-template-columns:1fr;}}
   </style>
   <div class="users-shell">
     <div class="users-hero">
       <h1>Users and Audit</h1>
-      <p>Manage local Smith Console users and review which operator launched which investigation. First-run setup creates the initial admin user. New or updated passwords are stored as salted hashes.</p>
+      <p>These are two separate operator tasks. Use <strong>Local Users</strong> to manage access to this console. Use <strong>Operator Audit</strong> to review who launched which investigation and inspect the exact question and query trail.</p>
+    </div>
+    <div class="users-tabs">
+      <button id="users-tab-manage" class="users-tab active" type="button">Local Users</button>
+      <button id="users-tab-audit" class="users-tab" type="button">Operator Audit</button>
     </div>
     <div class="users-grid">
-      <section class="users-panel">
-        <h2>User Management</h2>
+      <section id="users-section-manage" class="users-panel users-section active">
+        <h2>Local Users</h2>
         <p class="users-help">This is local runtime user management for the web UI. It is intentionally simple and does not replace enterprise IAM.</p>
         <div id="users-list" class="users-list"><div class="users-item"><div class="users-item-meta">Loading users...</div></div></div>
         <div class="users-panel" style="margin-top:14px;padding:14px;background:#07121f;">
@@ -9551,9 +10626,9 @@ def _users_page_body() -> str:
           </div>
         </div>
       </section>
-      <section class="users-panel">
-        <h2>Recent Query Audit</h2>
-        <p class="users-help">Recent investigations launched from the authenticated web UI. This is the local operator audit trail for `/api/ask` runs. Admin role required.</p>
+      <section id="users-section-audit" class="users-panel users-section">
+        <h2>Operator Audit</h2>
+        <p class="users-help">Review which operator launched which investigation, what question they asked, and the exact query path when you need provenance. Expand an entry to inspect the full query detail.</p>
         <div id="users-audit-path" class="users-help" style="margin-bottom:12px;">Loading audit log path...</div>
         <div id="users-audit-list" class="users-list"><div class="users-item"><div class="users-item-meta">No audit entries yet.</div></div></div>
       </section>
@@ -9562,6 +10637,13 @@ def _users_page_body() -> str:
   <script>
     const users$ = (id) => document.getElementById(id);
     function usersEscape(v){ return String(v ?? ''); }
+    function usersShowSection(name){
+      const showManage = name !== 'audit';
+      users$('users-section-manage').classList.toggle('active', showManage);
+      users$('users-section-audit').classList.toggle('active', !showManage);
+      users$('users-tab-manage').classList.toggle('active', showManage);
+      users$('users-tab-audit').classList.toggle('active', !showManage);
+    }
     function renderUsers(rows){
       const items = Array.isArray(rows) ? rows : [];
       users$('users-list').innerHTML = items.length ? items.map((user) => `
@@ -9580,17 +10662,52 @@ def _users_page_body() -> str:
     }
     function renderAudit(audit){
       const recent = Array.isArray(audit?.recent) ? audit.recent : [];
+      const now = Date.now();
+      const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+      const recentWindow = recent.filter((item) => {
+        const ts = Number(item?.ts_epoch || 0) * 1000;
+        return ts > 0 && (now - ts) <= sevenDaysMs;
+      });
+      const grouped = new Map();
+      for (const item of recentWindow) {
+        const ts = Number(item?.ts_epoch || 0) * 1000;
+        const dt = new Date(ts);
+        const dayKey = Number.isNaN(dt.getTime()) ? 'Unknown day' : dt.toISOString().slice(0, 10);
+        if (!grouped.has(dayKey)) grouped.set(dayKey, []);
+        grouped.get(dayKey).push(item);
+      }
+      const orderedDays = Array.from(grouped.keys()).sort((a, b) => a < b ? 1 : -1);
+      const currentDay = orderedDays[0] || '';
+      const fmtStamp = (epoch) => {
+        const dt = new Date(Number(epoch || 0) * 1000);
+        if (Number.isNaN(dt.getTime())) return 'Unknown time';
+        return dt.toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+      };
       users$('users-audit-path').textContent = `Audit log: ${String(audit?.path || 'artifacts/audit/query_runs.jsonl')}`;
-      users$('users-audit-list').innerHTML = recent.length ? recent.map((item) => `
-        <div class="users-item">
-          <div class="users-item-head">
-            <div class="users-item-name">${usersEscape(item.username || 'unknown')} -> ${usersEscape(item.selected_tool || 'n/a')}</div>
-            <span class="users-badge">rows=${usersEscape(item.rows_returned ?? 'n/a')}</span>
-          </div>
-          <div class="users-item-meta">${usersEscape(item.question || '')}</div>
-          <div class="users-item-meta">${usersEscape(`pipeline=${item.pipeline || 'n/a'} | intent=${item.intent || 'n/a'}${item.query ? `\nquery=${item.query}` : ''}`)}</div>
-        </div>
-      `).join('') : '<div class="users-item"><div class="users-item-meta">No audit entries captured yet.</div></div>';
+      users$('users-audit-list').innerHTML = orderedDays.length ? orderedDays.map((day) => {
+        const entries = grouped.get(day) || [];
+        const isOpen = day === currentDay ? ' open' : '';
+        const dayLabel = day === currentDay ? `Today · ${day}` : day;
+        return `
+          <details class="users-item"${isOpen}>
+            <summary class="users-item-head" style="cursor:pointer;list-style:none;">
+              <div class="users-item-name">${usersEscape(dayLabel)}</div>
+              <span class="users-badge">entries=${usersEscape(entries.length)}</span>
+            </summary>
+            ${entries.map((item) => `
+              <details class="users-item" style="margin-top:10px;background:#07121f;">
+                <summary class="users-item-head" style="cursor:pointer;list-style:none;">
+                  <div class="users-item-name">${usersEscape(item.username || 'unknown')} -> ${usersEscape(item.selected_tool || 'n/a')}</div>
+                  <span class="users-badge">${usersEscape(fmtStamp(item.ts_epoch))}</span>
+                </summary>
+                <div class="users-item-meta"><strong>Question:</strong> ${usersEscape(item.question || '')}</div>
+                <div class="users-item-meta">${usersEscape(`pipeline=${item.pipeline || 'n/a'} | intent=${item.intent || 'n/a'} | rows=${item.rows_returned ?? 'n/a'}`)}</div>
+                ${item.query ? `<div class="users-item-meta"><strong>Exact query:</strong>\n${usersEscape(item.query)}</div>` : ''}
+              </details>
+            `).join('')}
+          </details>
+        `;
+      }).join('') : '<div class="users-item"><div class="users-item-meta">No audit entries captured in the last 7 days.</div></div>';
     }
     async function loadUsersPage(){
       const resp = await fetch('/api/config/users');
@@ -9685,6 +10802,8 @@ def _users_page_body() -> str:
       if(!button){ return; }
       directUserAction(String(button.dataset.action || ''), String(button.dataset.username || ''));
     });
+    users$('users-tab-manage').onclick = () => usersShowSection('manage');
+    users$('users-tab-audit').onclick = () => usersShowSection('audit');
     users$('users-create').onclick = () => submitUserAction('create');
     users$('users-update').onclick = () => submitUserAction('update');
     users$('users-delete').onclick = () => submitUserAction('delete');
@@ -9698,14 +10817,14 @@ def _learning_page_body() -> str:
     return """
 <div class="card">
   <style>
-    .learning-shell{display:grid;gap:16px;}
-    .learning-hero{border:1px solid #244660;border-radius:18px;background:linear-gradient(160deg,#08182a,#091726 52%,#0a1d17);padding:18px;}
-    .learning-hero h1{margin:0 0 8px;font-size:28px;line-height:1.05;}
-    .learning-hero p{margin:0;color:#a8c0d8;font-size:14px;line-height:1.65;}
-    .learning-grid{display:grid;grid-template-columns:minmax(340px,.9fr) minmax(420px,1.1fr);gap:16px;}
+    .learning-shell{display:grid;gap:16px;padding-bottom:92px;}
+    .learning-hero{border:1px solid #244660;border-radius:18px;background:linear-gradient(160deg,#08182a,#091726 52%,#0a1d17);padding:16px;}
+    .learning-hero h1{margin:0 0 6px;font-size:28px;line-height:1.05;}
+    .learning-hero p{margin:0;color:#a8c0d8;font-size:13px;line-height:1.6;}
+    .learning-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;align-items:start;}
     .learning-panel{border:1px solid #23445f;border-radius:18px;background:linear-gradient(180deg,#081525,#06111d);padding:18px;}
     .learning-panel h2{margin:0 0 10px;font-size:18px;}
-    .learning-help{margin:0 0 12px;color:#9fb4cc;font-size:13px;line-height:1.55;}
+    .learning-help{margin:0 0 10px;color:#9fb4cc;font-size:13px;line-height:1.55;}
     .learning-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;}
     .learning-actions button,.learning-actions a{appearance:none;border:0;border-radius:14px;padding:12px 16px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#03230f;font-weight:900;cursor:pointer;font-size:14px;text-decoration:none;}
     .learning-actions .btn-secondary{background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;border:1px solid #315a79;}
@@ -9717,16 +10836,41 @@ def _learning_page_body() -> str:
     .learning-why-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:8px;}
     .learning-why-list{display:grid;gap:8px;color:#dbeafe;font-size:13px;line-height:1.5;}
     .learning-why-list strong{color:#f8fafc;}
+    .learning-topline{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:12px;}
+    .learning-topline-copy{color:#9fb4cc;font-size:12px;line-height:1.45;}
+    .learning-simple{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px;}
+    .learning-simple-card{border:1px solid #26435c;border-radius:14px;background:#071523;padding:12px 14px;}
+    .learning-simple-label{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px;}
+    .learning-simple-value{color:#f8fafc;font-size:16px;font-weight:900;}
+    .learning-simple-copy{margin-top:4px;color:#9fb4cc;font-size:12px;line-height:1.45;}
+    .learning-main-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(280px,.8fr);gap:14px;align-items:start;}
+    .learning-main-stack{display:grid;gap:14px;}
+    .learning-side-stack{display:grid;gap:14px;}
+    .learning-mini{border:1px solid #26435c;border-radius:14px;background:#071523;padding:12px 14px;}
+    .learning-mini-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px;}
+    .learning-mini-copy{color:#dbeafe;font-size:13px;line-height:1.5;}
+    .learning-mini-copy strong{color:#f8fafc;}
     .learning-impact{margin-top:14px;border:1px solid #26435c;border-radius:14px;background:#071523;padding:12px 14px;}
     .learning-impact-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:8px;}
-    .learning-impact-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;}
+    .learning-impact-summary{border:1px solid #27415a;border-radius:12px;background:#081729;padding:12px 14px;color:#d6e5f3;font-size:13px;line-height:1.6;}
+    .learning-impact-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px;}
     .learning-impact-card{border:1px solid #27415a;border-radius:12px;background:#081729;padding:10px;}
     .learning-impact-label{font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#8fb4cf;margin-bottom:6px;}
-    .learning-impact-value{font-size:20px;font-weight:900;color:#f8fafc;}
+    .learning-impact-value{font-size:18px;font-weight:900;color:#f8fafc;}
     .learning-impact-copy{margin-top:8px;color:#9fb4cc;font-size:12px;line-height:1.5;}
     .learning-impact-history{margin-top:8px;color:#9fb4cc;font-size:12px;line-height:1.5;}
     .learning-impact-warning{margin-top:8px;color:#fecaca;font-size:12px;line-height:1.5;}
     .learning-impact-meta{margin-top:8px;color:#9fb4cc;font-size:12px;line-height:1.5;}
+    .learning-impact-details{margin-top:10px;}
+    .learning-change{margin-top:12px;border:1px solid #26435c;border-radius:14px;background:#071523;padding:12px 14px;}
+    .learning-change-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:8px;}
+    .learning-change-copy{color:#d6e5f3;font-size:13px;line-height:1.55;}
+    .learning-repo{margin-top:14px;border:1px solid #26435c;border-radius:14px;background:#071523;padding:12px 14px;}
+    .learning-repo-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:8px;}
+    .learning-repo-copy{color:#9fb4cc;font-size:12px;line-height:1.5;margin-bottom:8px;}
+    .learning-repo-list{display:grid;gap:8px;}
+    .learning-repo-item{border:1px solid #27415a;border-radius:12px;background:#081729;padding:10px;}
+    .learning-repo-item strong{color:#f8fafc;}
     .learning-list{display:grid;gap:10px;}
     .learning-item{border:1px solid #27415a;border-radius:12px;background:#081729;padding:12px;}
     .learning-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;}
@@ -9747,77 +10891,188 @@ def _learning_page_body() -> str:
     .learning-progress-bar{width:0%;height:100%;border-radius:999px;background:linear-gradient(90deg,#22c55e,#10b981);transition:width .2s ease;}
     .learning-progress-log{margin-top:8px;max-height:200px;overflow:auto;white-space:pre-wrap;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;line-height:1.45;color:#dbeafe;background:#030b17;border:1px solid #26435c;border-radius:10px;padding:10px;}
     .learning-progress-wrap.is-idle .learning-progress-log{display:none;}
-    @media (max-width: 980px){.learning-grid{grid-template-columns:1fr;}.learning-impact-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
+    .learning-drawer{position:fixed;left:24px;right:24px;bottom:0;z-index:8;border:1px solid #27415a;border-bottom:0;border-radius:18px 18px 0 0;background:linear-gradient(180deg,rgba(8,21,37,.98),rgba(6,17,29,.98));box-shadow:0 -18px 36px rgba(2,6,23,.38);overflow:hidden;}
+    .learning-drawer summary{list-style:none;cursor:pointer;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 14px;}
+    .learning-drawer summary::-webkit-details-marker{display:none;}
+    .learning-drawer-head{display:flex;align-items:center;gap:8px;min-width:0;}
+    .learning-drawer-title{font-weight:800;color:#f8fafc;}
+    .learning-drawer-copy{color:#9fb4cc;font-size:12px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .learning-drawer-controls{display:flex;align-items:center;gap:8px;min-width:0;overflow-x:auto;scrollbar-width:none;}
+    .learning-drawer-controls::-webkit-scrollbar{display:none;}
+    .learning-drawer-chip{display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;border:1px solid #315a79;background:#0b2030;color:#dbeafe;font-size:11px;font-weight:800;white-space:nowrap;}
+    .learning-drawer-toggle{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:999px;border:1px solid #315a79;background:#0a2034;color:#dbeafe;font-size:12px;font-weight:900;transition:transform .18s ease;}
+    .learning-drawer[open] .learning-drawer-toggle{transform:rotate(180deg);}
+    .learning-drawer-body{display:grid;gap:14px;padding:0 14px 14px;}
+    .learning-drawer-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start;}
+    @media (max-width: 980px){.learning-impact-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.learning-simple,.learning-main-grid,.learning-drawer-grid{grid-template-columns:1fr;}.learning-drawer{left:12px;right:12px;}}
   </style>
   <div class="learning-shell">
-    <div class="learning-hero">
-      <h1>Guarded Local Learning</h1>
-      <p>This page proposes small, local-only improvements to how A.G.E.N.T. Smith searches Splunk in <em>this</em> environment. It looks at your Data Domains profile and recent investigations, suggests reusable hints, and waits for an operator to approve them before they affect future planning or review.</p>
+<div class="learning-hero">
+      <h1>SPL Optimization AI Engine</h1>
+      <p>Use this to find better reusable SPL for this environment. The engine drafts candidate patterns, tests them, stores what it found, and only lets approved assets influence future SPL writing.</p>
+      <div class="learning-topline">
+        <div class="learning-topline-copy">Start with <strong>What Changed This Run</strong>. Open the bottom drawer for repository detail, review queue, run trace, and score proof.</div>
+        <div id="learning-summary" class="learning-badges"></div>
+      </div>
     </div>
     <div class="learning-grid">
       <section class="learning-panel">
-        <h2>What This Does</h2>
-        <p class="learning-help"><strong>Run Self Learn</strong> inspects the local Data Domains profile and recent successful investigations, then proposes small environment-specific hints such as better fields, sources, or follow-up pivots. It does <strong>not</strong> rewrite code, open write access, change Splunk permissions, or bypass deterministic validation.</p>
-        <div id="learning-summary" class="learning-badges"></div>
-        <div class="learning-actions">
-          <button id="learning-run">Run Self Learn</button>
-          <a class="btn-secondary" href="/configure">Back to Configuration</a>
-          <span id="learning-status" class="learning-status">Not started.</span>
-        </div>
-        <div class="learning-why">
-          <div class="learning-why-title">Why This Helps</div>
-          <div class="learning-why-list">
-            <div><strong>Better local grounding:</strong> A.G.E.N.T. Smith can remember which fields, indexes, and sourcetypes are actually useful in this install.</div>
-            <div><strong>Less repeated trial-and-error:</strong> Approved hints reduce the need to rediscover the same local Splunk details every run.</div>
-            <div><strong>Still reviewable:</strong> Nothing becomes active until a human approves it, and all suggestions stay local to this deployment.</div>
+        <div class="learning-main-grid">
+          <div class="learning-main-stack">
+            <div>
+              <h2>Run The Engine</h2>
+              <p class="learning-help"><strong>Run Optimization Cycle</strong> uses multiple AI roles to draft candidate SPL assets, test them, and keep only what improves future SPL writing for this environment.</p>
+              <div class="learning-actions">
+                <button id="learning-run">Run Optimization Cycle</button>
+                <a class="btn-secondary" href="/configure">Back to Configuration</a>
+                <span id="learning-status" class="learning-status">Not started.</span>
+              </div>
+            </div>
+            <div class="learning-change">
+              <div class="learning-change-title">What Changed This Run</div>
+              <div id="learning-change-copy" class="learning-change-copy">Run the engine to see whether it found a better reusable SPL asset, kept anything for review, or confirmed that the current baseline is already strong enough.</div>
+            </div>
+          </div>
+          <div class="learning-side-stack">
+            <div class="learning-mini">
+              <div class="learning-mini-title">What This Is For</div>
+              <div class="learning-mini-copy">Improve future SPL writing for <strong>this environment</strong> by creating reusable SPL assets and only activating the ones an operator approves.</div>
+            </div>
+            <div class="learning-mini">
+              <div class="learning-mini-title">What A Run Does</div>
+              <div class="learning-mini-copy">Drafts SPL assets, tests them, records what it found, and separates <strong>recorded drafts</strong> from <strong>approved active assets</strong>.</div>
+            </div>
           </div>
         </div>
-        <div class="learning-impact">
-          <div class="learning-impact-title">Measured Improvement</div>
-          <div id="learning-impact-grid" class="learning-impact-grid">
-            <div class="learning-impact-card"><div class="learning-impact-label">Baseline Score</div><div id="learning-impact-baseline" class="learning-impact-value">--</div></div>
-            <div class="learning-impact-card"><div class="learning-impact-label">Latest Score</div><div id="learning-impact-latest" class="learning-impact-value">--</div></div>
-            <div class="learning-impact-card"><div class="learning-impact-label">Delta</div><div id="learning-impact-delta" class="learning-impact-value">--</div></div>
-            <div class="learning-impact-card"><div class="learning-impact-label">Hints Kept</div><div id="learning-impact-kept" class="learning-impact-value">0</div></div>
-            <div class="learning-impact-card"><div class="learning-impact-label">Best Score</div><div id="learning-impact-best" class="learning-impact-value">--</div></div>
+        <div class="learning-simple">
+          <div class="learning-simple-card">
+            <div class="learning-simple-label">Approved Active</div>
+            <div id="learning-state-simple" class="learning-simple-value">0</div>
+            <div class="learning-simple-copy">Assets influencing future SPL writing.</div>
           </div>
-          <div id="learning-impact-copy" class="learning-impact-copy">No baseline comparison has been recorded yet.</div>
-          <div id="learning-impact-meta" class="learning-impact-meta">Active learned state will appear here after the first benchmarked run.</div>
-          <div id="learning-impact-history" class="learning-impact-history">Run history will appear here after the first completed benchmarked learning run.</div>
-          <div id="learning-impact-warning" class="learning-impact-warning" style="display:none;"></div>
-        </div>
-        <div class="learning-progress-wrap">
-          <div class="learning-progress-head">
-            <span id="learning-phase">phase=idle</span>
-            <span id="learning-pct" class="learning-badge">0%</span>
+          <div class="learning-simple-card">
+            <div class="learning-simple-label">Recorded Assets</div>
+            <div id="learning-recorded-simple" class="learning-simple-value">0</div>
+            <div class="learning-simple-copy">Draft SPL assets captured by the engine.</div>
           </div>
-          <div class="learning-progress-track"><div id="learning-bar" class="learning-progress-bar"></div></div>
-          <pre id="learning-log" class="learning-progress-log">No learning output yet.</pre>
+          <div class="learning-simple-card">
+            <div class="learning-simple-label">Pending Review</div>
+            <div id="learning-pending-simple" class="learning-simple-value">0</div>
+            <div class="learning-simple-copy">Waiting for operator approval.</div>
+          </div>
+          <div class="learning-simple-card">
+            <div class="learning-simple-label">Repository</div>
+            <div id="learning-drawer-repo-state" class="learning-simple-value">Empty</div>
+            <div class="learning-simple-copy">Open the drawer for assets, proof, and run trace.</div>
+          </div>
         </div>
         <div class="learning-notes" style="margin-top:12px;">
-          <div id="learning-detail">Loading local learning registry...</div>
-          <div id="learning-path">Registry path will appear here.</div>
-          <div>Suggestion types: source preferences, field preferences, safe filters, and post-result pivot hints.</div>
+          <div id="learning-repo-summary">Approved SPL assets will appear here after the first run.</div>
+          <div><a class="btn-secondary" href="/spl-assets" style="margin-top:8px;display:inline-flex;">Open SPL Asset Repository</a></div>
+          <details class="learning-history" style="margin-top:8px;">
+            <summary>
+              <div>
+                <div class="learning-history-title">Show Technical Notes</div>
+                <div class="learning-history-copy">Registry path, internal run detail, and additional implementation notes.</div>
+              </div>
+            </summary>
+            <div class="learning-history-body">
+              <div class="learning-notes" style="margin-top:0;">
+                <div id="learning-detail">Loading SPL optimization registry...</div>
+                <div id="learning-path">Registry path will appear here.</div>
+              </div>
+            </div>
+          </details>
         </div>
       </section>
-      <section class="learning-panel">
-        <h2>Pending Suggestions</h2>
-        <p class="learning-help">Each suggestion is a proposed local hint for future investigations. Approve it only if the reasoning looks right for this environment and the proposal would genuinely improve future Splunk searches. Rejected or stale items remain local history only and do not affect runtime behavior.</p>
-        <div id="learning-pending" class="learning-list"><div class="learning-item"><div class="learning-item-meta">No pending learning records.</div></div></div>
-        <details class="learning-history" style="margin-top:14px;">
-          <summary>
-            <div>
-              <div class="learning-history-title">Show Approved, Rejected, and Stale Suggestions</div>
-              <div class="learning-history-copy">Old learning records stay here for audit and review without cluttering the active queue.</div>
-            </div>
-            <span class="learning-badge" id="learning-history-count">history=0</span>
-          </summary>
-          <div class="learning-history-body">
-            <div id="learning-history-list" class="learning-list"><div class="learning-item"><div class="learning-item-meta">No historical learning records yet.</div></div></div>
-          </div>
-        </details>
-      </section>
     </div>
+    <details id="learning-drawer" class="learning-drawer">
+      <summary>
+        <div class="learning-drawer-head">
+          <span class="learning-drawer-title">Optimization Drawer</span>
+          <span class="learning-drawer-copy">Repository, measured proof, review queue, and run trace.</span>
+        </div>
+        <div class="learning-drawer-controls">
+          <span class="learning-drawer-chip">Active <span id="learning-drawer-active" style="margin-left:6px;">0</span></span>
+          <span class="learning-drawer-chip">Recorded <span id="learning-drawer-recorded" style="margin-left:6px;">0</span></span>
+          <span class="learning-drawer-chip">Pending <span id="learning-drawer-pending" style="margin-left:6px;">0</span></span>
+          <span class="learning-drawer-toggle">&#9650;</span>
+        </div>
+      </summary>
+      <div class="learning-drawer-body">
+        <div class="learning-drawer-grid">
+          <section class="learning-panel" style="padding:14px;">
+            <h2>Active SPL Asset Repository</h2>
+            <div class="learning-repo-copy">Approved reusable SPL assets live here. These are the environment-specific patterns already influencing future SPL writing.</div>
+            <div id="learning-repo-list" class="learning-repo-list"><div class="learning-repo-item">No approved SPL assets yet.</div></div>
+          </section>
+          <section class="learning-panel" style="padding:14px;">
+            <h2>Measured Improvement</h2>
+            <div id="learning-impact-summary" class="learning-impact-summary">Run the engine to see whether it found a better reusable SPL asset for this environment.</div>
+            <div id="learning-impact-copy" class="learning-impact-copy">No optimization benchmark has been recorded yet. Run the engine to see whether it can produce a better reusable SPL asset for this environment.</div>
+            <div id="learning-impact-meta" class="learning-impact-meta">Whether the latest improvement is active or still waiting for approval will appear here after the first run.</div>
+            <div id="learning-impact-history" class="learning-impact-history">A short summary of recent optimization runs will appear here after the first run.</div>
+            <div id="learning-impact-warning" class="learning-impact-warning" style="display:none;"></div>
+            <details class="learning-history learning-impact-details">
+              <summary>
+                <div>
+                  <div class="learning-history-title">Show Score Detail</div>
+                  <div class="learning-history-copy">Benchmark numbers and deeper optimization metrics.</div>
+                </div>
+              </summary>
+              <div class="learning-history-body">
+                <div id="learning-impact-grid" class="learning-impact-grid">
+                  <div class="learning-impact-card"><div class="learning-impact-label">Starting Point</div><div id="learning-impact-baseline" class="learning-impact-value">--</div></div>
+                  <div class="learning-impact-card"><div class="learning-impact-label">Current Result</div><div id="learning-impact-latest" class="learning-impact-value">--</div></div>
+                  <div class="learning-impact-card"><div class="learning-impact-label">Change</div><div id="learning-impact-delta" class="learning-impact-value">--</div></div>
+                  <div class="learning-impact-card"><div class="learning-impact-label">New Assets Kept</div><div id="learning-impact-kept" class="learning-impact-value">0</div></div>
+                </div>
+                <div id="learning-impact-tech" class="learning-item-meta" style="margin-top:10px;">Technical detail will appear here after the first run.</div>
+              </div>
+            </details>
+          </section>
+        </div>
+        <div class="learning-drawer-grid">
+          <section class="learning-panel" style="padding:14px;">
+            <h2>Pending Review Queue</h2>
+            <p class="learning-help">These items are waiting for operator review. Approve only what makes sense for this environment.</p>
+            <div id="learning-pending" class="learning-list"><div class="learning-item"><div class="learning-item-meta">No pending learning records.</div></div></div>
+          </section>
+          <section class="learning-panel" style="padding:14px;">
+            <details class="learning-history" open>
+              <summary>
+                <div>
+                  <div class="learning-history-title">Current Run Progress</div>
+                  <div class="learning-history-copy">Expand this while the engine is running if you want to watch the live steps.</div>
+                </div>
+              </summary>
+              <div class="learning-history-body">
+                <div class="learning-progress-wrap" style="margin-top:0;">
+                  <div class="learning-progress-head">
+                    <span id="learning-phase">Idle</span>
+                    <span id="learning-pct" class="learning-badge">0%</span>
+                  </div>
+                  <div class="learning-progress-track"><div id="learning-bar" class="learning-progress-bar"></div></div>
+                  <pre id="learning-log" class="learning-progress-log">No optimization output yet.</pre>
+                </div>
+              </div>
+            </details>
+            <details class="learning-history" style="margin-top:14px;">
+              <summary>
+                <div>
+                  <div class="learning-history-title">Show Approved, Rejected, and Not Applied Items</div>
+                  <div class="learning-history-copy">Older items stay here for audit and review without cluttering the active queue.</div>
+                </div>
+                <span class="learning-badge" id="learning-history-count">history=0</span>
+              </summary>
+              <div class="learning-history-body">
+                <div id="learning-history-list" class="learning-list"><div class="learning-item"><div class="learning-item-meta">No historical learning records yet.</div></div></div>
+              </div>
+            </details>
+          </section>
+        </div>
+      </div>
+    </details>
   </div>
   <script>
     const learning$ = (id) => document.getElementById(id);
@@ -9833,10 +11088,25 @@ def _learning_page_body() -> str:
     function learningApiUrl(){
       return `/api/config/local-learning?_=${Date.now()}`;
     }
+    function normalizeLearningDetail(text){
+      return String(text || '')
+        .replace(/Guarded local learning/gi, 'SPL Optimization AI Engine')
+        .replace(/local learning/gi, 'optimization')
+        .replace(/optimization asset generation started for ([^\\n]+)/gi, 'Starting reusable SPL asset generation for $1')
+        .replace(/optimization asset writer step using writer_alt/gi, 'Alternate writer is drafting a reusable SPL pattern')
+        .replace(/optimization asset writer step using writer/gi, 'Primary writer is drafting a reusable SPL pattern')
+        .replace(/optimization asset judge comparing writer candidates/gi, 'Judge is comparing reusable SPL drafts')
+        .replace(/optimization asset distiller tightening chosen pattern/gi, 'Distiller is refining the chosen SPL asset')
+        .replace(/optimization asset generation found no usable writer output for ([^\\n]+)/gi, 'No usable SPL draft was produced for $1')
+        .replace(/optimization asset generation produced no reusable asset for ([^\\n]+)/gi, 'No reusable SPL asset was produced for $1')
+        .replace(/optimization asset ready for ([^\\n]+)/gi, 'Reusable SPL asset ready for $1')
+        .replace(/Accepted deterministic candidate for ([^\\n]+)/gi, 'Captured an environment-backed improvement for $1')
+        .replace(/Accepted candidate for ([^\\n]+)/gi, 'Accepted a proposed improvement for $1');
+    }
     function learningCompletedStatus(runClock, runDurationSec, detail){
-      const prefix = 'Self Learn finished at ' + String(runClock || '');
+      const prefix = 'Optimization cycle finished at ' + String(runClock || '');
       const duration = runDurationSec > 0 ? (' in ' + runDurationSec.toFixed(2) + 's') : '';
-      const suffix = detail ? (' ' + String(detail).trim()) : '';
+      const suffix = detail ? (' ' + normalizeLearningDetail(detail).trim()) : '';
       return (prefix + duration + '.' + suffix).trim();
     }
     function ensureLearningPoll(){
@@ -9852,14 +11122,14 @@ def _learning_page_body() -> str:
       const st = String(state || '').trim();
       const ph = String(phase || '').trim();
       if(st === 'in_progress'){
-        if(ph === 'starting'){ return 'Preparing learning run'; }
-        if(ph === 'collecting_evidence'){ return 'Collecting local evidence'; }
-        if(ph === 'reviewing_bundle'){ return 'Reviewing suggestions'; }
-        if(ph === 'candidate_accepted'){ return 'Accepted suggestion'; }
+        if(ph === 'starting'){ return 'Preparing optimization cycle'; }
+        if(ph === 'collecting_evidence'){ return 'Collecting environment evidence'; }
+        if(ph === 'reviewing_bundle'){ return 'Generating and reviewing assets'; }
+        if(ph === 'candidate_accepted'){ return 'Accepted candidate'; }
         if(ph === 'benchmarking_factory'){ return 'Benchmarking factory baseline'; }
-        if(ph === 'benchmarking_baseline'){ return 'Benchmarking baseline'; }
-        if(ph === 'benchmarking_candidates'){ return 'Benchmarking candidates'; }
-        if(ph === 'writing_registry'){ return 'Writing learning registry'; }
+        if(ph === 'benchmarking_baseline'){ return 'Benchmarking approved optimization state'; }
+        if(ph === 'benchmarking_candidates'){ return 'Benchmarking candidate assets'; }
+        if(ph === 'writing_registry'){ return 'Writing optimization registry'; }
       }
       if(st === 'ready'){ return 'Ready to run'; }
       if(st === 'error' && ph === 'interrupted'){ return 'Previous run interrupted'; }
@@ -9891,17 +11161,20 @@ def _learning_page_body() -> str:
         `Pending ${Number(counts.pending || 0)}`,
         `Approved ${Number(counts.approved || 0)}`,
         `Rejected ${Number(counts.rejected || 0)}`,
-        `Stale ${Number(counts.stale || 0)}`
+        `Not Applied ${Number(counts.stale || 0)}`
       ].map((v) => `<span class="learning-badge">${learningEscape(v)}</span>`).join('');
       learning$('learning-detail').textContent =
         (data.detail && String(data.detail).trim())
-          ? String(data.detail).trim()
-          : 'No learning run is active. Start a run when you want A.G.E.N.T. Smith to propose new local hints from this environment.';
-      learning$('learning-path').textContent = data.path ? `Registry path: ${data.path}` : 'Registry path will appear here.';
+          ? normalizeLearningDetail(String(data.detail).trim())
+          : 'No optimization cycle is active. Start one when you want A.G.E.N.T. Smith to search for better reusable SPL for this environment.';
+      const repositoryPath = String(data.repository_path || '').trim();
+      learning$('learning-path').textContent = data.path
+        ? `Registry path: ${data.path}${repositoryPath ? ` | SPL asset repository: ${repositoryPath}` : ''}`
+        : 'Registry path will appear here.';
       learning$('learning-phase').textContent = learningPhaseLabel(state, data.phase || 'idle');
       learning$('learning-pct').textContent = state === 'ready' ? 'Ready' : `${Math.round(pct)}%`;
       learning$('learning-bar').style.width = `${pct}%`;
-      learning$('learning-log').textContent = data.output || 'No learning output yet.';
+      learning$('learning-log').textContent = normalizeLearningDetail(data.output || 'No optimization output yet.');
       learning$('learning-log').parentElement.classList.toggle('is-idle', state === 'ready' && !String(data.output || '').trim());
       const baselineScore = Number(comparison.baseline_avg_score ?? improvement.baseline?.avg_score ?? 0);
       const latestScore = Number(comparison.current_avg_score ?? improvement.latest?.avg_score ?? 0);
@@ -9915,54 +11188,126 @@ def _learning_page_body() -> str:
       learning$('learning-impact-latest').textContent = improvement.latest ? latestScore.toFixed(2) : '--';
       learning$('learning-impact-delta').textContent = improvement.comparison ? `${avgDelta >= 0 ? '+' : ''}${avgDelta.toFixed(2)}` : '--';
       learning$('learning-impact-kept').textContent = String(selectedCount);
-      learning$('learning-impact-best').textContent = bestRun.current_avg_score != null && runHistory.length ? bestScore.toFixed(2) : '--';
       const changedCases = Array.isArray(comparison.changed_cases) ? comparison.changed_cases : [];
+      const impactSummaryEl = learning$('learning-impact-summary');
       if(improvement.baseline && improvement.latest){
-        const considered = Number(data.considered ?? 0);
-        const generated = Number(data.generated ?? improvement.generated_candidate_count ?? 0);
-        const latestLabel = selectedCount > 0 ? 'projected latest' : 'latest';
-        let copy = `Current run baseline ${baselineScore.toFixed(2)} -> ${latestLabel} ${latestScore.toFixed(2)} across ${Number(improvement.latest?.case_count || 0)} benchmark cases. Generated ${generated} candidate hints, kept ${selectedCount}, considered ${considered}. Changed cases: ${changedCases.length}.`;
-        if(improvement.factory_baseline && Number.isFinite(factoryBaselineScore)){
-          copy += ` Current learned level is ${overallDelta >= 0 ? '+' : ''}${overallDelta.toFixed(2)} over the factory baseline (${factoryBaselineScore.toFixed(2)}).`;
+        let summary = '';
+        let copy = '';
+        if(selectedCount > 0 && avgDelta > 0){
+          summary = `Improvement found. ${selectedCount} reusable SPL asset(s) beat the current baseline and were kept for review.`;
+          copy = `The benchmark moved from ${baselineScore.toFixed(2)} to ${latestScore.toFixed(2)}. These assets will only influence future SPL writing after approval.`;
+        } else if(selectedCount > 0){
+          summary = `${selectedCount} reusable SPL asset(s) were kept for review, but the measured benchmark score stayed the same.`;
+          copy = `The engine found reusable drafts worth reviewing, but they did not improve the benchmark beyond the current approved baseline.`;
+        } else {
+          summary = 'No improvement found this run.';
+          copy = `The generated drafts did not beat the current approved baseline, so nothing new was kept.`;
         }
-        if(selectedCount === 0 && avgDelta === 0){
-          copy += ' No new learning was kept because the current environment-backed hints did not improve SPL-writing quality beyond the existing baseline.';
-        }
+        if(impactSummaryEl){ impactSummaryEl.textContent = summary; }
         learning$('learning-impact-copy').textContent = copy;
       } else {
-        learning$('learning-impact-copy').textContent = 'No baseline comparison has been recorded yet.';
+        if(impactSummaryEl){ impactSummaryEl.textContent = 'No benchmarked optimization result has been recorded yet.'; }
+        learning$('learning-impact-copy').textContent = 'Run the engine to see whether it can produce a better reusable SPL asset for this environment.';
       }
+      const changeCopyEl = learning$('learning-change-copy');
       const approvedCount = Number(approvedState.approved_count ?? counts.approved ?? 0);
-      const pendingCount = Number(counts.pending || 0);
+      const historyRows = Array.isArray(((data.repository && data.repository.history_rows) || (improvement.repository && improvement.repository.history_rows))) ? (((data.repository && data.repository.history_rows) || (improvement.repository && improvement.repository.history_rows))) : [];
+      const pendingDraftCount = historyRows.filter((row) => { const st = String(row?.status || "").toLowerCase(); return st && st !== "approved" && st !== "rejected" && st !== "stale"; }).length;
+      const pendingCount = Math.max(Number(counts.pending || 0), pendingDraftCount);
       const cacheHits = Number(cacheMetrics.hits ?? 0);
       const cacheMisses = Number(cacheMetrics.misses ?? 0);
       const skippedDuplicates = Number(candidateFiltering.skipped_duplicate_count ?? 0);
       const skippedApproved = Number(candidateFiltering.skipped_already_approved_count ?? 0);
       const skippedNonWriter = Number(candidateFiltering.skipped_non_writer_count ?? 0);
       const skippedNoGain = Number(candidateFiltering.skipped_no_gain_count ?? 0);
-      let meta = `Active learned hints: ${approvedCount}. Pending review: ${pendingCount}.`;
-      const deterministicOnlyMode = !timeoutWarnings && skippedNoGain >= 1 && cacheMisses <= 4;
+      const repository = (data.repository && typeof data.repository === 'object') ? data.repository : ((improvement.repository && typeof improvement.repository === 'object') ? improvement.repository : {});
+      const activeAssets = Number(repository.active_assets ?? 0);
+      const historyAssets = Number(repository.history_assets ?? 0);
+      const repoAssets = Array.isArray(repository.records) ? repository.records : [];
+      let meta = `Approved active: ${activeAssets}. Recorded assets: ${historyAssets}. Pending review: ${pendingCount}.`; 
+      const runMode = String(improvement.run_mode || '');
+      const deterministicOnlyMode = runMode ? (runMode === 'fast_optimization_check') : (!timeoutWarnings && skippedNoGain >= 1 && cacheMisses <= 4);
       meta += deterministicOnlyMode
-        ? ' Run mode: Fast Local Learn (deterministic environment review with cached SPL-writing benchmark checks).'
-        : ' Run mode: Guarded model-assisted learning.';
+        ? ' This run used the fast optimization check path.'
+        : ' This run used the full AI optimization cycle.';
       if(approvedState.active){
         const activeIntents = Array.isArray(approvedState.intents) ? approvedState.intents.slice(0, 4) : [];
         if(activeIntents.length){
-          meta += ` Active intents: ${activeIntents.join(', ')}.`;
+          meta += ` Active areas: ${activeIntents.join(', ')}.`;
         }
-      } else {
-        meta += ' No approved hints are influencing SPL writing yet.';
+      } else if(activeAssets <= 0) {
+        meta += ' No approved optimization assets are active yet.';
       }
       if(selectedCount > 0){
-        meta += ` ${selectedCount} newly kept hint(s) are still pending approval, so the projected latest score is not active until you approve them.`;
+        meta += ` ${selectedCount} kept asset(s) are waiting for approval before they become active.`;
       }
-      if(cacheHits || cacheMisses){
-        meta += ` Benchmark cache hits/misses: ${cacheHits}/${cacheMisses}.`;
-      }
-      if(skippedDuplicates || skippedApproved || skippedNonWriter || skippedNoGain){
-        meta += ` Skipped candidates - duplicate: ${skippedDuplicates}, already approved: ${skippedApproved}, non-writer: ${skippedNonWriter}, no gain: ${skippedNoGain}.`;
-      }
+      meta += ` Repository size: ${activeAssets} active, ${historyAssets} total asset records.`;
       learning$('learning-impact-meta').textContent = meta;
+      let tech = `Run mode: ${deterministicOnlyMode ? 'Fast optimization check' : 'Full AI optimization cycle'}. Repository size: ${activeAssets} active / ${historyAssets} total.`;
+      if(cacheHits || cacheMisses){ tech += ` Cache reuse: ${cacheHits} hit(s), ${cacheMisses} miss(es).`; }
+      if(skippedDuplicates || skippedApproved || skippedNonWriter || skippedNoGain){ tech += ` Skipped candidates - duplicate: ${skippedDuplicates}, already approved: ${skippedApproved}, non-writer: ${skippedNonWriter}, no gain: ${skippedNoGain}.`; }
+      learning$('learning-impact-tech').textContent = tech;
+      const repoSummaryEl = learning$('learning-repo-summary');
+      if(repoSummaryEl){
+        repoSummaryEl.textContent = activeAssets > 0
+          ? `Approved SPL asset repository: ${activeAssets} active asset(s) ready to influence future SPL writing.`
+          : 'Approved SPL asset repository: no active SPL assets yet.';
+      }
+      const stateSimpleEl = learning$('learning-state-simple');
+      if(stateSimpleEl){
+        stateSimpleEl.textContent = String(activeAssets);
+      }
+      const recordedSimpleEl = learning$('learning-recorded-simple');
+      if(recordedSimpleEl){
+        recordedSimpleEl.textContent = String(historyAssets);
+      }
+      const pendingSimpleEl = learning$('learning-pending-simple');
+      if(pendingSimpleEl){
+        pendingSimpleEl.textContent = String(pendingCount);
+      }
+      const drawerActiveEl = learning$('learning-drawer-active');
+      if(drawerActiveEl){
+        drawerActiveEl.textContent = String(activeAssets);
+      }
+      const drawerRecordedEl = learning$('learning-drawer-recorded');
+      if(drawerRecordedEl){
+        drawerRecordedEl.textContent = String(historyAssets);
+      }
+      const drawerPendingEl = learning$('learning-drawer-pending');
+      if(drawerPendingEl){
+        drawerPendingEl.textContent = String(pendingCount);
+      }
+      const drawerRepoStateEl = learning$('learning-drawer-repo-state');
+      if(drawerRepoStateEl){
+        drawerRepoStateEl.textContent = activeAssets > 0 ? 'Active' : (historyAssets > 0 ? 'Recorded' : 'Empty');
+      }
+      if(changeCopyEl){
+        if(selectedCount > 0 && avgDelta > 0){
+          changeCopyEl.textContent = `This run found ${selectedCount} better reusable SPL asset(s). They are kept for review and will only become active after approval.`;
+        } else if(selectedCount > 0){
+          changeCopyEl.textContent = `This run kept ${selectedCount} reusable SPL asset(s) for review, but the measured benchmark score did not move.`;
+        } else if(improvement.baseline && improvement.latest){
+          changeCopyEl.textContent = `This run did not find a better reusable SPL asset than the current approved baseline, so nothing new was kept.`;
+        } else {
+          changeCopyEl.textContent = 'Run the engine to see whether it found a better reusable SPL asset, kept anything for review, or confirmed that the current baseline is already strong enough.';
+        }
+      }
+      const repoListEl = learning$('learning-repo-list');
+      if(repoListEl){
+        const splAssets = Array.isArray(repoAssets) ? repoAssets : [];
+        repoListEl.innerHTML = splAssets.length ? splAssets.slice(0, 6).map((row) => {
+          const proposal = (row.proposal && typeof row.proposal === 'object') ? row.proposal : {};
+          const useWhen = String(proposal.use_when || '').trim();
+          const template = String(proposal.query_template || '').trim();
+          return `
+            <div class="learning-repo-item">
+              <div><strong>${learningEscape(row.intent || 'unknown_intent')}</strong> <span class="learning-badge">ACTIVE</span></div>
+              ${useWhen ? `<div class="learning-item-meta"><strong>Use when:</strong> ${learningEscape(useWhen)}</div>` : ''}
+              ${template ? `<div class="learning-item-meta"><strong>Pattern:</strong> ${learningEscape(template)}</div>` : ''}
+            </div>
+          `;
+        }).join('') : '<div class="learning-repo-item">No approved SPL assets yet.</div>';
+      }
       if(runHistory.length){
         const recent = runHistory.slice(-3).map((row) => {
           const score = Number(row.current_avg_score ?? 0).toFixed(2);
@@ -9970,40 +11315,71 @@ def _learning_page_body() -> str:
           const dur = Number(row.run_duration_sec ?? 0);
           return `${score} (${delta >= 0 ? '+' : ''}${delta.toFixed(2)}, ${dur.toFixed(2)}s)`;
         });
-        let historyText = `Recent runs: ${recent.join(' -> ')}. Best recorded score: ${bestScore.toFixed(2)}.`;
+        let historyText = `Recent score history: ${recent.join(' -> ')}. Best verified result: ${bestScore.toFixed(2)}.`;
         if(runHistory.length){
           const latestRun = runHistory[runHistory.length - 1] || {};
           const learnedDelta = Number(latestRun.factory_to_current_avg_delta ?? overallDelta ?? 0);
-          historyText += ` Learned level vs factory baseline: ${learnedDelta >= 0 ? '+' : ''}${learnedDelta.toFixed(2)}.`;
+          historyText += ` Overall improvement versus the original baseline: ${learnedDelta >= 0 ? '+' : ''}${learnedDelta.toFixed(2)}.`;
         }
         if(runDurationSec > 0){
           historyText += ` Last run duration: ${runDurationSec.toFixed(2)}s.`;
         }
         learning$('learning-impact-history').textContent = historyText;
       } else {
-        learning$('learning-impact-history').textContent = 'Run history will appear here after the first completed benchmarked learning run.';
+        learning$('learning-impact-history').textContent = 'Run history will appear here after the first completed benchmarked optimization cycle.';
       }
       const warningEl = learning$('learning-impact-warning');
       if(timeoutWarnings > 0){
         warningEl.style.display = '';
-        warningEl.textContent = `Learning slowed by remote model timeout. Timeout-related fallbacks or skips: ${timeoutWarnings}.`;
+        warningEl.textContent = `Optimization slowed because one or more remote model calls timed out. ${timeoutWarnings} fallback or skip event(s) were recorded.`;
       } else {
         warningEl.style.display = 'none';
         warningEl.textContent = '';
       }
       if(runBtn){
         runBtn.disabled = state === 'in_progress';
-        runBtn.textContent = state === 'in_progress' ? 'Learning Running...' : 'Run Self Learn';
+        runBtn.textContent = state === 'in_progress' ? 'Optimization Running...' : 'Run Optimization Cycle';
       }
       learning$('learning-history-count').textContent = `history=${recordHistory.length}`;
+      const renderProposalSummary = (item) => {
+        const kind = String(item.kind || '').trim();
+        const proposal = (item.proposal && typeof item.proposal === 'object') ? item.proposal : {};
+        if(kind === 'spl_pattern_asset'){
+          const fields = Array.isArray(proposal.required_fields) ? proposal.required_fields.join(', ') : '';
+          const template = String(proposal.query_template || '').trim();
+          const useWhen = String(proposal.use_when || '').trim();
+          return `
+            <div class="learning-item-meta"><strong>Asset summary:</strong> Reusable SPL pattern for <code>${learningEscape(item.intent || 'unknown_intent')}</code>.</div>
+            ${useWhen ? `<div class="learning-item-meta"><strong>Use when:</strong> ${learningEscape(useWhen)}</div>` : ''}
+            ${fields ? `<div class="learning-item-meta"><strong>Required fields:</strong> ${learningEscape(fields)}</div>` : ''}
+            ${template ? `<div class="learning-item-meta"><strong>Pattern:</strong> ${learningEscape(template)}</div>` : ''}
+          `;
+        }
+        if(kind === 'preferred_sources'){
+          const sources = Array.isArray(proposal.preferred_sources) ? proposal.preferred_sources.join(', ') : '';
+          const sourcetypes = Array.isArray(proposal.preferred_sourcetypes) ? proposal.preferred_sourcetypes.join(', ') : '';
+          return `
+            ${sources ? `<div class=\"learning-item-meta\"><strong>Prefer sources:</strong> ${learningEscape(sources)}</div>` : ''}
+            ${sourcetypes ? `<div class=\"learning-item-meta\"><strong>Prefer sourcetypes:</strong> ${learningEscape(sourcetypes)}</div>` : ''}
+          `;
+        }
+        if(kind === 'preferred_fields'){
+          const fields = Array.isArray(proposal.preferred_fields) ? proposal.preferred_fields.join(', ') : '';
+          return `<div class=\"learning-item-meta\"><strong>Prefer fields:</strong> ${learningEscape(fields)}</div>`;
+        }
+        if(kind === 'post_result_pivot_hint'){
+          return `<div class=\"learning-item-meta\"><strong>Follow-up idea:</strong> ${learningEscape(proposal.cross_platform_pivot_hint || '')}</div>`;
+        }
+        return `<div class="learning-item-meta"><strong>Proposed local hint:</strong> ${learningEscape(JSON.stringify(proposal || {}))}</div>`;
+      };
       const renderItem = (item) => `
         <div class="learning-item">
           <div class="learning-item-head">
             <div class="learning-item-name">${learningEscape(item.intent || 'unknown_intent')}</div>
-            <span class="learning-badge">${learningEscape(String(item.status || 'pending').toUpperCase())}</span>
+            <span class="learning-badge">${learningEscape(String(item.status || 'pending').toLowerCase() === 'stale' ? 'NOT APPLIED' : String(item.status || 'pending').toUpperCase())}</span>
           </div>
           <div class="learning-item-meta"><strong>Suggestion type:</strong> ${learningEscape(item.kind || 'unknown')}</div>
-          <div class="learning-item-meta"><strong>Proposed local hint:</strong> ${learningEscape(JSON.stringify(item.proposal || {}))}</div>
+          ${renderProposalSummary(item)}
           <div class="learning-item-meta"><strong>Why it was suggested:</strong> ${learningEscape(item.reason || '')}</div>
           ${item.supporting_question ? `<div class="learning-item-meta"><strong>Supporting question:</strong> ${learningEscape(item.supporting_question)}</div>` : ''}
           <div class="learning-item-meta"><strong>Created:</strong> ${learningEscape(item.created_at || '')}</div>
@@ -10045,21 +11421,21 @@ def _learning_page_body() -> str:
       const runDurationSec = Number(improvement.run_duration_sec ?? 0);
       const runClock = learningFormatClock(improvement.timestamp_utc || '');
       if(state === 'in_progress'){
-        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning is running...';
+        learning$('learning-status').textContent = normalizeLearningDetail(data.local_learning?.detail || 'SPL Optimization AI Engine is running...');
         ensureLearningPoll();
       } else if(state === 'ready'){
         if(learningRunRequestedAt && runClock){
           learning$('learning-status').textContent = learningCompletedStatus(runClock, runDurationSec, data.local_learning?.detail || '');
           learningRunRequestedAt = 0;
         } else {
-          learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning complete.';
+          learning$('learning-status').textContent = normalizeLearningDetail(data.local_learning?.detail || 'SPL Optimization AI Engine complete.');
         }
         stopLearningPoll();
       } else if(state === 'error'){
-        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning failed.';
+        learning$('learning-status').textContent = normalizeLearningDetail(data.local_learning?.detail || 'SPL Optimization AI Engine failed.');
         stopLearningPoll();
       } else {
-        learning$('learning-status').textContent = 'Loaded local learning registry.';
+        learning$('learning-status').textContent = 'Loaded SPL optimization registry.';
       }
     }
     let learningPoll = null;
@@ -10077,7 +11453,7 @@ def _learning_page_body() -> str:
       const runDurationSec = Number(improvement.run_duration_sec ?? 0);
       const runClock = learningFormatClock(improvement.timestamp_utc || '');
       if(state === 'in_progress'){
-        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning is running...';
+        learning$('learning-status').textContent = normalizeLearningDetail(data.local_learning?.detail || 'SPL Optimization AI Engine is running...');
         ensureLearningPoll();
         return;
       }
@@ -10087,19 +11463,19 @@ def _learning_page_body() -> str:
           learning$('learning-status').textContent = learningCompletedStatus(runClock, runDurationSec, data.local_learning?.detail || '');
           learningRunRequestedAt = 0;
         } else {
-          learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning complete.';
+          learning$('learning-status').textContent = normalizeLearningDetail(data.local_learning?.detail || 'SPL Optimization AI Engine complete.');
         }
       } else if(state === 'error'){
-        learning$('learning-status').textContent = data.local_learning?.detail || 'Guarded local learning failed.';
+        learning$('learning-status').textContent = normalizeLearningDetail(data.local_learning?.detail || 'SPL Optimization AI Engine failed.');
         learningRunRequestedAt = 0;
       }
     }
     learning$('learning-run').onclick = async () => {
       learningRunRequestedAt = Date.now();
       learning$('learning-run').disabled = true;
-      learning$('learning-run').textContent = 'Learning Running...';
-      learning$('learning-status').textContent = 'Starting guarded local learning...';
-      learning$('learning-phase').textContent = 'Preparing learning run';
+      learning$('learning-run').textContent = 'Optimization Running...';
+      learning$('learning-status').textContent = 'Starting SPL Optimization AI Engine...';
+      learning$('learning-phase').textContent = 'Preparing optimization cycle';
       learning$('learning-pct').textContent = '5%';
       learning$('learning-bar').style.width = '5%';
       const resp = await fetch('/api/config/local-learning', {
@@ -10110,12 +11486,12 @@ def _learning_page_body() -> str:
       const data = await resp.json();
       if(!resp.ok){
         learning$('learning-run').disabled = false;
-        learning$('learning-run').textContent = 'Run Self Learn';
-        learning$('learning-status').textContent = data.error || `self learn failed (${resp.status})`;
+        learning$('learning-run').textContent = 'Run Optimization Cycle';
+        learning$('learning-status').textContent = normalizeLearningDetail(data.error || `optimization failed (${resp.status})`);
         return;
       }
       renderLearningPage(data.local_learning || {});
-      learning$('learning-status').textContent = data.detail || 'Guarded local learning started.';
+      learning$('learning-status').textContent = normalizeLearningDetail(data.detail || 'SPL Optimization AI Engine started.');
       ensureLearningPoll();
       await pollLearningPage();
     };
@@ -10125,6 +11501,314 @@ def _learning_page_body() -> str:
       }
     });
     loadLearningPage();
+  </script>
+</div>
+"""
+
+
+def _spl_asset_repository_page_body() -> str:
+    summary = learning_registry_summary()
+    repository = summary.get("repository", {}) if isinstance(summary, dict) else {}
+    active_rows = repository.get("records", []) if isinstance(repository, dict) else []
+    active_rows = active_rows if isinstance(active_rows, list) else []
+    history_rows = []
+    try:
+        raw_repo = _load_json_if_exists(Path(summary.get("repository_path", ""))) if summary.get("repository_path") else None
+        if isinstance(raw_repo, dict):
+            history_rows = raw_repo.get("history_assets", []) if isinstance(raw_repo.get("history_assets", []), list) else []
+    except Exception:
+        history_rows = []
+    active_rows = [row for row in active_rows if isinstance(row, dict)]
+    history_rows = [row for row in history_rows if isinstance(row, dict)]
+    draft_rows = [row for row in history_rows if str(row.get("status", "")).strip().lower() != "approved"]
+
+    def _fit_summary(row: dict[str, Any]) -> str:
+        fields = [str(item).strip() for item in row.get("required_fields", []) if str(item).strip()]
+        sources = [str(item).strip() for item in row.get("required_sources", []) if str(item).strip()]
+        sourcetypes = [str(item).strip() for item in row.get("required_sourcetypes", []) if str(item).strip()]
+        parts: list[str] = []
+        if fields:
+            parts.append(f"fields: {', '.join(fields[:3])}{'…' if len(fields) > 3 else ''}")
+        if sources:
+            parts.append(f"sources: {', '.join(sources[:2])}{'…' if len(sources) > 2 else ''}")
+        if sourcetypes:
+            parts.append(f"sourcetypes: {', '.join(sourcetypes[:2])}{'…' if len(sourcetypes) > 2 else ''}")
+        return html.escape(" | ".join(parts) if parts else "Environment fit not recorded")
+
+    def _question_family(row: dict[str, Any]) -> str:
+        tokens = [str(item).strip() for item in row.get("match_tokens", []) if str(item).strip()]
+        return html.escape(", ".join(tokens[:5]) if tokens else "General reusable pattern")
+
+    def _benchmark_summary(row: dict[str, Any]) -> str:
+        impact = row.get("benchmark_impact", {}) if isinstance(row.get("benchmark_impact"), dict) else {}
+        avg_delta = impact.get("avg_score_delta")
+        pass_delta = impact.get("pass_rate_delta_pct")
+        parts: list[str] = []
+        if isinstance(avg_delta, (int, float)):
+            parts.append(f"writer score {avg_delta:+.2f}")
+        if isinstance(pass_delta, (int, float)):
+            parts.append(f"pass rate {pass_delta:+.2f}%")
+        return html.escape(" | ".join(parts) if parts else "No benchmark lift recorded yet; kept for local review and provenance")
+
+    def _asset_row(row: dict[str, Any], state_label: str, actions: bool = False) -> str:
+        intent = html.escape(str(row.get("intent", "")).strip() or "unknown_intent")
+        use_when = html.escape(str(row.get("use_when", "")).strip() or "No use case recorded")
+        why = html.escape(str(row.get("why", "")).strip() or str(row.get("reason", "")).strip() or "No rationale recorded")
+        query_template = html.escape(str(row.get("query_template", "")).strip() or "No SPL pattern recorded")
+        row_id = html.escape(str(row.get("id", "")).strip())
+        updated_at = html.escape(str(row.get("updated_at", "")).strip() or str(row.get("created_at", "")).strip() or "Unknown")
+        selection_reason = html.escape(str(row.get("selection_reason", "")).strip().replace("_", " ") or "Awaiting review")
+        action_html = '<span class="splrepo-row-actions-empty">Active</span>'
+        if actions and row_id:
+            action_html = (
+                f'<div class="splrepo-row-actions">'
+                f'<button class="learning-item-btn splrepo-action-approve" data-repo-action="approve" data-id="{row_id}">Approve</button>'
+                f'<button class="learning-item-btn splrepo-action-reject" data-repo-action="reject" data-id="{row_id}">Reject</button>'
+                f'</div>'
+            )
+        return f"""
+        <tr>
+          <td>
+            <div class="splrepo-cell-title">{intent}</div>
+            <div class="splrepo-cell-sub">{use_when}</div>
+          </td>
+          <td><span class="learning-badge">{html.escape(state_label)}</span></td>
+          <td>{_question_family(row)}</td>
+          <td>{why}</td>
+          <td>{_fit_summary(row)}</td>
+          <td>
+            <div class="splrepo-pattern">{query_template}</div>
+            {'<div class="splrepo-cell-sub">Why not active yet: ' + selection_reason + '</div>' if actions else ''}
+          </td>
+          <td>
+            <div class="splrepo-cell-sub">{_benchmark_summary(row)}</div>
+            <div class="splrepo-cell-sub" style="margin-top:6px;">{updated_at}</div>
+          </td>
+          <td>{action_html}</td>
+        </tr>
+        """
+
+    recent_history = sorted(draft_rows, key=lambda row: str(row.get("updated_at", "") or row.get("created_at", "")), reverse=True)[:8]
+    active_table_rows = "".join(_asset_row(row, "ACTIVE") for row in active_rows)
+    draft_table_rows = "".join(_asset_row(row, str(row.get("status", "")).strip().upper() or "RECORDED", actions=True) for row in recent_history)
+    repo_path = html.escape(str(summary.get("repository_path", "")).strip() or "Not created yet")
+    active_count = len(active_rows)
+    history_count = len(draft_rows)
+    spotlight = active_rows[0] if active_rows else None
+    spotlight_intent = html.escape(str((spotlight or {}).get("intent", "")).strip() or "No active asset yet")
+    spotlight_when = html.escape(str((spotlight or {}).get("use_when", "")).strip())
+    spotlight_pattern = html.escape(str((spotlight or {}).get("query_template", "")).strip())
+    spotlight_why = html.escape(str((spotlight or {}).get("why", "")).strip() or str((spotlight or {}).get("reason", "")).strip())
+    review_message = (
+        "Nothing is waiting for approval right now."
+        if history_count <= 0
+        else f"{history_count} recorded draft(s) are ready for review. Approve only the ones you want influencing future SPL writing."
+    )
+    return f"""
+<div class="card">
+  <style>
+    .splrepo-shell{{display:grid;gap:16px;}}
+    .splrepo-hero{{border:1px solid #27415a;border-radius:18px;background:linear-gradient(165deg,#0a1729,#07131f 56%,#0a1a17);padding:18px;}}
+    .splrepo-hero h1{{margin:0 0 8px;font-size:32px;line-height:1.05;}}
+    .splrepo-copy{{color:#9fb4cc;font-size:13px;line-height:1.6;}}
+    .splrepo-metrics{{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;}}
+    .splrepo-metric{{border:1px solid #315a79;border-radius:999px;padding:6px 10px;background:#0b2030;color:#d6e5f3;font-size:12px;font-weight:800;}}
+    .splrepo-guide-title{{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px;}}
+    .splrepo-guide-copy{{color:#dbeafe;font-size:13px;line-height:1.55;}}
+    .splrepo-grid{{display:grid;grid-template-columns:minmax(360px,408px) minmax(0,1fr);gap:24px;align-items:start;}}
+    .splrepo-main{{display:grid;gap:16px;order:2;min-width:0;}}
+    .splrepo-main > *{{min-width:0;}}
+    .splrepo-side{{display:grid;gap:16px;order:1;position:sticky;top:88px;align-self:start;min-width:0;}}
+    .splrepo-panel{{border:1px solid #27415a;border-radius:16px;background:#081729;padding:14px;box-sizing:border-box;min-width:0;width:100%;}}
+    .splrepo-panel h2{{margin:0 0 8px;font-size:20px;}}
+    .splrepo-list{{display:grid;gap:10px;}}
+    .splrepo-spotlight{{border:1px solid #26614d;border-radius:16px;background:linear-gradient(160deg,#08182a,#09211c);padding:14px;}}
+    .splrepo-spotlight-head{{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;}}
+    .splrepo-spotlight-title{{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#86efac;}}
+    .splrepo-spotlight-name{{font-size:20px;font-weight:900;color:#f8fafc;}}
+    .splrepo-spotlight-copy{{color:#cfe4da;font-size:13px;line-height:1.55;}}
+    .splrepo-queue-stat{{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border:1px solid #315a79;border-radius:14px;background:#071523;}}
+    .splrepo-queue-count{{font-size:24px;font-weight:900;color:#f8fafc;}}
+    .splrepo-status-list{{display:grid;gap:8px;margin-top:10px;}}
+    .splrepo-status-item{{border:1px solid #27415a;border-radius:12px;background:#071523;padding:10px 12px;color:#dbeafe;font-size:13px;line-height:1.5;}}
+    .splrepo-section-head{{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:10px;flex-wrap:wrap;}}
+    .splrepo-section-note{{color:#9fb4cc;font-size:12px;line-height:1.45;}}
+    .splrepo-compare{{border:1px solid #27415a;border-radius:16px;background:#081729;padding:14px;}}
+    .splrepo-compare-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:10px;}}
+    .splrepo-compare-col{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:12px;}}
+    .splrepo-compare-col h3{{margin:0 0 6px;font-size:15px;}}
+    .splrepo-compare-col p{{margin:0;color:#c9d9ea;font-size:13px;line-height:1.55;}}
+    .splrepo-footer-note{{color:#8fb4cf;font-size:12px;line-height:1.5;}}
+    .splrepo-table-wrap{{border:1px solid #27415a;border-radius:16px;background:#081729;overflow:hidden;}}
+    .splrepo-table-scroll{{overflow:auto;}}
+    .splrepo-table{{width:100%;border-collapse:collapse;min-width:980px;table-layout:fixed;}}
+    .splrepo-table thead th{{position:sticky;top:0;background:#0b2030;color:#8fd0ff;font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;text-align:left;padding:12px;border-bottom:1px solid #27415a;z-index:1;}}
+    .splrepo-table tbody tr{{border-top:1px solid #1f3549;}}
+    .splrepo-table tbody tr:hover{{background:rgba(11,32,48,.45);}}
+    .splrepo-table td{{vertical-align:top;padding:12px;color:#dbeafe;font-size:13px;line-height:1.5;}}
+    .splrepo-cell-title{{font-weight:900;color:#f8fafc;}}
+    .splrepo-cell-sub{{margin-top:4px;color:#8fb4cf;font-size:12px;line-height:1.45;}}
+    .splrepo-pattern{{max-width:100%;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;line-height:1.45;color:#d9e7f5;white-space:normal;word-break:break-word;}}
+    .splrepo-row-actions{{display:flex;gap:8px;flex-wrap:wrap;}}
+    .splrepo-row-actions-empty{{color:#86efac;font-size:12px;font-weight:800;}}
+    .splrepo-empty{{padding:16px;color:#9fb4cc;font-size:13px;line-height:1.6;}}
+    .splrepo-action-approve{{background:linear-gradient(135deg,#34d399,#10b981);border-color:#34d399;color:#04230f;box-shadow:0 6px 18px rgba(16,185,129,.18);}}
+    .splrepo-action-reject{{background:linear-gradient(180deg,#2a1620,#170b12);border-color:#7f1d1d;color:#fecaca;box-shadow:0 6px 18px rgba(127,29,29,.18);}}
+    .splrepo-side .splrepo-panel{{padding:16px;}}
+    @media (max-width: 1080px){{.splrepo-grid,.splrepo-compare-grid{{grid-template-columns:1fr;}}.splrepo-side{{position:static;top:auto;}}}}
+  </style>
+  <div class="splrepo-shell">
+    <div class="splrepo-hero">
+      <h1>SPL Asset Repository</h1>
+      <div class="splrepo-copy">This is where the SPL Optimization AI Engine stores reusable SPL patterns for this environment. <strong>Approved active assets</strong> already influence future SPL writing. <strong>Recorded drafts</strong> are candidate patterns waiting for review.</div>
+      <div class="splrepo-metrics">
+        <span class="splrepo-metric">Approved Active {active_count}</span>
+        <span class="splrepo-metric">Recorded Drafts {history_count}</span>
+        <span class="splrepo-metric">Review Queue {"Open" if history_count > 0 else "Clear"}</span>
+      </div>
+    </div>
+    <div class="splrepo-grid">
+      <div class="splrepo-main">
+        <section class="splrepo-panel splrepo-panel-active">
+          <div class="splrepo-section-head">
+            <div>
+              <h2>Active Reusable SPL Assets</h2>
+              <div class="splrepo-section-note">These are already approved and can influence future SPL writing. Scan by row, then open the optimization page if you want to generate more drafts.</div>
+            </div>
+            <a class="btn-secondary" href="/learning" style="text-decoration:none;">Back to SPL Optimization</a>
+          </div>
+          <div class="splrepo-table-wrap">
+            <div class="splrepo-table-scroll">
+              <table class="splrepo-table">
+                <thead>
+                  <tr>
+                    <th>Intent</th>
+                    <th>State</th>
+                    <th>Question Family</th>
+                    <th>Why This Exists</th>
+                    <th>Environment Fit</th>
+                    <th>Pattern</th>
+                    <th>Proof / Updated</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {active_table_rows if active_table_rows else '<tr><td colspan="8" class="splrepo-empty">No approved SPL assets yet. Approve a recorded draft when you want it to influence future SPL writing.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <section class="splrepo-compare">
+          <h2 style="margin:0 0 4px;font-size:18px;">Why An Approved Asset Is Better For This Environment</h2>
+          <div class="splrepo-copy">Use this as a quick mental model when reviewing drafts.</div>
+          <div class="splrepo-compare-grid">
+            <div class="splrepo-compare-col">
+              <h3>Generic baseline pattern</h3>
+              <p>Broader SPL often assumes generic fields, wider search scopes, and weaker environment grounding. It is easier to write once, but it is less reliable for this deployment.</p>
+            </div>
+            <div class="splrepo-compare-col">
+              <h3>Approved environment-specific asset</h3>
+              <p>An approved asset names the real indexes, sources, sourcetypes, and fields this environment actually exposes. That makes future SPL writing more reusable, more constrained, and more trustworthy.</p>
+            </div>
+          </div>
+        </section>
+        <section class="splrepo-panel splrepo-panel-drafts">
+          <div class="splrepo-section-head">
+            <div>
+              <h2>Recorded SPL Asset Drafts</h2>
+              <div class="splrepo-section-note">These drafts were generated by the engine. They do not affect runtime until approved. Review them row by row and act from the last column.</div>
+            </div>
+          </div>
+          <div class="splrepo-table-wrap">
+            <div class="splrepo-table-scroll">
+              <table class="splrepo-table">
+                <thead>
+                      <tr>
+                        <th>Intent</th>
+                        <th>State</th>
+                        <th>Question Family</th>
+                        <th>Why This Exists</th>
+                        <th>Environment Fit</th>
+                        <th>Pattern</th>
+                        <th>Proof / Updated</th>
+                        <th>Actions</th>
+                      </tr>
+                </thead>
+                <tbody>
+                  {draft_table_rows if draft_table_rows else '<tr><td colspan="8" class="splrepo-empty">No recorded SPL drafts yet. Run the SPL Optimization AI Engine to generate reusable drafts for review.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+      <div class="splrepo-side">
+        <section class="splrepo-spotlight">
+          <div class="splrepo-spotlight-head">
+            <div class="splrepo-spotlight-title">Active Asset Spotlight</div>
+            <span class="splrepo-metric">{'Active and influencing future SPL' if spotlight else 'No active asset yet'}</span>
+          </div>
+          <div class="splrepo-spotlight-name">{spotlight_intent}</div>
+          <div class="splrepo-spotlight-copy">{spotlight_when if spotlight_when else 'Approve a recorded draft from the table to create the first active reusable SPL asset for this environment.'}</div>
+          {f'<div class="learning-item-meta" style="margin-top:10px;"><strong>Why it matters:</strong> {spotlight_why}</div>' if spotlight_why else ''}
+          {f'<div class="learning-item-meta"><strong>Current reusable pattern:</strong> {spotlight_pattern}</div>' if spotlight_pattern else ''}
+        </section>
+        <section class="splrepo-panel">
+          <h2>What This Page Is For</h2>
+          <div class="splrepo-status-list">
+            <div class="splrepo-status-item"><strong>Scan</strong> the tables by row to compare reusable SPL assets quickly.</div>
+            <div class="splrepo-status-item"><strong>Review</strong> recorded drafts in the queue before they influence runtime.</div>
+            <div class="splrepo-status-item"><strong>Approve</strong> only assets that are accurate, reusable, and grounded in this environment.</div>
+          </div>
+        </section>
+        <section class="splrepo-panel">
+          <h2>Review Queue</h2>
+          <div class="splrepo-queue-stat">
+            <div>
+              <div class="splrepo-guide-title" style="margin:0 0 4px;">Recorded drafts ready</div>
+              <div class="splrepo-copy">{review_message}</div>
+            </div>
+            <div class="splrepo-queue-count">{history_count}</div>
+          </div>
+          <div class="splrepo-status-list">
+            <div class="splrepo-status-item"><strong>Approve</strong> when a draft is accurate, reusable, and grounded in this environment.</div>
+            <div class="splrepo-status-item"><strong>Reject</strong> when a draft is too generic, too weak, or not worth influencing future SPL writing.</div>
+            <div class="splrepo-status-item"><strong>Remember:</strong> recorded drafts are visible history only. They do not become active until approved.</div>
+          </div>
+        </section>
+        <section class="splrepo-panel">
+          <h2>Repository Status</h2>
+          <div class="splrepo-status-list">
+            <div class="splrepo-status-item"><strong>Repository path:</strong> <code>{repo_path}</code></div>
+            <div class="splrepo-status-item"><strong>Approved active:</strong> {active_count}</div>
+            <div class="splrepo-status-item"><strong>Recorded drafts:</strong> {history_count}</div>
+          </div>
+          <div class="splrepo-footer-note" style="margin-top:10px;">This page is for review and activation. The SPL Optimization AI Engine creates the drafts; this repository decides what becomes active.</div>
+        </section>
+      </div>
+    </div>
+  </div>
+  <script>
+    document.querySelectorAll('[data-repo-action][data-id]').forEach((btn) => {{
+      btn.onclick = async () => {{
+        const action = String(btn.getAttribute('data-repo-action') || '').trim();
+        const id = String(btn.getAttribute('data-id') || '').trim();
+        btn.disabled = true;
+        const resp = await fetch('/api/config/local-learning', {{
+          method:'POST',
+          headers:{{'Content-Type':'application/json'}},
+          body: JSON.stringify({{action, id}})
+        }});
+        const data = await resp.json();
+        if(!resp.ok){{
+          alert(data.error || `asset ${{action}} failed (${{resp.status}})`);
+          btn.disabled = false;
+          return;
+        }}
+        location.reload();
+      }};
+    }});
   </script>
 </div>
 """
@@ -11093,7 +12777,7 @@ class Handler(BaseHTTPRequestHandler):
                     HTTPStatus.ACCEPTED,
                     {
                         "status": "in_progress",
-                        "detail": "Guarded local learning is already running.",
+                        "detail": "SPL Optimization AI Engine is already running.",
                         "local_learning": _local_learning_status(),
                     },
                 )
@@ -11103,10 +12787,10 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.ACCEPTED,
                 {
                     "status": "started",
-                    "detail": "Guarded local learning started.",
+                    "detail": "SPL Optimization AI Engine started.",
                     "local_learning": {
                         "state": "in_progress",
-                        "detail": "Starting guarded local learning run...",
+                        "detail": "Starting SPL Optimization AI Engine run...",
                         "progress_pct": 5,
                         "phase": "starting",
                         "path": display_path(ensure_learning_registry()),
@@ -11618,7 +13302,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/learning":
             if not self._require_ops_page():
                 return
-            self._html(HTTPStatus.OK, _learning_page_body(), title="Guarded Local Learning", nav_active="control")
+            self._html(HTTPStatus.OK, _learning_page_body(), title="SPL Optimization AI Engine", nav_active="control")
+            return
+
+        if parsed.path == "/spl-assets":
+            if not self._require_ops_page():
+                return
+            self._html(HTTPStatus.OK, _spl_asset_repository_page_body(), title="SPL Asset Repository", nav_active="control")
             return
 
         if parsed.path == "/users":
@@ -11835,6 +13525,7 @@ class Handler(BaseHTTPRequestHandler):
                     mitre_bundle = _mitre_attack_bundle(result_body)
                     mitre_bundle["validation"] = _mitre_attack_validate(result_body, mitre_bundle)
                     result_body["mitre_attack"] = mitre_bundle
+                    result_body["matching_active_spl_assets"] = _active_spl_asset_matches_for_intent(result_body.get("intent", ""))
                     result["result"] = result_body
                     meta = result.get("meta", {}) if isinstance(result.get("meta"), dict) else {}
                     artifact_path = str(meta.get("artifact", "")).strip()

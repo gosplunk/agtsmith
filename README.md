@@ -1,6 +1,6 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.2.3`
+Current release: `v1.2.4`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
@@ -51,32 +51,32 @@ Then:
 - run the first investigation
 
 ## Screenshots
-These screenshots reflect the current `v1.2.3` interface.
+These screenshots reflect the current `v1.2.4` interface.
 
 ### Login
-`v1.2.3` login flow for the analyst console.
+`v1.2.4` login flow for the analyst console.
 
-![A.G.E.N.T. Smith v1.2.3 login](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-login.png)
+![A.G.E.N.T. Smith v1.2.4 login](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-login.png)
 
 ### Investigation Workspace
-`v1.2.3` Splunk-first investigation workflow with sticky analyst controls, current assessment, timeline, pivots, and ATT&CK context.
+`v1.2.4` Splunk-first investigation workflow with sticky analyst controls, a non-redundant investigation drawer, current assessment, recommended next steps, and ATT&CK context.
 
-![A.G.E.N.T. Smith v1.2.3 investigation workspace](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-investigation.png)
+![A.G.E.N.T. Smith v1.2.4 investigation workspace](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-investigation.png)
 
 ### Architecture View
-`v1.2.3` system architecture and role separation view for the bounded Splunk investigation pipeline.
+`v1.2.4` system architecture and role separation view for the bounded Splunk investigation pipeline.
 
-![A.G.E.N.T. Smith v1.2.3 architecture view](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-architecture.png)
+![A.G.E.N.T. Smith v1.2.4 architecture view](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-architecture.png)
 
 ### Data Domains And Personalization
-`v1.2.3` environment-aware Data Domains view showing the Linux domain expanded into Apache `access_combined` telemetry with field inventory used for query grounding and personalization.
+`v1.2.4` environment-aware Data Domains view showing the Linux domain expanded into Apache `access_combined` telemetry with field inventory used for query grounding and personalization.
 
-![A.G.E.N.T. Smith v1.2.3 Data Domains personalization view](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-data-domains.png)
+![A.G.E.N.T. Smith v1.2.4 Data Domains personalization view](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-data-domains.png)
 
-### Guarded Local Learning
-`v1.2.3` Guarded Local Learning showing run mode, measured SPL-writing improvement, cache reuse, and explicit no-gain messaging when the current environment baseline already covers the tested cases.
+### SPL Optimization AI Engine
+`v1.2.4` SPL Optimization AI Engine showing the simplified operator view, reusable SPL asset workflow, and repository-backed optimization state.
 
-![A.G.E.N.T. Smith v1.2.3 Guarded Local Learning](docs/images/screenshots/v1.2.3/agtsmith-v1.2.3-learning.png)
+![A.G.E.N.T. Smith v1.2.4 SPL Optimization AI Engine](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-learning.png)
 
 ## How It Works
 The default SPL path is a split-role pipeline:
@@ -121,13 +121,20 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - added a canonical next-release planning document for `v1.3.0`, including persistent follow-up context as a planned standard-pivot enhancement
 - fixed the runtime configuration save flow so changing Ollama/Splunk hosts does not leave the UI stuck on `Saving...`
 
+## What's New In v1.2.4
+- redesigned the Investigation Drawer into a sticky Splunk-first analyst workbench with action-first tabs for pivots, evidence, SPL, ATT&CK context, and decision tracing
+- added stronger investigation trust cues including left-rail phase status, improved long-running guidance, richer Splunk handoff, and row-level drill-down from evidence back into Splunk
+- turned SPL Optimization into a repository-backed workflow with reusable SPL assets, explicit approval flow, and a dedicated SPL Asset Repository review surface
+- reorganized Control Center pages around current state, next action, and working context so configuration, audit, environment coverage, and artifacts are easier to scan
+- refreshed the public screenshots so GitHub matches the current product surface
+
 ## What's New In v1.2.3
-- clarified Guarded Local Learning so the operator can see which learning mode ran and why a no-gain run finished without keeping new hints
+- clarified SPL Optimization AI Engine so the operator can see which learning mode ran and why a no-gain run finished without keeping new hints
 - added explicit learned-state, benchmark cache, candidate filtering, and run-duration feedback to the Learning page
-- fixed the Learning page so `Run Self Learn` is no longer blocked by the admin onboarding modal or by a client-side JavaScript parse error
+- fixed the Learning page so `Run Optimization Cycle` is no longer blocked by the admin onboarding modal or by a client-side JavaScript parse error
 
 ## What's New In v1.1.0
-- Guarded local learning with reviewable, airgapped environment-specific memory
+- SPL Optimization AI Engine with reviewable, airgapped environment-specific memory
 - Stronger Linux auth, Windows auth, Apache, and mixed-platform investigation handling
 - Improved Investigation UI result rendering, progress visibility, and operator feedback
 - Pilot benchmark pack and full-pipeline hardening harness for BOTSv3 and live-environment testing
@@ -204,7 +211,8 @@ Deployment notes:
 ## Key Routes
 - Investigation UI: `/investigation`
 - MCP Chat: `/mcp`
-- Local Learning: `/learning`
+- SPL Optimization AI Engine: `/learning`
+- SPL Asset Repository: `/spl-assets`
 - Configuration: `/configure`
 - Architecture: `/architecture`
 - LangGraph Graph: `/langgraph-graph`

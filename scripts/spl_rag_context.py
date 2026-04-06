@@ -260,11 +260,34 @@ def _build_local_learning_context(question: str, *, max_chars: int = 700) -> str
     if not scored:
         return ""
     scored.sort(key=lambda x: x[0], reverse=True)
-    lines = ["[LOCAL_LEARNING_APPROVED]", "Use these approved local hints only when they agree with discovered environment facts."]
+    lines = ["[LOCAL_LEARNING_APPROVED]", "Use these approved optimization assets and local hints only when they agree with discovered environment facts."]
     for score, row in scored[:4]:
-        lines.append(
-            f"- intent={row.get('intent','')} kind={row.get('kind','')} relevance={score} proposal={json.dumps(row.get('proposal', ''), sort_keys=True)}"
-        )
+        kind = str(row.get("kind", "")).strip()
+        proposal = row.get("proposal", {}) if isinstance(row.get("proposal", {}), dict) else {}
+        if kind == "spl_pattern_asset":
+            lines.append(
+                f"- intent={row.get('intent','')} kind=spl_pattern_asset relevance={score} "
+                f"query_template={json.dumps(str(proposal.get('query_template', '')).strip())}"
+            )
+            required_fields = proposal.get("required_fields", [])
+            if isinstance(required_fields, list) and required_fields:
+                lines.append(f"  required_fields={', '.join(str(x).strip() for x in required_fields if str(x).strip())}")
+            required_sources = proposal.get("required_sources", [])
+            if isinstance(required_sources, list) and required_sources:
+                lines.append(f"  required_sources={', '.join(str(x).strip() for x in required_sources if str(x).strip())}")
+            required_sourcetypes = proposal.get("required_sourcetypes", [])
+            if isinstance(required_sourcetypes, list) and required_sourcetypes:
+                lines.append(f"  required_sourcetypes={', '.join(str(x).strip() for x in required_sourcetypes if str(x).strip())}")
+            use_when = str(proposal.get("use_when", "")).strip()
+            if use_when:
+                lines.append(f"  use_when={use_when}")
+            why = str(proposal.get("why", "")).strip()
+            if why:
+                lines.append(f"  why={why}")
+        else:
+            lines.append(
+                f"- intent={row.get('intent','')} kind={kind} relevance={score} proposal={json.dumps(proposal, sort_keys=True)}"
+            )
         reason = str(row.get("reason", "")).strip()
         if reason:
             lines.append(f"  reason={reason}")

@@ -30,6 +30,7 @@ LEARNING_ROOT = ARTIFACTS_ROOT / "learning"
 REGISTRY_PATH = LEARNING_ROOT / "local_learning_registry.json"
 LEARNING_PROGRESS_PATH = LEARNING_ROOT / "local_learning_progress.json"
 LEARNING_BENCHMARK_CACHE_PATH = LEARNING_ROOT / "local_learning_benchmark_cache.json"
+SPL_OPTIMIZATION_REPOSITORY_PATH = LEARNING_ROOT / "spl_optimization_repository.json"
 QUERY_AUDIT_LOG = ARTIFACTS_ROOT / "audit" / "query_runs.jsonl"
 ENV_PROFILE_PATH = ARTIFACTS_ROOT / "environment" / "environment_profile_latest.json"
 WRITER_BENCHMARK_CASES = PROJECT_ROOT / "benchmarks" / "spl_cases.json"
@@ -40,6 +41,7 @@ ALLOWED_KINDS = {
     "preferred_fields",
     "preferred_filters",
     "post_result_pivot_hint",
+    "spl_pattern_asset",
 }
 BROAD_INTENTS = {"failed_login_activity"}
 INTENT_TO_DOMAIN = {
@@ -70,6 +72,9 @@ DEFAULT_LEARNING_BENCHMARK_INTENTS = (
     "failed_login_activity",
 )
 TIMEOUT_TOKENS = ("readtimeout", "timed out", "timeout")
+DEFAULT_SPL_OPTIMIZER_WRITER_ALT = "qwen2.5-coder:14b"
+DEFAULT_SPL_OPTIMIZER_JUDGE = "deepseek-r1:32b"
+DEFAULT_SPL_OPTIMIZER_DISTILLER = "hf.co/bartowski/Mistral-Small-24B-Instruct-2501-GGUF:Q6_K"
 
 _APPROVED_RECORD_OVERRIDE: list[dict[str, Any]] | None = None
 
@@ -107,6 +112,23 @@ def _sanitize_learning_proposal(kind: str, proposal: Any) -> tuple[dict[str, Any
             if filtered != sourcetypes:
                 cleaned["preferred_sourcetypes"] = filtered
                 changed = True
+    if kind == "spl_pattern_asset":
+        for key in ("required_fields", "required_sources", "required_sourcetypes", "match_tokens", "avoid_when"):
+            values = cleaned.get(key, [])
+            if isinstance(values, str):
+                values = [values]
+            if isinstance(values, list):
+                filtered = [str(item).strip() for item in values if str(item).strip()]
+                if "sourcetype" in key:
+                    filtered = [item for item in filtered if not _is_legacy_sourcetype(item)]
+                if filtered != values:
+                    changed = True
+                cleaned[key] = filtered
+        for key in ("query_template", "use_when", "why"):
+            text = str(cleaned.get(key, "")).strip()
+            if cleaned.get(key, "") != text:
+                changed = True
+            cleaned[key] = text
     return cleaned, changed
 
 
@@ -126,6 +148,9 @@ def _runtime_models() -> dict[str, str]:
         "planner": str(values.get("OLLAMA_MODEL_QUERY_PLANNER", DEFAULT_MODEL_QUERY_PLANNER)).strip() or DEFAULT_MODEL_QUERY_PLANNER,
         "writer": str(values.get("OLLAMA_MODEL_QUERY_WRITER", DEFAULT_MODEL_QUERY_WRITER)).strip() or DEFAULT_MODEL_QUERY_WRITER,
         "reviewer": str(values.get("OLLAMA_MODEL_SECURITY_REVIEWER", DEFAULT_MODEL_SECURITY_REVIEWER)).strip() or DEFAULT_MODEL_SECURITY_REVIEWER,
+        "writer_alt": str(values.get("OLLAMA_MODEL_SPL_OPTIMIZER_WRITER_ALT", DEFAULT_SPL_OPTIMIZER_WRITER_ALT)).strip() or DEFAULT_SPL_OPTIMIZER_WRITER_ALT,
+        "judge": str(values.get("OLLAMA_MODEL_SPL_OPTIMIZER_JUDGE", DEFAULT_SPL_OPTIMIZER_JUDGE)).strip() or DEFAULT_SPL_OPTIMIZER_JUDGE,
+        "distiller": str(values.get("OLLAMA_MODEL_SPL_OPTIMIZER_DISTILLER", DEFAULT_SPL_OPTIMIZER_DISTILLER)).strip() or DEFAULT_SPL_OPTIMIZER_DISTILLER,
     }
 
 
@@ -276,6 +301,102 @@ def save_learning_progress(data: dict[str, Any]) -> None:
     LEARNING_PROGRESS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _ensure_spl_optimization_repository() -> Path:
+    LEARNING_ROOT.mkdir(parents=True, exist_ok=True)
+    if not SPL_OPTIMIZATION_REPOSITORY_PATH.exists():
+        SPL_OPTIMIZATION_REPOSITORY_PATH.write_text(
+            json.dumps({"version": 1, "updated_at": _utc_now(), "active_assets": [], "history_assets": []}, indent=2),
+            encoding="utf-8",
+        )
+    return SPL_OPTIMIZATION_REPOSITORY_PATH
+
+
+def write_spl_optimization_repository(payload: dict[str, Any]) -> Path:
+    target = _ensure_spl_optimization_repository()
+    out = {
+        "version": 1,
+        "updated_at": _utc_now(),
+        "active_assets": payload.get("active_assets", []) if isinstance(payload, dict) else [],
+        "history_assets": payload.get("history_assets", []) if isinstance(payload, dict) else [],
+    }
+    target.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return target
+
+
+def _compile_spl_optimization_repository(
+    records: list[dict[str, Any]] | None = None,
+    observed_assets: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    rows = records if isinstance(records, list) else load_learning_registry().get("records", [])
+    active_assets: list[dict[str, Any]] = []
+    history_assets: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("kind", "")).strip() != "spl_pattern_asset":
+            continue
+        proposal = row.get("proposal", {}) if isinstance(row.get("proposal", {}), dict) else {}
+        asset = {
+            "id": str(row.get("id", "")).strip(),
+            "intent": str(row.get("intent", "")).strip(),
+            "status": str(row.get("status", "")).strip() or "pending",
+            "query_template": str(proposal.get("query_template", "")).strip(),
+            "required_fields": _proposal_values(proposal, "required_fields"),
+            "required_sources": _proposal_values(proposal, "required_sources"),
+            "required_sourcetypes": _proposal_values(proposal, "required_sourcetypes"),
+            "match_tokens": _proposal_values(proposal, "match_tokens"),
+            "use_when": str(proposal.get("use_when", "")).strip(),
+            "avoid_when": _proposal_values(proposal, "avoid_when"),
+            "why": str(proposal.get("why", "")).strip(),
+            "reason": str(row.get("reason", "")).strip(),
+            "created_at": str(row.get("created_at", "")).strip(),
+            "updated_at": str(row.get("updated_at", "")).strip(),
+            "selection_reason": str(row.get("selection_reason", "")).strip(),
+            "benchmark_impact": row.get("benchmark_impact", {}) if isinstance(row.get("benchmark_impact", {}), dict) else {},
+        }
+        history_assets.append(asset)
+        seen_ids.add(asset["id"])
+        if asset["status"] == "approved":
+            active_assets.append(asset)
+    for row in observed_assets or []:
+        if not isinstance(row, dict):
+            continue
+        row_kind = str(row.get("kind", "")).strip()
+        proposal = row.get("proposal", {}) if isinstance(row.get("proposal", {}), dict) else {}
+        if row_kind and row_kind != "spl_pattern_asset":
+            continue
+        asset_id = str(row.get("id", "")).strip()
+        query_template = str((proposal.get("query_template", "") if proposal else row.get("query_template", ""))).strip()
+        if not asset_id or asset_id in seen_ids or not query_template:
+            continue
+        history_assets.append(
+            {
+                "id": asset_id,
+                "intent": str(row.get("intent", "")).strip(),
+                "status": str(row.get("status", "")).strip() or "generated",
+                "query_template": query_template,
+                "required_fields": _proposal_values(proposal, "required_fields") if proposal else _proposal_values(row, "required_fields"),
+                "required_sources": _proposal_values(proposal, "required_sources") if proposal else _proposal_values(row, "required_sources"),
+                "required_sourcetypes": _proposal_values(proposal, "required_sourcetypes") if proposal else _proposal_values(row, "required_sourcetypes"),
+                "match_tokens": _proposal_values(proposal, "match_tokens") if proposal else _proposal_values(row, "match_tokens"),
+                "use_when": str((proposal.get("use_when", "") if proposal else row.get("use_when", ""))).strip(),
+                "avoid_when": _proposal_values(proposal, "avoid_when") if proposal else _proposal_values(row, "avoid_when"),
+                "why": str((proposal.get("why", "") if proposal else row.get("why", ""))).strip(),
+                "reason": str(row.get("reason", "")).strip(),
+                "created_at": str(row.get("created_at", "")).strip(),
+                "updated_at": str(row.get("updated_at", "")).strip(),
+                "selection_reason": str(row.get("selection_reason", "")).strip() or "observed_only",
+                "benchmark_impact": row.get("benchmark_impact", {}) if isinstance(row.get("benchmark_impact", {}), dict) else {},
+            }
+        )
+        seen_ids.add(asset_id)
+    return {
+        "version": 1,
+        "updated_at": _utc_now(),
+        "active_assets": active_assets,
+        "history_assets": history_assets,
+    }
+
+
 def _load_learning_benchmark_cache() -> dict[str, Any]:
     LEARNING_ROOT.mkdir(parents=True, exist_ok=True)
     if not LEARNING_BENCHMARK_CACHE_PATH.exists():
@@ -364,6 +485,17 @@ def update_learning_progress_history(snapshot: dict[str, Any]) -> dict[str, Any]
 
 def learning_registry_summary() -> dict[str, Any]:
     data = load_learning_registry()
+    existing_repo = None
+    try:
+        if SPL_OPTIMIZATION_REPOSITORY_PATH.exists():
+            existing_repo = json.loads(SPL_OPTIMIZATION_REPOSITORY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        existing_repo = None
+    observed_assets = []
+    if isinstance(existing_repo, dict):
+        observed_assets = existing_repo.get("history_assets", []) if isinstance(existing_repo.get("history_assets", []), list) else []
+    repository = _compile_spl_optimization_repository(data.get("records", []), observed_assets=observed_assets)
+    write_spl_optimization_repository(repository)
     counts = {key: 0 for key in sorted(ALLOWED_STATUSES)}
     latest: list[dict[str, Any]] = []
     for row in data.get("records", []):
@@ -385,10 +517,16 @@ def learning_registry_summary() -> dict[str, Any]:
     latest.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
     return {
         "path": str(REGISTRY_PATH),
+        "repository_path": str(SPL_OPTIMIZATION_REPOSITORY_PATH),
         "version": data.get("version", 1),
         "updated_at": data.get("updated_at", ""),
         "counts": counts,
         "latest": latest[:6],
+        "repository": {
+            "active_assets": len(repository.get("active_assets", [])),
+            "history_assets": len(repository.get("history_assets", [])),
+            "records": repository.get("active_assets", [])[:12],
+        },
     }
 
 
@@ -761,6 +899,32 @@ def _normalize_proposal_for_bundle(bundle: dict[str, Any], kind: str, proposal: 
         if hint:
             normalized["cross_platform_pivot_hint"] = hint
         return normalized
+    if kind == "spl_pattern_asset":
+        query_template = str(proposal.get("query_template", proposal.get("template", ""))).strip()
+        use_when = str(proposal.get("use_when", "")).strip()
+        why = str(proposal.get("why", proposal.get("reason", ""))).strip()
+        required_fields = _proposal_values(proposal, "required_fields") or _proposal_values(proposal, "preferred_fields")
+        required_sources = _proposal_values(proposal, "required_sources") or _proposal_values(proposal, "preferred_sources")
+        required_sourcetypes = _proposal_values(proposal, "required_sourcetypes") or _proposal_values(proposal, "preferred_sourcetypes")
+        match_tokens = _proposal_values(proposal, "match_tokens")
+        avoid_when = _proposal_values(proposal, "avoid_when")
+        if query_template:
+            normalized["query_template"] = query_template
+        if required_fields:
+            normalized["required_fields"] = required_fields
+        if required_sources:
+            normalized["required_sources"] = required_sources
+        if required_sourcetypes:
+            normalized["required_sourcetypes"] = required_sourcetypes
+        if match_tokens:
+            normalized["match_tokens"] = match_tokens
+        if avoid_when:
+            normalized["avoid_when"] = avoid_when
+        if use_when:
+            normalized["use_when"] = use_when
+        if why:
+            normalized["why"] = why
+        return normalized
     return normalized
 
 
@@ -921,6 +1085,196 @@ def _review_candidate(bundle: dict[str, Any], planner: dict[str, Any], writer: d
         "bundle_id": writer.get("bundle_id", ""),
     }
     return {"approved": bool(raw.get("approved", False)), "reason": str(raw.get("reason", "")).strip(), "candidate": _finalize_candidate_for_bundle(bundle, candidate)}
+
+
+def _optimization_target_bundles(bundle: dict[str, Any]) -> bool:
+    domain = str(bundle.get("domain", "")).strip()
+    return domain in {"linux_auth", "windows_auth", "apache_web"}
+
+
+def _bundle_pattern_blueprint(bundle: dict[str, Any]) -> dict[str, Any]:
+    env = bundle.get("environment_evidence", {}) if isinstance(bundle.get("environment_evidence", {}), dict) else {}
+    domain = str(bundle.get("domain", "")).strip()
+    if domain == "linux_auth":
+        sourcetypes = _proposal_values(env, "preferred_sourcetypes")
+        sources = _proposal_values(env, "preferred_sources")
+        return {
+            "intent": "linux_auth_failures",
+            "match_tokens": ["linux", "auth", "ssh", "failed", "login"],
+            "required_fields": ["host", "user_name", "src_ip", "auth_port"],
+            "required_sources": sources,
+            "required_sourcetypes": sourcetypes,
+            "query_template": (
+                "search index=linux "
+                '(source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") '
+                "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\") "
+                "| eval src_ip=coalesce(src_ip,rhost,ip) "
+                "| eval user_name=coalesce(user,username,account) "
+                "| stats count by host user_name src_ip "
+                "| sort - count"
+            ),
+            "use_when": "Use for Linux failed-login questions when auth.log or secure log sources are present in the environment profile.",
+            "avoid_when": ["Do not use for Windows-only authentication questions."],
+            "why": "Targets the Linux authentication sources and fields that this environment actually exposes.",
+        }
+    if domain == "windows_auth":
+        return {
+            "intent": "windows_auth_failures",
+            "match_tokens": ["windows", "failed", "logon", "authentication", "4625"],
+            "required_fields": ["host", "user_name", "src_ip", "EventCode"],
+            "required_sources": [],
+            "required_sourcetypes": ["XmlWinEventLog"],
+            "query_template": (
+                "search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+                "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
+                "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src_ip,src) "
+                "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user) "
+                "| stats count by host user_name src_ip EventCode "
+                "| sort - count"
+            ),
+            "use_when": "Use for Windows failed-logon questions when XmlWinEventLog and 4625-style events are present.",
+            "avoid_when": ["Do not use for Linux-only failed-authentication questions."],
+            "why": "Anchors the pattern to the Windows event fields this environment exposes for authentication failures.",
+        }
+    if domain == "apache_web":
+        return {
+            "intent": "apache_access_top_ips",
+            "match_tokens": ["apache", "access", "clientip", "top ip", "web"],
+            "required_fields": ["clientip", "status", "method", "useragent", "uri_path"],
+            "required_sources": [],
+            "required_sourcetypes": ["access_combined"],
+            "query_template": (
+                "search index=linux sourcetype=access_combined "
+                "| stats count values(status) as statuses values(method) as methods by clientip "
+                "| sort - count"
+            ),
+            "use_when": "Use for Apache access-analysis questions when access_combined is the known sourcetype.",
+            "avoid_when": ["Do not use for auth or process execution questions."],
+            "why": "Matches the Apache access fields already discovered in Data Domains and keeps the pattern reusable.",
+        }
+    return {}
+
+
+def _optimization_pattern_candidate(
+    bundle: dict[str, Any],
+    models: dict[str, str],
+    *,
+    progress_cb: callable | None = None,
+    log_cb: callable | None = None,
+    start_pct: int | None = None,
+    end_pct: int | None = None,
+) -> dict[str, Any] | None:
+    if not _optimization_target_bundles(bundle):
+        return None
+    blueprint = _bundle_pattern_blueprint(bundle)
+    if not blueprint:
+        return None
+
+    def _emit(detail: str, pct: int | None = None) -> None:
+        if progress_cb and pct is not None:
+            try:
+                progress_cb(detail, pct, "reviewing_bundle")
+            except Exception:
+                pass
+        if log_cb:
+            try:
+                log_cb(f"[learning] {detail}")
+            except Exception:
+                pass
+
+    def _step_pct(position: float) -> int | None:
+        if start_pct is None or end_pct is None:
+            return None
+        span = max(0, end_pct - start_pct)
+        return start_pct + int(span * position)
+    system = (
+        "You are building an environment-aware reusable Splunk SPL pattern for A.G.E.N.T. Smith. "
+        "Return strict JSON only with keys query_template, required_fields, required_sources, "
+        "required_sourcetypes, match_tokens, use_when, avoid_when, why. "
+        "The query_template must start with 'search ' and remain read-only. "
+        "Use only facts present in the supplied bundle and blueprint."
+    )
+    payload = {"bundle": bundle, "blueprint": blueprint}
+    candidates: list[dict[str, Any]] = []
+    _emit(f"optimization asset generation started for {bundle.get('bundle_id', 'bundle')}", _step_pct(0.05))
+    for model_key in ("writer", "writer_alt"):
+        try:
+            _emit(f"optimization asset writer step using {model_key}", _step_pct(0.18 if model_key == "writer" else 0.34))
+            raw = _call_ollama_json(
+                model=models[model_key],
+                system_prompt=system,
+                user_payload=payload,
+                timeout=LEARNING_MODEL_TIMEOUT_SECONDS,
+            )
+            candidates.append(
+                {
+                    "model": models[model_key],
+                    "proposal": _normalize_proposal_for_bundle(bundle, "spl_pattern_asset", raw),
+                }
+            )
+        except Exception as exc:
+            _emit(f"optimization asset {model_key} failed: {type(exc).__name__}", _step_pct(0.26 if model_key == "writer" else 0.42))
+            continue
+    if not candidates:
+        _emit(f"optimization asset generation found no usable writer output for {bundle.get('bundle_id', 'bundle')}", _step_pct(0.45))
+        return None
+    if len(candidates) == 1:
+        chosen = candidates[0]["proposal"]
+    else:
+        judge_system = (
+            "You are choosing the better reusable environment-aware Splunk SPL pattern. "
+            "Prefer the candidate that is safer, more environment-specific, more reusable, and more likely to improve future SPL writing. "
+            "Return strict JSON only with keys winner and reason, where winner is A or B."
+        )
+        judge_payload = {
+            "bundle": bundle,
+            "candidate_a": candidates[0]["proposal"],
+            "candidate_b": candidates[1]["proposal"],
+        }
+        try:
+            _emit("optimization asset judge comparing writer candidates", _step_pct(0.55))
+            judge = _call_ollama_json(
+                model=models["judge"],
+                system_prompt=judge_system,
+                user_payload=judge_payload,
+                timeout=max(20.0, LEARNING_MODEL_TIMEOUT_SECONDS * 2),
+            )
+            winner = str(judge.get("winner", "A")).strip().upper()
+            chosen = candidates[1]["proposal"] if winner == "B" else candidates[0]["proposal"]
+        except Exception as exc:
+            _emit(f"optimization asset judge fallback: {type(exc).__name__}", _step_pct(0.62))
+            chosen = candidates[0]["proposal"]
+    distiller_system = (
+        "You are distilling a reusable SPL optimization asset for A.G.E.N.T. Smith. "
+        "Return strict JSON only with keys query_template, required_fields, required_sources, "
+        "required_sourcetypes, match_tokens, use_when, avoid_when, why. "
+        "Tighten the chosen pattern into a reusable environment-specific asset without changing the intent."
+    )
+    try:
+        _emit("optimization asset distiller tightening chosen pattern", _step_pct(0.78))
+        distilled = _call_ollama_json(
+            model=models["distiller"],
+            system_prompt=distiller_system,
+            user_payload={"bundle": bundle, "chosen_pattern": chosen, "blueprint": blueprint},
+            timeout=max(20.0, LEARNING_MODEL_TIMEOUT_SECONDS * 2),
+        )
+        proposal = _normalize_proposal_for_bundle(bundle, "spl_pattern_asset", distilled)
+    except Exception as exc:
+        _emit(f"optimization asset distiller fallback: {type(exc).__name__}", _step_pct(0.9))
+        proposal = _normalize_proposal_for_bundle(bundle, "spl_pattern_asset", chosen)
+    if not proposal:
+        _emit(f"optimization asset generation produced no reusable asset for {bundle.get('bundle_id', 'bundle')}", _step_pct(0.94))
+        return None
+    _emit(f"optimization asset ready for {blueprint.get('intent', 'unknown_intent')}", _step_pct(0.98))
+    return {
+        "action": "propose_candidate",
+        "intent": str(blueprint.get("intent", "")).strip(),
+        "kind": "spl_pattern_asset",
+        "proposal": proposal,
+        "reason": "Multi-model SPL optimization pass generated a reusable environment-specific SPL pattern asset.",
+        "confidence": 0.78,
+        "bundle_id": str(bundle.get("bundle_id", "")).strip(),
+    }
 
 
 def _proposal_values(proposal: dict[str, Any], key: str) -> list[str]:
@@ -1122,7 +1476,7 @@ def _filter_snapshot(snapshot: dict[str, Any], target_intents: list[str]) -> dic
 def _candidate_writer_target_intents(candidate: dict[str, Any], benchmark_target_intents: list[str]) -> list[str]:
     intent = str(candidate.get("intent", "")).strip()
     kind = str(candidate.get("kind", "")).strip()
-    if not intent or kind not in {"preferred_sources", "preferred_fields", "preferred_filters"}:
+    if not intent or kind not in {"preferred_sources", "preferred_fields", "preferred_filters", "spl_pattern_asset"}:
         return []
     allow = {str(item).strip() for item in benchmark_target_intents if str(item).strip()}
     impacted = {intent}
@@ -1475,12 +1829,30 @@ def _deterministic_validate_learning(bundle: dict[str, Any], candidate: dict[str
         hint = str(proposal.get("cross_platform_pivot_hint", "")).strip()
         if not hint:
             return False, "empty_cross_platform_pivot_hint"
+    if kind == "spl_pattern_asset":
+        query_template = str(proposal.get("query_template", "")).strip()
+        if not query_template:
+            return False, "empty_query_template"
+        if not query_template.lower().startswith("search "):
+            return False, "pattern_template_not_search_prefix"
+        required_fields = set(_proposal_values(proposal, "required_fields"))
+        required_sources = set(_proposal_values(proposal, "required_sources"))
+        required_sourcetypes = set(_proposal_values(proposal, "required_sourcetypes"))
+        if bundle.get("domain") == "linux_auth" and not (required_sources or required_sourcetypes):
+            return False, "linux_pattern_missing_sources_or_sourcetypes"
+        if bundle.get("domain") == "apache_web" and "clientip" not in required_fields:
+            return False, "apache_pattern_missing_clientip"
+        if bundle.get("domain") == "windows_auth" and "EventCode" not in required_fields:
+            return False, "windows_pattern_missing_eventcode"
     if bundle.get("domain") == "windows_auth" and kind != "preferred_fields":
-        return False, "windows_auth_must_learn_fields"
+        if kind != "spl_pattern_asset":
+            return False, "windows_auth_must_learn_fields"
     if bundle.get("domain") == "apache_web" and kind != "preferred_fields":
-        return False, "apache_web_must_learn_fields"
+        if kind != "spl_pattern_asset":
+            return False, "apache_web_must_learn_fields"
     if bundle.get("domain") == "linux_auth" and kind != "preferred_sources":
-        return False, "linux_auth_must_learn_sources"
+        if kind != "spl_pattern_asset":
+            return False, "linux_auth_must_learn_sources"
     env = bundle.get("environment_evidence", {})
     allowed_sources = set(_proposal_values(env, "preferred_sources"))
     allowed_sourcetypes = set(_proposal_values(env, "preferred_sourcetypes"))
@@ -1497,7 +1869,11 @@ def _deterministic_validate_learning(bundle: dict[str, Any], candidate: dict[str
     return True, "ok"
 
 
-def _upsert_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+def _upsert_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    observed_assets: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     registry = load_learning_registry()
     records = registry.get("records", [])
     if not isinstance(records, list):
@@ -1533,7 +1909,101 @@ def _upsert_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
         stale_marked += 1
     registry["records"] = list(by_id.values())
     save_learning_registry(registry)
-    return {"created": created, "stale_marked": stale_marked, "total": len(registry["records"])}
+    repository = _compile_spl_optimization_repository(registry["records"], observed_assets=observed_assets)
+    write_spl_optimization_repository(repository)
+    return {
+        "created": created,
+        "stale_marked": stale_marked,
+        "total": len(registry["records"]),
+        "repository": {
+            "active_assets": len(repository.get("active_assets", [])),
+            "history_assets": len(repository.get("history_assets", [])),
+            "records": repository.get("active_assets", [])[:12],
+            "path": str(SPL_OPTIMIZATION_REPOSITORY_PATH),
+        },
+    }
+
+
+def _load_spl_optimization_repository_payload() -> dict[str, Any]:
+    path = _ensure_spl_optimization_repository()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    raw.setdefault("active_assets", [])
+    raw.setdefault("history_assets", [])
+    return raw
+
+
+def _registry_record_from_repository_asset(asset: dict[str, Any], status: str) -> dict[str, Any] | None:
+    if not isinstance(asset, dict):
+        return None
+    asset_id = str(asset.get("id", "")).strip()
+    intent = str(asset.get("intent", "")).strip()
+    query_template = str(asset.get("query_template", "")).strip()
+    if not asset_id or not intent or not query_template:
+        return None
+    proposal = _sanitize_learning_proposal("spl_pattern_asset", {
+        "query_template": query_template,
+        "required_fields": asset.get("required_fields", []),
+        "required_sources": asset.get("required_sources", []),
+        "required_sourcetypes": asset.get("required_sourcetypes", []),
+        "match_tokens": asset.get("match_tokens", []),
+        "use_when": asset.get("use_when", ""),
+        "avoid_when": asset.get("avoid_when", []),
+        "why": asset.get("why", ""),
+    })[0]
+    return {
+        "id": asset_id,
+        "intent": intent,
+        "kind": "spl_pattern_asset",
+        "status": status,
+        "proposal": proposal,
+        "reason": str(asset.get("reason", "")).strip() or str(asset.get("why", "")).strip(),
+        "selection_reason": str(asset.get("selection_reason", "")).strip(),
+        "benchmark_impact": asset.get("benchmark_impact", {}) if isinstance(asset.get("benchmark_impact", {}), dict) else {},
+        "created_at": str(asset.get("created_at", "")).strip() or _utc_now(),
+        "updated_at": _utc_now(),
+        "supporting_question": "",
+        "supporting_spl": query_template,
+        "supporting_result_excerpt": "",
+        "environment_evidence": {},
+    }
+
+
+def _set_repository_asset_status(asset_id: str, status: str) -> bool:
+    status_l = str(status or "").strip().lower()
+    if status_l not in ALLOWED_STATUSES:
+        return False
+    repository = _load_spl_optimization_repository_payload()
+    history_rows = repository.get("history_assets", []) if isinstance(repository.get("history_assets", []), list) else []
+    target = None
+    for row in history_rows:
+        if isinstance(row, dict) and str(row.get("id", "")).strip() == str(asset_id).strip():
+            target = row
+            break
+    if not isinstance(target, dict):
+        return False
+    registry = load_learning_registry()
+    records = registry.get("records", []) if isinstance(registry.get("records", []), list) else []
+    found = False
+    for row in records:
+        if isinstance(row, dict) and str(row.get("id", "")).strip() == str(asset_id).strip():
+            row["status"] = status_l
+            row["updated_at"] = _utc_now()
+            found = True
+            break
+    if not found:
+        new_row = _registry_record_from_repository_asset(target, status_l)
+        if not new_row:
+            return False
+        records.append(new_row)
+    registry["records"] = records
+    save_learning_registry(registry)
+    write_spl_optimization_repository(_compile_spl_optimization_repository(records, observed_assets=history_rows))
+    return True
 
 
 def set_learning_record_status(record_id: str, status: str) -> bool:
@@ -1553,7 +2023,11 @@ def set_learning_record_status(record_id: str, status: str) -> bool:
         break
     if changed:
         save_learning_registry(registry)
-    return changed
+        existing_repo = _load_spl_optimization_repository_payload()
+        observed_assets = existing_repo.get("history_assets", []) if isinstance(existing_repo.get("history_assets", []), list) else []
+        write_spl_optimization_repository(_compile_spl_optimization_repository(registry.get("records", []), observed_assets=observed_assets))
+        return True
+    return _set_repository_asset_status(record_id, status_l)
 
 
 def generate_self_learn_candidates(
@@ -1573,6 +2047,7 @@ def generate_self_learn_candidates(
     timeout_warning_count = 0
     cache_metrics: dict[str, Any] = {"hits": 0, "misses": 0, "labels": []}
     deterministic_covered_intents: set[str] = set()
+    optimization_ai_used = False
 
     def _progress(detail: str, pct: int, phase: str) -> None:
         if progress_cb:
@@ -1588,7 +2063,7 @@ def generate_self_learn_candidates(
             except Exception:
                 pass
 
-    _progress("Collecting local evidence for guarded learning...", 8, "collecting_evidence")
+    _progress("Collecting local evidence for the SPL Optimization AI Engine...", 8, "collecting_evidence")
     _log(f"[learning] evidence bundles discovered: {len(bundles)}")
     for bundle in bundles:
         considered += 1
@@ -1641,6 +2116,34 @@ def generate_self_learn_candidates(
                     f"[learning] deterministic candidate intent={deterministic_candidate.get('intent')} "
                     f"kind={deterministic_candidate.get('kind')}"
                 )
+                optimization_ai_used = True
+                optimization_candidate = _optimization_pattern_candidate(
+                    bundle,
+                    models,
+                    progress_cb=_progress,
+                    log_cb=_log,
+                    start_pct=start_pct + max(1, (end_pct - start_pct) // 3),
+                    end_pct=end_pct,
+                )
+                if optimization_candidate:
+                    ok_opt, reason_opt = _deterministic_validate_learning(bundle, optimization_candidate)
+                    if ok_opt:
+                        candidates.append(
+                            _candidate(
+                                intent=str(optimization_candidate.get("intent", "")).strip(),
+                                kind=str(optimization_candidate.get("kind", "")).strip(),
+                                proposal=optimization_candidate.get("proposal", {}),
+                                reason=str(optimization_candidate.get("reason", reason_opt)).strip() or reason_opt,
+                                supporting_question=str(bundle.get("supporting_question", "")).strip(),
+                                supporting_spl=str(bundle.get("supporting_spl", "")).strip(),
+                                supporting_result_excerpt=str(bundle.get("supporting_result_excerpt", "")).strip(),
+                                environment_evidence=bundle.get("environment_evidence", {}),
+                            )
+                        )
+                        _log(
+                            f"[learning] optimization asset candidate intent={optimization_candidate.get('intent')} "
+                            f"kind={optimization_candidate.get('kind')}"
+                        )
                 continue
             _log(f"[learning] deterministic environment candidate rejected: {reason}")
         planner = _planner_decision(bundle, models)
@@ -1698,6 +2201,33 @@ def generate_self_learn_candidates(
             "candidate_accepted",
         )
         _log(f"[learning] accepted candidate intent={candidate.get('intent')} kind={candidate.get('kind')}")
+        optimization_candidate = _optimization_pattern_candidate(
+            bundle,
+            models,
+            progress_cb=_progress,
+            log_cb=_log,
+            start_pct=start_pct + max(1, (end_pct - start_pct) // 3),
+            end_pct=end_pct,
+        )
+        if optimization_candidate:
+            ok_opt, reason_opt = _deterministic_validate_learning(bundle, optimization_candidate)
+            if ok_opt:
+                candidates.append(
+                    _candidate(
+                        intent=str(optimization_candidate.get("intent", "")).strip(),
+                        kind=str(optimization_candidate.get("kind", "")).strip(),
+                        proposal=optimization_candidate.get("proposal", {}),
+                        reason=str(optimization_candidate.get("reason", reason_opt)).strip() or reason_opt,
+                        supporting_question=str(bundle.get("supporting_question", "")).strip(),
+                        supporting_spl=str(bundle.get("supporting_spl", "")).strip(),
+                        supporting_result_excerpt=str(bundle.get("supporting_result_excerpt", "")).strip(),
+                        environment_evidence=bundle.get("environment_evidence", {}),
+                    )
+                )
+                _log(
+                    f"[learning] optimization asset candidate intent={optimization_candidate.get('intent')} "
+                    f"kind={optimization_candidate.get('kind')}"
+                )
     target_intents = sorted({
         *DEFAULT_LEARNING_BENCHMARK_INTENTS,
         *[str(row.get("intent", "")).strip() for row in approved_records if str(row.get("intent", "")).strip()],
@@ -1708,7 +2238,7 @@ def generate_self_learn_candidates(
     if _snapshot_targets_match(cached_factory, target_intents):
         factory_baseline = cached_factory
     else:
-        _progress("Benchmarking factory baseline for SPL writing...", 74, "benchmarking_factory")
+        _progress("Benchmarking factory SPL-writing baseline...", 74, "benchmarking_factory")
         factory_baseline = _run_writer_quality_snapshot(
             target_intents=target_intents,
             approved_records=[],
@@ -1720,7 +2250,7 @@ def generate_self_learn_candidates(
             cache_metrics=cache_metrics,
         )
     if approved_records:
-        _progress("Benchmarking current learned state for SPL writing...", 82, "benchmarking_baseline")
+        _progress("Benchmarking current approved optimization state...", 82, "benchmarking_baseline")
         baseline_snapshot = _run_writer_quality_snapshot(
             target_intents=target_intents,
             approved_records=approved_records,
@@ -1750,6 +2280,10 @@ def generate_self_learn_candidates(
     skipped_approved = sum(1 for row in candidates if str(row.get("selection_reason", "")).strip() == "already_approved")
     skipped_non_writer = sum(1 for row in candidates if str(row.get("selection_reason", "")).strip() == "non_writer_hint")
     skipped_no_gain = sum(1 for row in candidates if str(row.get("selection_reason", "")).strip() == "no_gain")
+    observed_spl_assets = [
+        row for row in candidates
+        if isinstance(row, dict) and str(row.get("kind", "")).strip() == "spl_pattern_asset"
+    ]
     progress_payload = {
         "timestamp_utc": _utc_now(),
         "target_intents": target_intents,
@@ -1784,10 +2318,12 @@ def generate_self_learn_candidates(
             for row in selected_candidates
         ],
         "timeout_warnings": timeout_warning_count,
+        "run_mode": "ai_optimization_cycle" if optimization_ai_used else "fast_optimization_check",
     }
+    _progress("Writing optimization assets and registry updates...", 92, "writing_registry")
+    outcome = _upsert_candidates(selected_candidates, observed_assets=observed_spl_assets)
+    progress_payload["repository"] = outcome.get("repository", {})
     progress_payload = update_learning_progress_history(progress_payload)
-    _progress("Writing guarded learning registry updates...", 92, "writing_registry")
-    outcome = _upsert_candidates(selected_candidates)
     _log(
         f"[learning] complete created={outcome.get('created', 0)} "
         f"stale_marked={outcome.get('stale_marked', 0)} considered={considered} "
@@ -1795,7 +2331,7 @@ def generate_self_learn_candidates(
     )
     if timeout_warning_count > 0:
         _log(f"[learning] warning remote_model_timeout_count={timeout_warning_count}")
-    _progress("Guarded local learning run complete.", 100, "complete")
+    _progress("SPL Optimization AI Engine run complete.", 100, "complete")
     return {
         "created": outcome.get("created", 0),
         "stale_marked": outcome.get("stale_marked", 0),
@@ -1803,6 +2339,8 @@ def generate_self_learn_candidates(
         "generated": len(candidates),
         "selected": len(selected_candidates),
         "timeout_warnings": timeout_warning_count,
+        "run_mode": "ai_optimization_cycle" if optimization_ai_used else "fast_optimization_check",
         "improvement": progress_payload,
         "registry": learning_registry_summary(),
+        "repository": outcome.get("repository", {}),
     }
