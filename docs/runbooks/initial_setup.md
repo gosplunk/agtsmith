@@ -259,6 +259,20 @@ What happens now:
 - on first setup, this is the only button you normally need
 - later, run it again only when the Splunk environment changes materially or after reconnecting to a different MCP target
 
+### Important: do not start with SPL Optimization on a new install
+Do **not** run `SPL Optimization` first on a brand-new box.
+
+Correct order:
+1. validate Ollama, Splunk Base, and Splunk MCP
+2. run `Refresh Data Domains`
+3. run several real investigations so the platform learns the local environment
+4. only then open `SPL Optimization`
+
+Why:
+- Data Domains is what teaches A.G.E.N.T. Smith the local indexes, sourcetypes, and field behavior for this environment
+- SPL Optimization is for tuning reusable SPL **after** the environment has been learned
+- running optimization first gives weaker, less representative results on a fresh install
+
 This is the same workflow as:
 ```bash
 make env-profile-refresh

@@ -1990,8 +1990,11 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
         pipeline="multi_model_reviewer",
     )
 
+    summary_error = ""
+    summary_quality_reason = "summary_quality_ok"
     if not _topology_settings().get("final_summary", True):
         summary = _deterministic_summary(output)
+        summary_quality_reason = "summary_model_disabled_fallback"
     elif output["supported"]:
         try:
             summary_prompt = (
@@ -2003,13 +2006,17 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
             summary = _summarize_with_timeout(summary_prompt, splunk_data, model=MODEL_FINAL_SUMMARY, think=False)
             summary = _clean_summary_text(summary)
             summary = _enforce_platform_coverage_in_summary(summary, platform_coverage)
-            ok, _reason = _is_summary_quality_ok(summary)
+            ok, summary_quality_reason = _is_summary_quality_ok(summary)
             if not ok:
-                raise RuntimeError("summary_quality_gate_failed")
-        except Exception:
+                raise RuntimeError(f"summary_quality_gate_failed:{summary_quality_reason}")
+        except Exception as exc:
             summary = _deterministic_summary(output)
+            summary_error = f"{type(exc).__name__}: {exc}"
+            if summary_quality_reason == "summary_quality_ok":
+                summary_quality_reason = "model_exception_fallback"
     else:
         summary = _deterministic_summary(output)
+        summary_quality_reason = "unsupported_request_fallback"
 
     summarize_ms = int((time.monotonic() - started) * 1000)
     node_timings_ms["summarize"] = summarize_ms
@@ -2041,11 +2048,17 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
             f"rows_returned={output.get('rows_returned', 0)}",
             f"final_confidence={output.get('final_confidence', 0)}",
             f"summary_model_enabled={_topology_settings().get('final_summary', True)}",
+            f"summary_fallback_used={bool(summary_error) or summary_quality_reason != 'summary_quality_ok'}",
+            f"summary_quality_reason={summary_quality_reason}",
+            f"summary_error={summary_error or 'none'}",
         ],
         model=MODEL_FINAL_SUMMARY,
         duration_ms=summarize_ms,
     )
     output["summary"] = summary
+    output["summary_fallback_used"] = bool(summary_error) or summary_quality_reason != "summary_quality_ok"
+    output["summary_error"] = summary_error
+    output["summary_quality_reason"] = summary_quality_reason
     output["node_timings_ms"] = node_timings_ms
     output["stage_timings_ms"] = stage_timings_ms
     output["stage_logs"] = summary_stage_logs

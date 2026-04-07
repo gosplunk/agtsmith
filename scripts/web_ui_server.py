@@ -11576,11 +11576,12 @@ def _configure_page_body() -> str:
             <div class="cfg-progress-track"><div id="cfg-env-refresh-bar" class="cfg-progress-bar"></div></div>
             <pre id="cfg-env-refresh-log" class="cfg-pre cfg-progress-log">No refresh output yet.</pre>
           </div>
-          <div class="cfg-personalize-meta">
-            <div id="cfg-env-refresh-path" class="cfg-note">Refresh log path will appear here.</div>
-            <div class="cfg-note">Use this again later only when your Splunk data changes materially: new indexes, new sourcetypes, new tags, or after reconnecting MCP to a different environment.</div>
-          </div>
+        <div class="cfg-personalize-meta">
+          <div id="cfg-env-refresh-path" class="cfg-note">Refresh log path will appear here.</div>
+          <div class="cfg-note">Use this again later only when your Splunk data changes materially: new indexes, new sourcetypes, new tags, or after reconnecting MCP to a different environment.</div>
+          <div class="cfg-note" style="border:1px solid #166534;background:linear-gradient(180deg,#0a2514,#07160d 82%);color:#dcfce7;border-radius:12px;padding:10px 12px;"><strong>New install order:</strong> validate runtime first, then run <strong>Refresh Data Domains</strong>, then run a few real investigations. Open <strong>SPL Optimization</strong> only after the platform has learned the local environment.</div>
         </div>
+      </div>
         <details class="cfg-advanced">
           <summary>
             <div>
@@ -11630,6 +11631,7 @@ def _configure_page_body() -> str:
       <div class="cfg-step-body">
       <div class="cfg-panel" style="padding:0;border:0;background:transparent;box-shadow:none;">
         <p class="cfg-help">The SPL Optimization AI Engine now has its own Control Center page so you can review proposed SPL assets, approve or reject them, and keep optimization history separate from endpoint setup.</p>
+        <div class="cfg-note" style="border:1px solid #a16207;background:linear-gradient(180deg,#241808,#151008 82%);color:#fde68a;"><strong>Do not start here on a new install.</strong> First validate the runtime, refresh Data Domains, and run several real investigations so A.G.E.N.T. Smith learns the local indexes, sourcetypes, and field behavior. Then use SPL Optimization to tune reusable SPL for that environment.</div>
         <div class="cfg-note">Design rule: shipped logic stays deterministic; SPL optimization stays local, reviewable, benchmarked, and reversible.</div>
         <div class="cfg-actions" style="margin-top:12px;">
           <a class="btn-secondary" href="/learning" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center;">Open SPL Optimization</a>
@@ -15564,58 +15566,72 @@ class Handler(BaseHTTPRequestHandler):
                 result_body = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
                 if isinstance(result_body, dict):
                     result_body = dict(result_body)
-                    mitre_bundle = _mitre_attack_bundle(result_body)
-                    mitre_bundle["validation"] = _mitre_attack_validate(result_body, mitre_bundle)
-                    result_body["mitre_attack"] = mitre_bundle
-                    result_body["matching_active_spl_assets"] = _active_spl_asset_matches_for_intent(result_body.get("intent", ""))
-                    result["result"] = result_body
-                    meta = result.get("meta", {}) if isinstance(result.get("meta"), dict) else {}
-                    artifact_path = str(meta.get("artifact", "")).strip()
-                    if artifact_path:
-                        _persist_mitre_bundle_to_artifact(artifact_path, mitre_bundle)
-                    pivot_context_payload = _build_structured_pivot_context(result_body, sample_rows)
-                    result_body["pivot_context"] = pivot_context_payload
-                    result_body["sample_rows"] = sample_rows
-                    result_body["sample_rows_source"] = sample_source
-                    result_body["splunk_search_url_base"] = _splunk_search_url_base()
-                    previous_graph_state = pivot_context.get("graph_case_state") if isinstance(pivot_context, dict) and isinstance(pivot_context.get("graph_case_state"), dict) else None
-                    graph_case_state_payload = _build_graph_case_state_payload(
-                        question=question,
-                        result_body=result_body,
-                        sample_rows=sample_rows,
-                        case_id=case_id or "",
-                        parent_node_id=parent_node_id or "",
-                        node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
-                        previous_state=previous_graph_state,
-                    )
-                    result_body["graph_case_state"] = graph_case_state_payload
-                    case_context_payload = persist_case_result(
-                        session_id=session_id,
-                        question=question,
-                        result_body=result_body,
-                        graph_case_state=graph_case_state_payload,
-                        case_id=case_id or None,
-                        parent_node_id=parent_node_id or None,
-                        node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
-                    )
-                    result_body["case_context"] = case_context_payload
-                    result_body["graph_case_state"]["case_id"] = case_context_payload.get("case_id", "")
-                    result_body["graph_case_state"]["current_node_id"] = case_context_payload.get("node_id", "")
-                    result_body["graph_case_state"]["parent_node_id"] = case_context_payload.get("parent_node_id", "")
-                    if isinstance(result_body.get("pivot_context"), dict):
-                        result_body["pivot_context"]["case_id"] = case_context_payload.get("case_id", "")
-                        result_body["pivot_context"]["current_node_id"] = case_context_payload.get("node_id", "")
-                        result_body["pivot_context"]["graph_case_state"] = result_body.get("graph_case_state", {})
-                    artifact_path = str(meta.get("artifact", "")).strip()
-                    if artifact_path:
-                        _persist_result_updates_to_artifact(
-                            artifact_path,
-                            {
-                                "pivot_context": result_body.get("pivot_context", {}),
-                                "case_context": case_context_payload,
-                                "graph_case_state": result_body.get("graph_case_state", {}),
-                            },
+                    result_warnings = result.get("warnings", []) if isinstance(result.get("warnings"), list) else []
+                    try:
+                        mitre_bundle = _mitre_attack_bundle(result_body)
+                        mitre_bundle["validation"] = _mitre_attack_validate(result_body, mitre_bundle)
+                        result_body["mitre_attack"] = mitre_bundle
+                        result_body["matching_active_spl_assets"] = _active_spl_asset_matches_for_intent(result_body.get("intent", ""))
+                        result["result"] = result_body
+                        meta = result.get("meta", {}) if isinstance(result.get("meta"), dict) else {}
+                        artifact_path = str(meta.get("artifact", "")).strip()
+                        if artifact_path:
+                            _persist_mitre_bundle_to_artifact(artifact_path, mitre_bundle)
+                        pivot_context_payload = _build_structured_pivot_context(result_body, sample_rows)
+                        result_body["pivot_context"] = pivot_context_payload
+                        result_body["sample_rows"] = sample_rows
+                        result_body["sample_rows_source"] = sample_source
+                        result_body["splunk_search_url_base"] = _splunk_search_url_base()
+                        previous_graph_state = pivot_context.get("graph_case_state") if isinstance(pivot_context, dict) and isinstance(pivot_context.get("graph_case_state"), dict) else None
+                        graph_case_state_payload = _build_graph_case_state_payload(
+                            question=question,
+                            result_body=result_body,
+                            sample_rows=sample_rows,
+                            case_id=case_id or "",
+                            parent_node_id=parent_node_id or "",
+                            node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
+                            previous_state=previous_graph_state,
                         )
+                        result_body["graph_case_state"] = graph_case_state_payload
+                        case_context_payload = persist_case_result(
+                            session_id=session_id,
+                            question=question,
+                            result_body=result_body,
+                            graph_case_state=graph_case_state_payload,
+                            case_id=case_id or None,
+                            parent_node_id=parent_node_id or None,
+                            node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
+                        )
+                        result_body["case_context"] = case_context_payload
+                        result_body["graph_case_state"]["case_id"] = case_context_payload.get("case_id", "")
+                        result_body["graph_case_state"]["current_node_id"] = case_context_payload.get("node_id", "")
+                        result_body["graph_case_state"]["parent_node_id"] = case_context_payload.get("parent_node_id", "")
+                        if isinstance(result_body.get("pivot_context"), dict):
+                            result_body["pivot_context"]["case_id"] = case_context_payload.get("case_id", "")
+                            result_body["pivot_context"]["current_node_id"] = case_context_payload.get("node_id", "")
+                            result_body["pivot_context"]["graph_case_state"] = result_body.get("graph_case_state", {})
+                        artifact_path = str(meta.get("artifact", "")).strip()
+                        if artifact_path:
+                            _persist_result_updates_to_artifact(
+                                artifact_path,
+                                {
+                                    "pivot_context": result_body.get("pivot_context", {}),
+                                    "case_context": case_context_payload,
+                                    "graph_case_state": result_body.get("graph_case_state", {}),
+                                },
+                            )
+                    except Exception as post_exc:
+                        warning = {
+                            "stage": "api_post_processing",
+                            "error": f"{type(post_exc).__name__}: {post_exc}",
+                        }
+                        result_warnings.append(warning)
+                        result["warnings"] = result_warnings
+                        result_body["post_processing_warning"] = warning
+                        result_body["sample_rows"] = sample_rows
+                        result_body["sample_rows_source"] = sample_source
+                        result_body["splunk_search_url_base"] = _splunk_search_url_base()
+                    result["result"] = result_body
                 result["sample_rows"] = sample_rows
                 result["sample_rows_source"] = sample_source
                 result["sample_rows_error"] = sample_error

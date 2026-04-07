@@ -76,3 +76,9 @@
 - added a dedicated Case Workspace and a rebuilt Investigation Drawer timeline that behaves like an analyst reasoning surface instead of a chronological log
 - fixed SPL asset repository approval and rejection so actions resolve correctly against persisted records
 - hardened analyst-facing output so even when the final-summary model falls back, the UI still shows intent-aware, evidence-aware current assessments instead of a generic execution stub
+
+## v1.3.2
+
+- fixed `/api/ask` so optional post-run enrichment and case persistence can no longer turn a successful investigation into an HTTP 500 failure after the result already exists
+- added surfaced multi-model summary diagnostics for fallback behavior: `summary_fallback_used`, `summary_error`, and `summary_quality_reason`
+- clarified new-install guidance in the Initial Setup Guide and live Configuration page so operators build Data Domains and run real investigations before starting SPL Optimization
