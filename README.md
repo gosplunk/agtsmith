@@ -150,6 +150,7 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - fixed `/api/ask` so optional post-run enrichment and case persistence fail open instead of returning HTTP 500 after a successful investigation result already exists
 - surfaced multi-model summary diagnostics in the runtime result shape, including `summary_fallback_used`, `summary_error`, and `summary_quality_reason`
 - clarified new-box setup guidance in both the public Initial Setup Guide and the live Configuration page so operators refresh Data Domains and run real investigations before starting SPL Optimization
+- retained green `Open In Splunk` handoff in the Investigation drawer and MCP chat client, and restored clickable evidence-row drilldown so analysts can jump directly back into Splunk from returned sample rows
 
 ## What It Is Not
 - Autonomous response or recovery

@@ -13759,6 +13759,44 @@ def _mcp_page_body() -> str:
       color:#93c5fd; font-weight:700;
       font-family:"Consolas","SFMono-Regular",Menlo,monospace;
     }
+    .mcp-spl-row { margin-top:8px; display:flex; justify-content:flex-end; }
+    .mcp-results-shell {
+      border:1px solid #26435c;
+      border-radius:10px;
+      background:#030b17;
+      overflow:auto;
+    }
+    .mcp-results-table { width:100%; border-collapse:collapse; font-size:12px; }
+    .mcp-results-table th,
+    .mcp-results-table td {
+      padding:8px 10px;
+      border-bottom:1px solid rgba(54,83,110,0.55);
+      text-align:left;
+      vertical-align:top;
+    }
+    .mcp-results-table th {
+      color:#9fc3e2;
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      background:#071628;
+      position:sticky;
+      top:0;
+      z-index:1;
+    }
+    .mcp-results-table tr.mcp-row-link { cursor:pointer; }
+    .mcp-results-table tr.mcp-row-link:hover td { background:#0b1d30; }
+    .mcp-value-tag {
+      display:inline-flex;
+      align-items:center;
+      padding:2px 8px;
+      border-radius:999px;
+      border:1px solid #34597b;
+      white-space:nowrap;
+      max-width:280px;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
     @media (max-width: 1080px) { .mcp-shell { grid-template-columns: 1fr; } }
   </style>
   <h1>Splunk MCP Chat</h1>
@@ -13802,9 +13840,9 @@ def _mcp_page_body() -> str:
   </div>
   <h3>SPL</h3>
   <pre id=\"mcp-spl\"></pre>
-  <div><a id=\"mcp-spl-link\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; color:#93c5fd; text-decoration:none; font-size:13px;\">View in Splunk</a></div>
+  <div class=\"mcp-spl-row\"><a id=\"mcp-spl-link\" class=\"btn-splunk\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; text-decoration:none; align-items:center; justify-content:center;\">Open In Splunk</a></div>
   <h3>Result Rows (sample)</h3>
-  <pre id=\"mcp-results\"></pre>
+  <div id=\"mcp-results\" class=\"mcp-results-shell\"><div class=\"muted\" style=\"padding:10px;\">No sample rows yet.</div></div>
   <details class=\"guided\" style=\"margin-top:12px;\">
     <summary>Show Raw JSON</summary>
     <pre id=\"mcp-json\"></pre>
@@ -13881,6 +13919,77 @@ def _mcp_page_body() -> str:
     setTimeout(() => { progressWrap.style.display = 'none'; }, 700);
   }
 
+  function escHtml(text) {
+    return String(text ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function buildMcpRowUrl(data, row) {
+    const splunkBase = String(data?.splunk_search_url_base || '').trim();
+    const qArgs = data?.query_args && typeof data.query_args === 'object' ? data.query_args : {};
+    if (!splunkBase || !row || typeof row !== 'object') return '#';
+    const clauses = [];
+    const preferredFields = ['index', 'host', 'user_name', 'user', 'TargetUserName', 'Account_Name', 'src_ip', 'clientip', 'source', 'sourcetype', 'method', 'status'];
+    preferredFields.forEach((field) => {
+      const value = String(row[field] ?? '').trim();
+      if (!value) return;
+      if (field === 'user_name' && String(row.user ?? '').trim()) return;
+      const safe = value.replace(/"/g, '\\"');
+      clauses.push(field === 'index' ? `index=${safe}` : `${field}=\"${safe}\"`);
+    });
+    const query = `search ${clauses.join(' ')} | head 200`.trim();
+    const params = new URLSearchParams({
+      q: query,
+      'display.page.search.mode': 'smart',
+      'dispatch.sample_ratio': '1',
+      workload_pool: '',
+      earliest: String(qArgs.earliest_time || '-24h@h'),
+      latest: String(qArgs.latest_time || 'now'),
+      'display.page.search.tab': 'statistics',
+      'display.general.type': 'statistics',
+    });
+    return `${splunkBase}?${params.toString()}`;
+  }
+
+  function renderMcpResultsTable(data) {
+    const sample = Array.isArray(data?.sample_rows) ? data.sample_rows : [];
+    if (!sample.length) {
+      results.innerHTML = '<div class=\"muted\" style=\"padding:10px;\">No sample rows.</div>';
+      return;
+    }
+    const columns = Array.from(new Set(sample.flatMap((row) => Object.keys(row || {})))).slice(0, 6);
+    const colorForValue = (column, value) => {
+      const text = String(value || '').trim();
+      if (!text) return '&mdash;';
+      let hash = 0;
+      const source = `${String(column || '')}:${text.toLowerCase()}`;
+      for (let i = 0; i < source.length; i += 1) hash = ((hash << 5) - hash) + source.charCodeAt(i);
+      const hue = Math.abs(hash) % 360;
+      const bg = `hsla(${hue}, 64%, 16%, 0.92)`;
+      const border = `hsla(${hue}, 72%, 42%, 0.82)`;
+      const fg = `hsla(${hue}, 85%, 86%, 1)`;
+      return `<span class=\"mcp-value-tag\" style=\"background:${bg};border-color:${border};color:${fg};\">${escHtml(text)}</span>`;
+    };
+    const head = columns.map((col) => `<th>${escHtml(col)}</th>`).join('');
+    const body = sample.map((row) => {
+      const href = buildMcpRowUrl(data, row);
+      return `<tr class=\"${href !== '#' ? 'mcp-row-link' : ''}\"${href !== '#' ? ` data-row-href=\"${escHtml(href)}\"` : ''}>${
+        columns.map((col) => `<td>${colorForValue(col, row[col])}</td>`).join('')
+      }</tr>`;
+    }).join('');
+    results.innerHTML = `<table class=\"mcp-results-table\"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+    results.querySelectorAll('.mcp-row-link').forEach((rowEl) => {
+      rowEl.addEventListener('click', () => {
+        const href = rowEl.getAttribute('data-row-href') || '#';
+        if (href && href !== '#') window.open(href, '_blank', 'noopener,noreferrer');
+      });
+    });
+  }
+
   send.onclick = async () => {
     const question = (q.value || '').trim();
     if (!question) return;
@@ -13940,8 +14049,7 @@ def _mcp_page_body() -> str:
         splLink.href = '#';
         splLink.style.display = 'none';
       }
-      const sample = Array.isArray(data.sample_rows) ? data.sample_rows : [];
-      results.textContent = sample.length ? JSON.stringify(sample, null, 2) : '(no sample rows)';
+      renderMcpResultsTable(data);
       const hints = Array.isArray(data.domain_hints) ? data.domain_hints : [];
       if (!hints.length) {
         domainHints.innerHTML = '<div class=\"muted\">No strong domain hints were returned for this question.</div>';
