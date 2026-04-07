@@ -54,6 +54,11 @@ flowchart LR
 - Provide metadata for Data Domains
 - Remain the source of truth for evidence
 
+### Case Memory And Investigation Timeline
+- PostgreSQL-backed case storage now persists investigation cases, nodes, and parent/child pivot relationships
+- Every investigation and follow-up pivot can be reopened from saved state without rerunning Splunk
+- The Investigation Drawer and Case Workspace both render this durable case memory as analyst workflow state rather than transient browser state
+
 ## Active Model Roles
 - Planner: Qwen
 - SPL Writer: DeepSeek
@@ -98,7 +103,8 @@ flowchart TD
 - Portable RAG ships with the product
 - Data Domains are built from the live Splunk environment
 - Personalization merges portable RAG with the environment profile
-- Query writing, repair, and validation use the resulting skillpack
+- Query writing, repair, and validation now use per-domain environment semantics, including field inventory learned at the `index + sourcetype` level
+- Generic canonical SPL is treated as a starting point only; runtime rewriting and validation force the final query back onto discovered local domains whenever possible
 
 ## SPL Optimization AI Engine
 - The live runtime now includes a repository-backed SPL optimization surface
@@ -138,6 +144,6 @@ flowchart TD
 - Governed response orchestration
 - SOAR and playbook dispatch
 - Stronger identity and secret handling
-- Deeper case memory and continuity
+- Richer branch visualization and analyst note-taking on top of the existing durable case timeline
 - Broader metrics and benchmarking
 - Optional edge-assisted routing and split-query planning for low-latency classification

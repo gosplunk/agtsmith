@@ -1,4 +1,17 @@
 services:
+  agtsmith-case-db:
+    image: postgres:16
+    container_name: agtsmith-case-db-dev
+    environment:
+      POSTGRES_DB: "${AGTSMITH_CASE_DB_NAME:-agtsmith}"
+      POSTGRES_USER: "${AGTSMITH_CASE_DB_USER:-agtsmith}"
+      POSTGRES_PASSWORD: "${AGTSMITH_CASE_DB_PASSWORD:-agtsmith-local-change-me}"
+    ports:
+      - "${AGTSMITH_CASE_DB_EXPOSE:-5432}:5432"
+    volumes:
+      - agtsmith_case_db:/var/lib/postgresql/data
+    restart: unless-stopped
+
   agtsmith-ui:
     build:
       context: .
@@ -10,8 +23,19 @@ services:
     command: ["python", "scripts/web_ui_server.py", "--host", "0.0.0.0", "--port", "8787"]
     env_file:
       - config/ui.env
+    environment:
+      AGTSMITH_CASE_DB_HOST: agtsmith-case-db
+      AGTSMITH_CASE_DB_PORT: "5432"
+      AGTSMITH_CASE_DB_NAME: "${AGTSMITH_CASE_DB_NAME:-agtsmith}"
+      AGTSMITH_CASE_DB_USER: "${AGTSMITH_CASE_DB_USER:-agtsmith}"
+      AGTSMITH_CASE_DB_PASSWORD: "${AGTSMITH_CASE_DB_PASSWORD:-agtsmith-local-change-me}"
+    depends_on:
+      - agtsmith-case-db
     ports:
       - "${AGTSMITH_UI_PORT:-8787}:8787"
     volumes:
       - ./:/app
     restart: unless-stopped
+
+volumes:
+  agtsmith_case_db:

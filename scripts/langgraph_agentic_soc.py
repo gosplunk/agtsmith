@@ -25,6 +25,7 @@ from typing import Any, TypedDict
 import httpx
 from langgraph.graph import END, START, StateGraph
 
+from langgraph_case_state import GraphCaseState, bootstrap_graph_case_state
 from langgraph_minimal_flow import determine_splunk_tool, load_session_context, persist_session_context
 from minimal_question_to_answer import (
     OLLAMA_HOST,
@@ -72,6 +73,7 @@ class AgentState(TypedDict, total=False):
     continuation_review_output: dict
     continuation_review_duration_ms: int
     summary: str
+    graph_case_state: GraphCaseState
 
 
 BLOCKED_TERMS = ("delete", "drop", "remove", "shutdown", "restart", "write", "modify")
@@ -471,23 +473,50 @@ def _query_aligned_with_intent(intent: str, query: str) -> tuple[bool, str]:
             "failed password",
             "authentication failure",
         ),
-        "linux_auth_failures": ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "failed password", "authentication failure"),
+        "successful_login_activity": (
+            "accepted password",
+            "accepted publickey",
+            "successfully logged on",
+            "eventcode=4624",
+            "session opened for user",
+        ),
+        "linux_auth_failures": (
+            "source=\"/var/log/auth.log\"",
+            "source=\"/var/log/secure\"",
+            "sourcetype=linux_secure",
+            "failed password",
+            "authentication failure",
+        ),
+        "linux_successful_logins": ("accepted password", "accepted publickey", "session opened for user"),
         "windows_auth_failures": ("sourcetype=xmlwineventlog", "eventcode=4625", "an account failed to log on"),
-        "linux_privilege_escalation": ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sudo", " su", "privilege"),
+        "windows_successful_logons": ("sourcetype=xmlwineventlog", "eventcode=4624", "successfully logged on"),
+        "linux_privilege_escalation": (
+            "source=\"/var/log/auth.log\"",
+            "source=\"/var/log/secure\"",
+            "sourcetype=linux_secure",
+            "sudo",
+            " su",
+            "privilege",
+        ),
         "linux_privilege_escalation_first_seen": (
             "index=linux",
             "earliest(_time)",
             "first_seen",
             "session opened for user root by",
         ),
-        "apache_access_top_ips": ("sourcetype=access_combined", "clientip"),
-        "apache_404_spike": ("sourcetype=access_combined", "status=404"),
-        "apache_suspicious_user_agents": ("sourcetype=access_combined", "useragent"),
+        "linux_session_activity": ("session opened for user", "session closed for user", "sourcetype=linux_secure"),
+        "apache_access_top_ips": ("sourcetype=access_combined", "sourcetype=apache:access", "clientip"),
+        "apache_404_spike": ("sourcetype=access_combined", "sourcetype=apache:access", "status=404"),
+        "apache_suspicious_user_agents": ("sourcetype=access_combined", "sourcetype=apache:access", "useragent"),
+        "o365_management_activity": ("sourcetype=ms:o365:management", "sourcetype=o365:management:activity", "operation", "workload"),
     }
     disallowed_tokens: dict[str, tuple[str, ...]] = {
         "failed_login_activity": ("stats count by sourcetype",),
+        "successful_login_activity": ("failed password", "authentication failure", "eventcode=4625"),
         "linux_auth_failures": ("stats count by sourcetype",),
+        "linux_successful_logins": ("failed password", "authentication failure"),
         "windows_auth_failures": ("stats count by sourcetype",),
+        "windows_successful_logons": ("eventcode=4625", "failed log on"),
         "linux_privilege_escalation": ("stats count by sourcetype",),
         "linux_privilege_escalation_first_seen": ("earliest_time=", "latest_time=", "row_limit="),
     }
@@ -1311,6 +1340,11 @@ def run_agentic_investigation(
         root_question=root_question,
     )
     session_context = load_session_context(session_id) if session_id else {}
+    graph_case_state = bootstrap_graph_case_state(
+        question=active_question,
+        session_id=session_id,
+        root_question=root_question,
+    )
 
     if approved_deeper_investigation:
         if not isinstance(continuation_state, dict):
@@ -1389,6 +1423,15 @@ def run_agentic_investigation(
     final_output["investigation_rounds"] = list(case_state.get("rounds", []))
     final_output["loop_control"] = loop_control
     final_output["case_state"] = case_state
+    graph_case_state["root_question"] = root_question
+    graph_case_state["current_question"] = str(final_output.get("active_question", active_question))
+    graph_case_state["intent"] = str(map_question_to_template(str(final_output.get("question", ""))).intent)
+    graph_case_state["node_type"] = "agentic_investigation"
+    graph_case_state["selected_tool"] = str((final_output.get("trajectory", [])[-1].get("tool", "") if final_output.get("trajectory") else ""))
+    graph_case_state["supported"] = bool(final_output.get("supported", True))
+    graph_case_state["summary"] = str(final_output.get("summary", ""))
+    graph_case_state["updated_at"] = int(time.time())
+    final_output["graph_case_state"] = graph_case_state
     final_output["summary"] = (
         final_output.get("summary", "")
         + (

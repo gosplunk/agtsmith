@@ -50,6 +50,30 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         summary_hint="Focus on cross-platform failed login concentration by host, user, and source while preserving Linux and Windows evidence under a shared schema.",
     ),
     QueryTemplate(
+        intent="successful_login_activity",
+        keywords=("successful login", "successful logon", "successful authentication", "logon success"),
+        query=(
+            "search "
+            "((index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+            "(\"Accepted password\" OR \"Accepted publickey\" OR \"Accepted keyboard-interactive/pam\" OR \"session opened for user\")) "
+            "OR "
+            "((index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+            "(EventCode=4624 OR EventID=4624 OR \"An account was successfully logged on\"))) "
+            "| eval platform=case(match(index,\"(?i)linux\"),\"linux\", true(), \"windows\") "
+            "| rex field=_raw \"(?i)Accepted (?:password|publickey|keyboard-interactive/pam) for (?<success_user>[^ ]+)\" "
+            "| rex field=_raw \"(?i)from (?<success_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<success_port>\\d+)\" "
+            "| rex field=_raw \"(?i)session opened for user (?<session_user>[A-Za-z0-9_.-]+)\" "
+            "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,success_src_ip,ip,rhost,\"local\") "
+            "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,account,success_user,session_user) "
+            "| eval auth_port=coalesce(DestinationPort,dest_port,port,success_port,lport) "
+            "| fillnull value=\"unknown\" src_ip user_name auth_port "
+            "| stats count by platform index host user_name src_ip auth_port "
+            "| sort - count"
+        ),
+        tags=("cross_domain", "auth_success", "summary"),
+        summary_hint="Focus on successful authentication activity across Linux and Windows by host, user, and source IP.",
+    ),
+    QueryTemplate(
         intent="linux_auth_failures",
         keywords=(
             "linux failed login",
@@ -75,6 +99,30 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         summary_hint="Focus on Linux authentication failures by host, user, source IP, and port.",
     ),
     QueryTemplate(
+        intent="linux_successful_logins",
+        keywords=(
+            "linux successful login",
+            "linux successful logon",
+            "successful ssh login",
+            "accepted password",
+            "accepted publickey",
+            "linux login success",
+        ),
+        query=(
+            "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+            "(\"Accepted password\" OR \"Accepted publickey\" OR \"Accepted keyboard-interactive/pam\" OR \"session opened for user\") "
+            "| rex field=_raw \"(?i)Accepted (?:password|publickey|keyboard-interactive/pam) for (?<user>[^ ]+)\" "
+            "| rex field=_raw \"(?i)from (?<success_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<success_port>\\d+)\" "
+            "| rex field=_raw \"(?i)session opened for user (?<session_user>[A-Za-z0-9_.-]+)\" "
+            "| eval user=coalesce(user,session_user,username,account) "
+            "| eval src_ip=coalesce(src_ip,success_src_ip,rhost,src,ip,\"local\") "
+            "| eval port=coalesce(port,success_port,lport) "
+            "| stats count by host user src_ip port | sort - count"
+        ),
+        tags=("linux", "auth_success", "summary"),
+        summary_hint="Focus on successful Linux authentication activity by host, user, source IP, and port.",
+    ),
+    QueryTemplate(
         intent="windows_auth_failures",
         keywords=(
             "windows failed login",
@@ -95,6 +143,26 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         ),
         tags=("windows", "auth_failure", "summary"),
         summary_hint="Focus on Windows failed logon evidence rows, preserving host, user, and source IP context even when some fields are sparse.",
+    ),
+    QueryTemplate(
+        intent="windows_successful_logons",
+        keywords=(
+            "windows successful login",
+            "windows successful logon",
+            "successful logon windows",
+            "successful login windows",
+            "4624",
+        ),
+        query=(
+            "search index=windows sourcetype=XmlWinEventLog "
+            "(Channel=Security OR source=\"XmlWinEventLog:Security\") "
+            "(EventCode=4624 OR EventID=4624 OR \"An account was successfully logged on\") "
+            "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
+            "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,Caller_User_Name) "
+            "| table _time index host Computer Channel EventCode EventID user_name src_ip LogonType WorkstationName AuthenticationPackageName IpAddress Source_Network_Address"
+        ),
+        tags=("windows", "auth_success", "summary"),
+        summary_hint="Focus on Windows successful logon evidence rows with host, user, source IP, and workstation context.",
     ),
     QueryTemplate(
         intent="windows_process_activity",
@@ -334,6 +402,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         keywords=("apache access top ips", "top client ips", "top web client ips", "top source ips web", "web access logs"),
         query=(
             "search index=linux sourcetype=access_combined "
+            "| rex field=_raw \"^(?<clientip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \\\"(?<method>[A-Z]+) (?<uri_path>\\S+) [^\\\"]+\\\" (?<status>\\d{3})\" "
             "| stats count by clientip status method | sort - count"
         ),
         tags=("web", "web_access", "top_n", "summary"),
@@ -343,7 +412,9 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         intent="apache_404_spike",
         keywords=("apache 404", "404 spike", "not found web", "access_combined 404"),
         query=(
-            "search index=linux sourcetype=access_combined status=404 "
+            "search index=linux sourcetype=access_combined "
+            "| rex field=_raw \"^(?<clientip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \\\"(?<method>[A-Z]+) (?<uri_path>\\S+) [^\\\"]+\\\" (?<status>\\d{3})\" "
+            "| search status=404 "
             "| timechart span=1h count by host limit=10"
         ),
         tags=("web", "web_404", "time_series"),
@@ -366,6 +437,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         ),
         query=(
             "search index=linux sourcetype=access_combined "
+            "| rex field=_raw \"^(?<clientip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \\\"(?<method>[A-Z]+) (?<uri_path>\\S+) [^\\\"]+\\\" (?<status>\\d{3}) \\S+ \\\"[^\\\"]*\\\" \\\"(?<useragent>[^\\\"]+)\\\"\" "
             "| stats count by useragent clientip | sort - count | head 20"
         ),
         tags=("web", "user_agent", "summary"),

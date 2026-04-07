@@ -1,6 +1,6 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.2.4`
+Current release: `v1.3.1`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
@@ -19,11 +19,8 @@ For a clean first run, use the deployment container:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git curl make docker.io
+sudo apt-get install -y git curl make docker.io docker-compose-v2
 sudo systemctl enable --now docker
-if ! docker compose version >/dev/null 2>&1; then
-  sudo apt-get install -y docker-compose-v2 || sudo apt-get install -y docker-compose-plugin
-fi
 sudo usermod -aG docker $USER
 newgrp docker
 ```
@@ -31,6 +28,8 @@ newgrp docker
 `$USER` is the current shell username. You do not need to replace it manually.
 
 If `newgrp docker` fails because the shell session does not see the new group yet, sign out and back in once, then re-run `docker --version` and `docker compose version`.
+
+If `docker-compose-v2` is unavailable on your distro, use the compatibility fallback in the [Initial Setup Guide](docs/runbooks/initial_setup.md).
 
 Then:
 
@@ -51,32 +50,32 @@ Then:
 - run the first investigation
 
 ## Screenshots
-These screenshots reflect the current `v1.2.4` interface.
+These screenshots reflect the current `v1.3.1` interface.
 
 ### Login
-`v1.2.4` login flow for the analyst console.
+`v1.3.1` login flow for the analyst console.
 
-![A.G.E.N.T. Smith v1.2.4 login](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-login.png)
+![A.G.E.N.T. Smith v1.3.1 login](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-login.png)
 
 ### Investigation Workspace
-`v1.2.4` Splunk-first investigation workflow with sticky analyst controls, a non-redundant investigation drawer, current assessment, recommended next steps, and ATT&CK context.
+`v1.3.1` Splunk-first investigation workflow with durable case memory, Investigation Timeline reasoning cards, current assessment, recommended next steps, and ATT&CK context.
 
-![A.G.E.N.T. Smith v1.2.4 investigation workspace](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-investigation.png)
+![A.G.E.N.T. Smith v1.3.1 investigation workspace](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-investigation.png)
 
 ### Architecture View
-`v1.2.4` system architecture and role separation view for the bounded Splunk investigation pipeline.
+`v1.3.1` system architecture and role separation view for the bounded Splunk investigation pipeline.
 
-![A.G.E.N.T. Smith v1.2.4 architecture view](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-architecture.png)
+![A.G.E.N.T. Smith v1.3.1 architecture view](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-architecture.png)
 
 ### Data Domains And Personalization
-`v1.2.4` environment-aware Data Domains view showing the Linux domain expanded into Apache `access_combined` telemetry with field inventory used for query grounding and personalization.
+`v1.3.1` environment-aware Data Domains view showing local index and sourcetype discovery, per-domain field inventory, and portable query grounding built from the live Splunk environment.
 
-![A.G.E.N.T. Smith v1.2.4 Data Domains personalization view](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-data-domains.png)
+![A.G.E.N.T. Smith v1.3.1 Data Domains personalization view](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-data-domains.png)
 
 ### SPL Optimization AI Engine
-`v1.2.4` SPL Optimization AI Engine showing the simplified operator view, reusable SPL asset workflow, and repository-backed optimization state.
+`v1.3.1` SPL Optimization AI Engine showing the simplified operator view, reusable SPL asset workflow, and repository-backed optimization state.
 
-![A.G.E.N.T. Smith v1.2.4 SPL Optimization AI Engine](docs/images/screenshots/v1.2.4/agtsmith-v1.2.4-learning.png)
+![A.G.E.N.T. Smith v1.3.1 SPL Optimization AI Engine](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-learning.png)
 
 ## How It Works
 The default SPL path is a split-role pipeline:
@@ -105,6 +104,12 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - Grounded in local environment metadata, Data Domains, and curated SPL references
 - Built to be tuned empirically with benchmarks and evals
 
+## What's New In v1.1.0
+- SPL Optimization AI Engine with reviewable, airgapped environment-specific memory
+- Stronger Linux auth, Windows auth, Apache, and mixed-platform investigation handling
+- Improved Investigation UI result rendering, progress visibility, and operator feedback
+- Pilot benchmark pack and full-pipeline hardening harness for BOTSv3 and live-environment testing
+
 ## What's New In v1.2.0
 - redesigned the Investigation workspace into a desktop-first two-column layout with a sticky control rail and dominant results column
 - added richer ATT&CK investigation support: hover definitions, ATT&CK pivots, follow-on technique context, persisted ATT&CK bundles, and model-backed ATT&CK validation
@@ -121,23 +126,25 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - added a canonical next-release planning document for `v1.3.0`, including persistent follow-up context as a planned standard-pivot enhancement
 - fixed the runtime configuration save flow so changing Ollama/Splunk hosts does not leave the UI stuck on `Saving...`
 
+## What's New In v1.2.3
+- clarified SPL Optimization AI Engine so the operator can see which learning mode ran and why a no-gain run finished without keeping new hints
+- added explicit learned-state, benchmark cache, candidate filtering, and run-duration feedback to the Learning page
+- fixed the Learning page so `Run Optimization Cycle` is no longer blocked by the admin onboarding modal or by a client-side JavaScript parse error
+
 ## What's New In v1.2.4
 - redesigned the Investigation Drawer into a sticky Splunk-first analyst workbench with action-first tabs for pivots, evidence, SPL, ATT&CK context, and decision tracing
 - added stronger investigation trust cues including left-rail phase status, improved long-running guidance, richer Splunk handoff, and row-level drill-down from evidence back into Splunk
 - turned SPL Optimization into a repository-backed workflow with reusable SPL assets, explicit approval flow, and a dedicated SPL Asset Repository review surface
 - reorganized Control Center pages around current state, next action, and working context so configuration, audit, environment coverage, and artifacts are easier to scan
 - refreshed the public screenshots so GitHub matches the current product surface
+- added persistent case timelines with saved investigation and pivot nodes, a dedicated Case Workspace, and PostgreSQL-backed case memory for reopening prior findings without rerunning Splunk
 
-## What's New In v1.2.3
-- clarified SPL Optimization AI Engine so the operator can see which learning mode ran and why a no-gain run finished without keeping new hints
-- added explicit learned-state, benchmark cache, candidate filtering, and run-duration feedback to the Learning page
-- fixed the Learning page so `Run Optimization Cycle` is no longer blocked by the admin onboarding modal or by a client-side JavaScript parse error
-
-## What's New In v1.1.0
-- SPL Optimization AI Engine with reviewable, airgapped environment-specific memory
-- Stronger Linux auth, Windows auth, Apache, and mixed-platform investigation handling
-- Improved Investigation UI result rendering, progress visibility, and operator feedback
-- Pilot benchmark pack and full-pipeline hardening harness for BOTSv3 and live-environment testing
+## What's New In v1.3.1
+- made query grounding materially more environment-native by learning field inventory per `index + sourcetype`, selecting authoritative local domains from Data Domains, and rewriting generic canonical SPL toward the live environment instead of assuming generic index names
+- fixed several analyst-facing investigation paths so successful login activity, Apache 404s, suspicious user agents, Linux session activity, Office 365 management activity, and CloudTrail activity route through the same environment-aware validation and execution flow used in the running product
+- upgraded investigation continuity into a durable case workflow with PostgreSQL-backed case memory, structured pivot context, persistent case/node ids, and an Investigation Timeline that can reopen original findings and deeper pivots without rerunning Splunk
+- added a stronger analyst reasoning surface in the Investigation Drawer, including narrative continuity, richer timeline cards, clickable step restore behavior, and stateful pivot continuation
+- hardened current assessment output so fallback summaries remain useful and evidence-aware when the final-summary model fails or times out
 
 ## What It Is Not
 - Autonomous response or recovery
@@ -210,6 +217,7 @@ Deployment notes:
 
 ## Key Routes
 - Investigation UI: `/investigation`
+- Case Workspace: `/cases`
 - MCP Chat: `/mcp`
 - SPL Optimization AI Engine: `/learning`
 - SPL Asset Repository: `/spl-assets`

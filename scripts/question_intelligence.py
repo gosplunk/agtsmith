@@ -55,6 +55,24 @@ def infer_question_dimensions(question: str) -> dict[str, Any]:
         )
     ):
         activities.append("auth_failure")
+    if (
+        any(
+            tok in q
+            for tok in (
+                "successful login",
+                "successful logon",
+                "successful authentication",
+                "successfully logged on",
+                "accepted password",
+                "accepted publickey",
+                "4624",
+                "logon success",
+                "successful ssh",
+            )
+        )
+        or ("successful" in q and any(tok in q for tok in ("login", "logon", "authentication", "ssh")))
+    ):
+        activities.append("auth_success")
     if any(tok in q for tok in ("sudo", " su ", "privilege escalation", "root session", "session opened for user root by")):
         activities.append("privilege_escalation")
     if any(tok in q for tok in ("process creation", "process activity", "sysmon process", "new processes")):
@@ -171,6 +189,15 @@ def score_template_for_question(template: Any, question: str) -> tuple[int, list
     if "auth_failure" in activities and "auth" not in intent and "failed_login" not in intent:
         score -= 8
         reasons.append("activity_penalty:auth_failure_mismatch")
+    if "auth_success" in activities and "success" not in intent and "session" not in intent:
+        score -= 8
+        reasons.append("activity_penalty:auth_success_mismatch")
+    if "auth_success" in activities and "failed_login" in intent:
+        score -= 28
+        reasons.append("success_penalty:avoid_failed_login_templates")
+    if "auth_success" in activities and intent in {"successful_login_activity", "linux_successful_logins", "windows_successful_logons"}:
+        score += 22
+        reasons.append("auth_success_bonus")
     if "ssh" in q and "auth_failure" in activities and intent == "linux_auth_failures":
         score += 15
         reasons.append("ssh_auth_bonus")
@@ -183,6 +210,13 @@ def score_template_for_question(template: Any, question: str) -> tuple[int, list
     if "crawler" in q and intent == "apache_suspicious_user_agents":
         score += 10
         reasons.append("crawler_bonus")
+    if "apache" in q and any(tok in q for tok in ("weird", "suspicious", "odd", "strange", "anomal")):
+        if intent == "apache_suspicious_user_agents":
+            score += 16
+            reasons.append("apache_weirdness_bonus")
+        if intent == "apache_access_top_ips":
+            score -= 6
+            reasons.append("apache_weirdness_penalty:prefer_suspicious_user_agents")
     if "crawler" in q and intent == "apache_access_top_ips":
         score -= 8
         reasons.append("crawler_penalty:prefer_user_agent_intent")

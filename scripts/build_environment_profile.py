@@ -702,6 +702,64 @@ def _build_sourcetype_field_inventory(
     return dict(sorted(existing_inventory.items(), key=lambda x: x[0])), meta
 
 
+def _build_index_sourcetype_field_inventory(
+    *,
+    rows: list[dict[str, Any]],
+    earliest_time: str,
+    latest_time: str,
+    sample_size: int,
+    field_row_limit: int,
+) -> dict[str, dict[str, Any]]:
+    inventory: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        index_name = _safe_text(row.get("index"))
+        sourcetypes = [str(st).strip() for st in row.get("sourcetypes", []) if str(st).strip()]
+        if not index_name or not sourcetypes:
+            continue
+        bucket = inventory.setdefault(index_name, {})
+        for sourcetype in sourcetypes:
+            query_args = {
+                "query": _field_summary_query([index_name], sourcetype, sample_size),
+                "earliest_time": earliest_time,
+                "latest_time": latest_time,
+                "row_limit": field_row_limit,
+            }
+            query_error = ""
+            fields: list[dict[str, Any]] = []
+            try:
+                data = run_splunk_query_args(query_args, intent="index_sourcetype_field_inventory", summary_hint="domain field inventory")
+                fields = _extract_field_inventory(data)
+            except Exception as exc:
+                query_error = f"{type(exc).__name__}: {exc}"
+            bucket[sourcetype] = {
+                "index": index_name,
+                "sourcetype": sourcetype,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "sampled_query": query_args["query"],
+                "sample_size": sample_size,
+                "field_count": len(fields),
+                "fields": fields[: min(len(fields), field_row_limit)],
+                "display_fields": _display_fields(fields, limit=min(20, field_row_limit)),
+                "interesting_field_examples": _interesting_field_examples(fields),
+                "interesting_fields": (
+                    [
+                        str(item.get("field", "")).strip()
+                        for item in _interesting_field_examples(fields, limit=12)
+                        if isinstance(item, dict) and str(item.get("field", "")).strip()
+                    ]
+                    or [
+                        str(item.get("field", "")).strip()
+                        for item in fields[:8]
+                        if isinstance(item, dict) and str(item.get("field", "")).strip()
+                    ]
+                ),
+                "query_error": query_error,
+            }
+    return inventory
+
+
 def _build_host_focus(
     *,
     indexes: list[str],
@@ -837,6 +895,15 @@ def build_profile(
     profile["sourcetype_field_inventory"] = field_inventory
     profile["field_inventory_meta"] = field_meta
     profile["counts"]["field_inventory_sourcetypes"] = len(field_inventory)
+    index_sourcetype_inventory = _build_index_sourcetype_field_inventory(
+        rows=rows,
+        earliest_time=earliest_time,
+        latest_time=latest_time,
+        sample_size=field_sample_size,
+        field_row_limit=field_row_limit,
+    )
+    profile["index_sourcetype_field_inventory"] = index_sourcetype_inventory
+    profile["counts"]["index_sourcetype_inventory_indexes"] = len(index_sourcetype_inventory)
 
     # Build CIM/tag inventory (bounded) so models can leverage tag-to-domain mappings.
     tag_rows: list[dict[str, Any]] = []

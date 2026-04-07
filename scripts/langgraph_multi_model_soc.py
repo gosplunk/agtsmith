@@ -48,7 +48,7 @@ from query_policy import validate_query_args
 from spl_rag_context import build_spl_rag_context
 from spl_query_repair import attempt_query_repair_once
 from tdir_core import build_tdir_case
-from environment_profile import validate_query_against_environment
+from environment_profile import apply_environment_query_constraints, validate_query_against_environment
 from intent_field_contracts import validate_query_for_intent
 from runtime_config import (
     DEFAULT_MODEL_EVIDENCE_REVIEWER,
@@ -81,16 +81,44 @@ BLOCKED_TERMS = ("delete", "drop", "remove", "shutdown", "restart", "write", "mo
 ALLOWED_TOOLS = {"splunk_run_query", "splunk_get_indexes", "splunk_get_metadata", "splunk_get_info"}
 FORCE_QUERY_INTENTS = {
     "windows_auth_failures",
+    "windows_successful_logons",
     "windows_process_activity",
     "windows_sysmon_network_activity",
     "windows_sysmon_dns_activity",
     "windows_credential_access_activity",
     "linux_auth_failures",
+    "linux_successful_logins",
+    "successful_login_activity",
     "linux_session_activity",
     "linux_privilege_escalation",
     "linux_privilege_escalation_activity",
     "linux_audit_activity",
 }
+
+LINUX_STYLE_INTENTS = {
+    "failed_login_activity",
+    "successful_login_activity",
+    "linux_auth_failures",
+    "linux_successful_logins",
+    "linux_session_activity",
+    "linux_privilege_escalation",
+    "linux_privilege_escalation_activity",
+    "linux_privilege_escalation_first_seen",
+    "linux_audit_activity",
+}
+WINDOWS_STYLE_INTENTS = {
+    "windows_auth_failures",
+    "windows_successful_logons",
+    "windows_process_activity",
+    "windows_sysmon_network_activity",
+    "windows_sysmon_dns_activity",
+    "windows_credential_access_activity",
+}
+WEB_STYLE_INTENTS = {"apache_access_top_ips", "apache_404_spike"}
+
+
+def _apply_environment_constraints_to_query(question: str, intent: str, query: str) -> str:
+    return apply_environment_query_constraints(question, intent, query)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -235,6 +263,8 @@ def _default_plan_from_template(question: str) -> dict[str, Any]:
 
     template = map_question_to_template(question)
     args = template_to_query_args(template, question)
+    if isinstance(args, dict) and str(args.get("query", "")).strip():
+        args["query"] = _apply_environment_constraints_to_query(question, template.intent, str(args.get("query", "")).strip())
     return {
         "selected_tool": "splunk_run_query",
         "tool_args": args,
@@ -329,7 +359,8 @@ def _normalize_planner_plan(candidate: dict[str, Any], question: str, *, fallbac
         out["tool_args"].setdefault("earliest_time", mapped_template.earliest_time)
         out["tool_args"].setdefault("latest_time", mapped_template.latest_time)
         out["tool_args"].setdefault("row_limit", mapped_template.row_limit)
-        out["canonical_template_query"] = template_to_query_args(mapped_template, question).get("query", "")
+        canonical_query = template_to_query_args(mapped_template, question).get("query", "")
+        out["canonical_template_query"] = _apply_environment_constraints_to_query(question, raw_intent, canonical_query)
     else:
         out["canonical_template_query"] = ""
     if tool in {"splunk_get_indexes", "splunk_get_info"}:
@@ -704,6 +735,7 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
             )
             normalized["intent"] = "linux_audit_activity"
         if "query" in args and str(args.get("query", "")).strip():
+            args["query"] = _apply_environment_constraints_to_query(question, normalized["intent"], str(args.get("query", "")).strip())
             args["query"] = re.sub(r"\s{2,}", " ", str(args["query"]).strip())
 
     if tool == "splunk_run_query" and "row_limit" not in args:
@@ -758,7 +790,10 @@ def _enforce_question_alignment(question: str, plan: dict[str, Any]) -> dict[str
 
     deterministic_run_query_intents = {
         "failed_login_activity",
+        "successful_login_activity",
         "linux_auth_failures",
+        "linux_successful_logins",
+        "windows_successful_logons",
         "windows_auth_failures",
         "windows_process_activity",
         "osquery_process_activity",
@@ -1514,15 +1549,132 @@ def _deterministic_summary(output: dict[str, Any]) -> str:
     if not output.get("supported", False):
         return f"Guardrail blocked request: {output.get('guardrail_reason', 'unsupported request')}"
 
-    rows = output.get("rows_returned", 0)
-    tool = output.get("selected_tool", "")
+    intent = str(output.get("intent", "")).strip()
+    tool = str(output.get("selected_tool", "")).strip()
+    query_args = output.get("query_args", {}) if isinstance(output.get("query_args", {}), dict) else {}
+    earliest = str(query_args.get("earliest_time", "") or "unknown")
+    latest = str(query_args.get("latest_time", "") or "now")
+    rows = int(output.get("rows_returned", 0) or 0)
+    total_rows = output.get("total_rows")
     confidence = output.get("final_confidence", 0.0)
-    return (
-        f"- Tool executed: {tool}\n"
-        f"- Rows returned: {rows}\n"
-        f"- Final confidence: {confidence}\n"
-        "- Next action: pivot on top entity and re-run with narrower time scope if needed."
-    )
+    search_strategy = str(output.get("search_strategy_summary", "")).strip()
+    reviewer_notes = output.get("reviewer_notes", []) if isinstance(output.get("reviewer_notes", []), list) else []
+    spl_results = output.get("spl_results_preview", []) if isinstance(output.get("spl_results_preview", []), list) else []
+    top_row = spl_results[0] if spl_results and isinstance(spl_results[0], dict) else {}
+
+    def _pick(*keys: str) -> str:
+        for key in keys:
+            value = str(top_row.get(key, "")).strip()
+            if value and value.lower() not in {"unknown", "none", "null"}:
+                return value
+        return ""
+
+    def _format_entities(*keys: str, limit: int = 3) -> str:
+        values: list[str] = []
+        for row in spl_results:
+            if not isinstance(row, dict):
+                continue
+            for key in keys:
+                value = str(row.get(key, "")).strip()
+                if not value or value.lower() in {"unknown", "none", "null"}:
+                    continue
+                if value not in values:
+                    values.append(value)
+                if len(values) >= limit:
+                    return ", ".join(values)
+        return ", ".join(values)
+
+    intent_labels = {
+        "o365_management_activity": "Office 365 management activity",
+        "aws_cloudtrail_activity": "AWS CloudTrail activity",
+        "apache_404_spike": "Apache 404 activity",
+        "apache_suspicious_user_agents": "Apache user-agent activity",
+        "apache_access_top_ips": "Apache access activity",
+        "linux_session_activity": "Linux session activity",
+        "failed_login_activity": "failed login activity",
+        "successful_login_activity": "successful login activity",
+        "linux_successful_logins": "successful Linux login activity",
+        "windows_successful_logons": "successful Windows logon activity",
+    }
+    label = intent_labels.get(intent, intent.replace("_", " ").strip() or "activity")
+
+    summary_lines = [
+        f"- **What was queried**: {label.capitalize()} using `{tool}` over `{earliest}` to `{latest}`.",
+    ]
+    if search_strategy:
+        summary_lines.append(f"- **Search path**: {search_strategy}")
+
+    if rows <= 0:
+        summary_lines.append("- **Top findings**: No matching rows were returned in this time window.")
+        summary_lines.append(f"- **Confidence rationale**: Confidence remains {confidence:.2f}; the query executed, but the current dataset did not surface supporting evidence.")
+        summary_lines.append("- **Concrete next check**: Expand the time range or pivot to adjacent entities and related telemetry to test whether the activity appears elsewhere.")
+        return "\n".join(summary_lines)
+
+    if intent == "o365_management_activity":
+        user = _pick("UserId", "user", "userid")
+        operation = _pick("Operation", "operation")
+        workload = _pick("Workload", "workload")
+        client_ip = _pick("ClientIP", "clientip", "src_ip", "src")
+        parts = []
+        if user:
+            parts.append(f"user `{user}`")
+        if operation:
+            parts.append(f"operation `{operation}`")
+        if workload:
+            parts.append(f"workload `{workload}`")
+        if client_ip:
+            parts.append(f"client IP `{client_ip}`")
+        finding = ", ".join(parts) if parts else "returned Office 365 audit rows"
+        summary_lines.append(f"- **Top findings**: The strongest returned result involved {finding}.")
+        summary_lines.append("- **Interpretation**: This is activity visibility, not proof of malicious behavior by itself. Review the operation type, workload, and client IP concentration before treating it as suspicious.")
+        summary_lines.append(f"- **Confidence rationale**: Confidence is {confidence:.2f} because the query returned structured management events, but intent still depends on the operation mix and actor context.")
+        summary_lines.append("- **Concrete next check**: Pivot on the top user or client IP and compare operation diversity, workload spread, and any unusual admin-style actions.")
+        return "\n".join(summary_lines)
+
+    if intent == "linux_session_activity":
+        actor = _format_entities("actor", "session_user", limit=3) or _pick("actor", "session_user", "user")
+        host = _pick("host")
+        session_state = _pick("session_state")
+        details = []
+        if actor:
+            details.append(f"user(s) `{actor}`")
+        if host:
+            details.append(f"host `{host}`")
+        if session_state:
+            details.append(f"session state `{session_state}`")
+        summary_lines.append(f"- **Top findings**: Session events were returned for {', '.join(details) if details else 'the Linux auth dataset'}.")
+        summary_lines.append("- **Interpretation**: Session-open and session-close records are useful for context and scoping, but they are not malicious by default.")
+        summary_lines.append(f"- **Confidence rationale**: Confidence is {confidence:.2f}; the query is aligned to Linux auth/session telemetry and returned usable context.")
+        summary_lines.append("- **Concrete next check**: Pivot on the actor or host and compare session activity with failed logons, sudo usage, or other auth anomalies in the same period.")
+        return "\n".join(summary_lines)
+
+    if intent in {"apache_404_spike", "apache_suspicious_user_agents", "apache_access_top_ips"}:
+        client = _pick("clientip", "src_ip")
+        host = _pick("host")
+        useragent = _pick("useragent", "http_user_agent")
+        bits = []
+        if client:
+            bits.append(f"client `{client}`")
+        if host:
+            bits.append(f"host `{host}`")
+        if useragent and intent == "apache_suspicious_user_agents":
+            bits.append(f"user agent `{useragent}`")
+        summary_lines.append(f"- **Top findings**: The returned web rows surfaced {', '.join(bits) if bits else 'Apache access patterns'} with `{total_rows if total_rows is not None else rows}` total matching records.")
+        summary_lines.append("- **Interpretation**: Treat this as web activity triage. Repetition, concentration, or scanner-like user agents may be suspicious, but the result alone is not a compromise finding.")
+        summary_lines.append(f"- **Confidence rationale**: Confidence is {confidence:.2f}; the query is mapped to the local Apache domain and returned scoped web evidence.")
+        summary_lines.append("- **Concrete next check**: Pivot on the top client IP or user agent and inspect request paths, status distribution, and repetition over a narrower time range.")
+        return "\n".join(summary_lines)
+
+    entity_hint = _format_entities("user", "user_name", "host", "src_ip", "clientip")
+    if entity_hint:
+        summary_lines.append(f"- **Top findings**: Returned evidence surfaced these primary entities: {entity_hint}.")
+    else:
+        summary_lines.append(f"- **Top findings**: The query returned `{total_rows if total_rows is not None else rows}` matching rows for this investigation.")
+    summary_lines.append(f"- **Confidence rationale**: Confidence is {confidence:.2f}; the query executed successfully and returned usable evidence.")
+    if reviewer_notes:
+        summary_lines.append(f"- **Review caveat**: {str(reviewer_notes[0])}")
+    summary_lines.append("- **Concrete next check**: Pivot on the strongest returned entity and compare it against adjacent telemetry or a narrower time scope.")
+    return "\n".join(summary_lines)
 
 
 def _clean_summary_text(text: str) -> str:

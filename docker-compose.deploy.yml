@@ -1,10 +1,29 @@
 services:
+  agtsmith-case-db:
+    image: postgres:16
+    container_name: agtsmith-case-db
+    environment:
+      POSTGRES_DB: "${AGTSMITH_CASE_DB_NAME:-agtsmith}"
+      POSTGRES_USER: "${AGTSMITH_CASE_DB_USER:-agtsmith}"
+      POSTGRES_PASSWORD: "${AGTSMITH_CASE_DB_PASSWORD:-agtsmith-local-change-me}"
+    volumes:
+      - agtsmith_deploy_case_db:/var/lib/postgresql/data
+    restart: unless-stopped
+
   agtsmith-ui-deploy:
     build:
       context: .
       dockerfile: Dockerfile.deploy
     image: agtsmith-ui-deploy:local
     container_name: agtsmith-ui-deploy
+    depends_on:
+      - agtsmith-case-db
+    environment:
+      AGTSMITH_CASE_DB_HOST: agtsmith-case-db
+      AGTSMITH_CASE_DB_PORT: "5432"
+      AGTSMITH_CASE_DB_NAME: "${AGTSMITH_CASE_DB_NAME:-agtsmith}"
+      AGTSMITH_CASE_DB_USER: "${AGTSMITH_CASE_DB_USER:-agtsmith}"
+      AGTSMITH_CASE_DB_PASSWORD: "${AGTSMITH_CASE_DB_PASSWORD:-agtsmith-local-change-me}"
     ports:
       - "${AGTSMITH_DEPLOY_PORT:-8787}:8787"
     volumes:
@@ -15,3 +34,4 @@ services:
 volumes:
   agtsmith_deploy_config:
   agtsmith_deploy_artifacts:
+  agtsmith_deploy_case_db:

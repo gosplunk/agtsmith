@@ -50,9 +50,33 @@ def map_question_to_template(question: str) -> QueryTemplate:
     explicit_botsv3_overview = explicit_botsv3_sourcetype and (
         "overview of sourcetype" in normalized or "show an overview of sourcetype" in normalized
     )
+    if "auth_success" in activities and platforms == {"linux"}:
+        for template in TEMPLATES:
+            if template.intent == "linux_successful_logins":
+                return template
+    if "auth_success" in activities and platforms == {"windows"}:
+        for template in TEMPLATES:
+            if template.intent == "windows_successful_logons":
+                return template
+    if platforms == {"windows", "linux"} and "auth_success" in activities:
+        for template in TEMPLATES:
+            if template.intent == "successful_login_activity":
+                return template
     if platforms == {"windows", "linux"} and "auth_failure" in activities:
         for template in TEMPLATES:
             if template.intent == "failed_login_activity":
+                return template
+    if "windows" in platforms and "dns_activity" in activities and "sysmon" in normalized:
+        for template in TEMPLATES:
+            if template.intent == "windows_sysmon_dns_activity":
+                return template
+    if "windows" in platforms and "network_activity" in activities and "sysmon" in normalized:
+        for template in TEMPLATES:
+            if template.intent == "windows_sysmon_network_activity":
+                return template
+    if "windows" in platforms and "process_activity" in activities:
+        for template in TEMPLATES:
+            if template.intent == "windows_process_activity":
                 return template
     if explicit_botsv3_overview:
         for template in TEMPLATES:
@@ -75,6 +99,14 @@ def map_question_to_template(question: str) -> QueryTemplate:
             best_template = template
             best_score = score
     if best_template is not None:
+        if "windows" in dims.get("platforms", []) and best_template.intent == "successful_login_activity":
+            for template in TEMPLATES:
+                if template.intent == "windows_successful_logons":
+                    return template
+        if "linux" in dims.get("platforms", []) and best_template.intent == "successful_login_activity":
+            for template in TEMPLATES:
+                if template.intent == "linux_successful_logins":
+                    return template
         if "windows" in dims.get("platforms", []) and best_template.intent == "failed_login_activity":
             for template in TEMPLATES:
                 if template.intent == "windows_auth_failures":
@@ -95,6 +127,24 @@ def _dynamic_query_for_question(template: QueryTemplate, question: str) -> str:
     q = (question or "").lower()
     explicit_botsv3_sourcetype = extract_explicit_botsv3_sourcetype(question)
 
+    if "auth_success" in activities and platforms == {"windows", "linux"}:
+        return (
+            "search ("
+            "(index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+            "(\"Accepted password\" OR \"Accepted publickey\" OR \"Accepted keyboard-interactive/pam\" OR \"session opened for user\")) "
+            "OR "
+            "((index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+            "(EventCode=4624 OR EventID=4624 OR \"An account was successfully logged on\"))"
+            ") "
+            "| rex field=_raw \"(?i)Accepted (?:password|publickey|keyboard-interactive/pam) for (?<success_user>[^ ]+)\" "
+            "| rex field=_raw \"(?i)from (?<success_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<success_port>\\d+)\" "
+            "| rex field=_raw \"(?i)session opened for user (?<session_user>[A-Za-z0-9_.-]+)\" "
+            "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,success_src_ip,ip) "
+            "| eval src_ip=coalesce(src_ip,rhost,\"local\") "
+            "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,account,success_user,session_user) "
+            "| eval port=coalesce(port,success_port,DestinationPort,dest_port) "
+            "| stats count by index host source sourcetype user_name src_ip port | sort - count"
+        )
     if "auth_failure" in activities and platforms == {"windows", "linux"}:
         return (
             "search ("
@@ -216,13 +266,17 @@ def _apply_user_scope(query: str, question: str) -> str:
     return query
 
 
-def template_to_query_args(template: QueryTemplate, question: str = "") -> dict[str, Any]:
+def template_to_query_args(template: QueryTemplate, question: str = "", *, apply_environment: bool = True) -> dict[str, Any]:
     query = template.query
     if question:
         query = _dynamic_query_for_question(template, question)
         query = _apply_dataset_scope(query, question)
         query = _apply_host_scope(query, question)
         query = _apply_user_scope(query, question)
+        if query and apply_environment:
+            from environment_profile import apply_environment_query_constraints
+
+            query = apply_environment_query_constraints(question, template.intent, query)
         earliest_time, latest_time = infer_time_window(
             question,
             default_earliest=template.earliest_time,

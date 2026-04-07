@@ -1,6 +1,6 @@
 # Next Release Plan
 
-Target release: `v1.3.0`
+Target release: `v1.3.2`
 Status: planned
 
 This document is the canonical planning note for the next A.G.E.N.T. Smith release. It is intended to complement the changelog and architecture docs by separating:
@@ -16,26 +16,22 @@ The current planning theme is simple:
 
 ## Committed Enhancements
 
-### 1. Persistent Follow-Up Context For Standard Investigation Pivots
-Standard investigation pivots currently rerun as fresh bounded questions. The next release should allow the normal investigation workflow to carry forward bounded context from the previous run.
+### 1. Richer Branch Visualization And Analyst Notes
+Durable case memory and stateful pivots are now shipped. The next release should build on that with a stronger branch view and analyst note-taking.
 
-Target carry-forward context:
-- original question
-- previous executed SPL
-- highest-priority entities such as host, source IP, username, process, or URI
-- current assessment / working hypothesis
-- Splunk coverage and visibility notes
-- pivot source and rationale
+Target additions:
+- explicit branch view for sibling pivots and alternate investigation paths
+- analyst notes/bookmarks on any timeline step
+- easier evidence-diff view between parent and child steps
 
 Expected outcome:
-- `Run This Follow-Up` becomes a true continuation step rather than only a convenient question rewrite
-- follow-up planning remains grounded in what Splunk already showed
-- the analyst can continue down an investigation path without losing case context
+- complex investigations remain understandable even when multiple pivots branch from the same original evidence
+- analysts can annotate why one branch mattered and another did not
 
 Guardrails:
-- carried context must remain visible and bounded
+- case memory remains visible and bounded
 - read-only validation remains deterministic
-- follow-up context must not silently override explicit analyst wording
+- annotations do not silently alter the underlying saved evidence
 
 ### 2. Runtime Model Wiring Must Match Saved Configuration By Default
 The live runtime should continue to honor saved role assignments from Configuration without depending on ad hoc environment-variable injection.
@@ -76,13 +72,13 @@ Potential improvements:
 
 ## Known Gaps
 
-### 1. Standard Pivot Continuity Is Not Yet True Investigation Memory
+### 1. Investigation Timeline Still Needs Better Branch Visualization
 Current state:
-- standard pivots in the normal investigation page are mostly rerun as new bounded questions
-- only the agentic continuation path persists richer session/case context today
+- durable cases, node persistence, and stateful pivots are now implemented
+- the current Investigation Timeline is strongest for linear progressions and shallow branch depth
 
 User-facing implication:
-- pivoting is useful, but it is not yet the same thing as a fully stateful follow-on investigation in the normal non-agentic workflow
+- continuity is real today, but larger cases would benefit from a clearer branch graph and stronger node comparison tools
 
 ### 2. Some Investigation Summaries Still Depend On Backend Result Shape Consistency
 Current state:
@@ -104,11 +100,11 @@ Still outside the scope of the next release:
 - automated response / SOAR by default
 
 ## Release Readiness Questions
-Before calling `v1.3.0` ready, answer these directly:
+Before calling `v1.3.2` ready, answer these directly:
 
-1. Does a standard pivot retain bounded context from the previous investigation?
-2. Does the UI make that carried context visible to the analyst?
-3. Does the runtime model split shown in the UI match the models actually used?
+1. Can an analyst understand a multi-branch case without reading every saved node in sequence?
+2. Can the analyst compare what changed between a parent finding and a child pivot quickly?
+3. Do analyst notes and bookmarks stay clearly separate from deterministic evidence?
 4. Does Splunk remain the clear evidence source of truth throughout the follow-up flow?
 5. Are no-evidence and partial-coverage outcomes still presented conservatively?
 

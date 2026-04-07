@@ -72,6 +72,11 @@ That means LangGraph is not just "one model call." It is the coded workflow that
 - when to stop
 - when to allow a bounded continuation
 
+LangGraph no longer works alone for continuity. The live product now persists a canonical case and node history in a PostgreSQL-backed case store so:
+- the original investigation can be reopened later without rerunning Splunk
+- each pivot becomes a child node tied to its parent
+- the Investigation Timeline can show how evidence and confidence changed over time
+
 ## 4. Current Model Architecture
 The current SPL path is intentionally split across specialized roles.
 
@@ -200,6 +205,7 @@ SPL quality in this project is not driven only by prompts. It depends on three l
 2. `Environment Profile / Data Domains`
 - live index and sourcetype inventory
 - known fields
+- per-domain field inventory at the `index + sourcetype` level
 - sample values
 - environment-aware semantics
 
@@ -220,6 +226,11 @@ flowchart LR
 ```
 
 This is why the system can improve SPL quality without turning into an unconstrained "model knows best" pipeline.
+
+The most important practical consequence is portability:
+- the runtime is no longer limited to generic assumptions like `index=linux`, `index=windows`, or `sourcetype=access_combined`
+- instead, it learns the local environment naming and field behavior, then rewrites canonical query families toward the live domains discovered during Data Domains refresh
+- unsupported data families are blocked when the environment does not actually expose them
 
 ## 7.1 SPL Optimization AI Engine
 The current product also includes a bounded SPL optimization workflow outside the live investigation request path.

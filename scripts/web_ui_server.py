@@ -29,6 +29,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 from langgraph_agentic_soc import run_agentic_investigation
+from langgraph_case_state import bootstrap_graph_case_state, snapshot_graph_case_state
 from langgraph_multi_model_soc import describe_multi_model_graph, run_multi_model_soc
 from local_learning import (
     ensure_learning_registry,
@@ -37,7 +38,12 @@ from local_learning import (
     load_learning_progress,
     set_learning_record_status,
 )
-from minimal_question_to_answer import run_splunk_query_args
+from minimal_question_to_answer import (
+    map_question_to_template,
+    run_splunk_query_args,
+    summarize_with_ollama_model,
+    template_to_query_args,
+)
 from ollama_log_stream import (
     RemoteLogSourceRegistry,
     StreamParams,
@@ -70,6 +76,14 @@ from runtime_config import (
     get_runtime_secret,
     parse_env_file,
     write_env_file,
+)
+from case_store import (
+    build_case_timeline,
+    case_store_backend,
+    load_case,
+    load_case_node,
+    list_recent_cases,
+    persist_case_result,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -524,6 +538,483 @@ def _persist_mitre_bundle_to_artifact(artifact_path: str, mitre_bundle: dict[str
     target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _persist_result_updates_to_artifact(artifact_path: str, updates: dict[str, Any]) -> None:
+    target = Path(str(artifact_path or "").strip())
+    if not target.exists() or not updates:
+        return
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    result = payload.get("result", {})
+    if not isinstance(result, dict):
+        return
+    result.update(updates)
+    payload["result"] = result
+    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _ordered_unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(value)
+    return ordered
+
+
+def _first_present(row: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in {"unknown", "null", "none", "-", "local"}:
+            return text
+    return ""
+
+
+def _extract_case_entities(rows: list[dict[str, Any]], result_body: dict[str, Any]) -> dict[str, list[str]]:
+    entities: dict[str, list[str]] = {
+        "hosts": [],
+        "users": [],
+        "source_ips": [],
+        "client_ips": [],
+        "ports": [],
+        "event_names": [],
+        "services": [],
+        "uri_paths": [],
+        "user_agents": [],
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        entities["hosts"].append(_first_present(row, ("host", "Computer")))
+        entities["users"].append(_first_present(row, ("user", "user_name", "TargetUserName", "SubjectUserName", "Account_Name", "Caller_User_Name", "actor")))
+        entities["source_ips"].append(_first_present(row, ("src_ip", "Source_Network_Address", "IpAddress", "sourceIPAddress", "source_ip")))
+        entities["client_ips"].append(_first_present(row, ("clientip", "src", "src_ip")))
+        entities["ports"].append(_first_present(row, ("port", "auth_port", "DestinationPort", "dest_port")))
+        entities["event_names"].append(_first_present(row, ("eventName", "EventCode", "EventID")))
+        entities["services"].append(_first_present(row, ("service", "eventSource")))
+        entities["uri_paths"].append(_first_present(row, ("uri_path", "uri", "url", "file")))
+        entities["user_agents"].append(_first_present(row, ("useragent", "http_user_agent")))
+    return {key: _ordered_unique(values)[:5] for key, values in entities.items()}
+
+
+def _rank_entity_values(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    field_map: dict[str, tuple[str, ...]] = {
+        "hosts": ("host", "Computer"),
+        "users": ("user", "user_name", "TargetUserName", "SubjectUserName", "Account_Name", "Caller_User_Name", "actor"),
+        "source_ips": ("src_ip", "Source_Network_Address", "IpAddress", "sourceIPAddress", "source_ip"),
+        "client_ips": ("clientip", "src", "src_ip"),
+        "event_names": ("eventName", "EventCode", "EventID"),
+        "services": ("service", "eventSource"),
+    }
+    ranked: dict[str, list[dict[str, Any]]] = {}
+    for bucket, keys in field_map.items():
+        counts: dict[str, int] = {}
+        first_seen: dict[str, int] = {}
+        for idx, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            value = _first_present(row, keys)
+            if not value:
+                continue
+            counts[value] = counts.get(value, 0) + 1
+            first_seen.setdefault(value, idx)
+        ordered = sorted(counts.items(), key=lambda item: (-item[1], first_seen.get(item[0], 999999), item[0]))
+        ranked[bucket] = [{"value": value, "count": count} for value, count in ordered[:8]]
+    return ranked
+
+
+def _classify_pivot_seed(text: str) -> dict[str, str]:
+    value = str(text or "").strip()
+    lower = value.lower()
+    target_type = "derived_field"
+    target_label = "Derived field"
+    pivot_kind = "generic_followup"
+    if "source ip" in lower:
+        target_type = "source_ip"
+        target_label = "Source IP"
+        pivot_kind = "same_source_ip_followup"
+    elif "username" in lower or "user " in lower:
+        target_type = "username"
+        target_label = "Username"
+        pivot_kind = "username_followup"
+    elif "host" in lower:
+        target_type = "host"
+        target_label = "Host"
+        pivot_kind = "host_followup"
+    if "successful logon" in lower or "successful login" in lower:
+        pivot_kind = "success_after_failure"
+    elif "privilege escalation" in lower or "administrative logon" in lower:
+        pivot_kind = "privilege_escalation_check"
+    elif "uri" in lower or "user-agent" in lower or "user agent" in lower:
+        pivot_kind = "web_client_drilldown"
+    elif "useridentity" in lower or "eventname" in lower or "sourceipaddress" in lower:
+        pivot_kind = "cloud_identity_drilldown"
+    return {
+        "title": value,
+        "target_type": target_type,
+        "target_label": target_label,
+        "pivot_kind": pivot_kind,
+    }
+
+
+def _build_stateful_followup_question(seed: str, target_label: str, target_values: list[str], root_question: str) -> str:
+    base = str(seed or "").strip().rstrip(".")
+    value_text = ", ".join(target_values[:3])
+    if value_text:
+        base = f"{base} Use {target_label} value(s): {value_text}."
+    root = str(root_question or "").strip()
+    if root:
+        base = f"{base} Continue the prior investigation context from: {root}"
+    return base.strip()
+
+
+def _quote_values(values: list[str]) -> str:
+    return " OR ".join(f'"{str(value).replace(chr(34), "\\\"")}"' for value in values if str(value).strip())
+
+
+def _base_time_range(result_body: dict[str, Any], query_args: dict[str, Any]) -> tuple[str, str]:
+    earliest = str(query_args.get("earliest_time", "")).strip() or "-24h"
+    latest = str(query_args.get("latest_time", "")).strip() or "now"
+    return earliest, latest
+
+
+def _build_deterministic_pivot_query_args(
+    *,
+    base_intent: str,
+    pivot_kind: str,
+    target_type: str,
+    target_values: list[str],
+    entities: dict[str, list[str]],
+    base_query_args: dict[str, Any],
+) -> dict[str, Any] | None:
+    values = [str(item).strip() for item in target_values if str(item).strip()]
+    if not values:
+        return None
+    earliest, latest = _base_time_range({}, base_query_args)
+    host_filters = entities.get("hosts", [])
+    host_clause = ""
+    if host_filters:
+        host_expr = " OR ".join(f'host=\"{str(host).replace(chr(34), "\\\"")}\"' for host in host_filters[:3])
+        host_clause = f" ({host_expr}) "
+    if base_intent in {"failed_login_activity", "linux_auth_failures", "windows_auth_failures"}:
+        if pivot_kind == "success_after_failure" and target_type == "source_ip":
+            ip_expr = " OR ".join(f'src_ip=\"{str(value).replace(chr(34), "\\\"")}\"' for value in values[:5])
+            query = (
+                "search ("
+                "(index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+                "(\"Accepted password\" OR \"Accepted publickey\" OR \"session opened for user\" OR \"Accepted keyboard-interactive/pam\")) "
+                "OR "
+                "((index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+                "(EventCode=4624 OR EventID=4624 OR \"An account was successfully logged on\"))"
+                ") "
+                "| eval platform=case(index=\"linux\",\"linux\", true(), \"windows\") "
+                "| rex field=_raw \"(?i)Accepted (?:password|publickey|keyboard-interactive/pam) for (?<success_user>[^ ]+)\" "
+                "| rex field=_raw \"(?i)from (?<success_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<success_port>\\d+)\" "
+                "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,success_src_ip,ip) "
+                "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,success_user) "
+                "| eval auth_port=coalesce(DestinationPort,dest_port,port,success_port) "
+                f"| search ({ip_expr}) "
+                + (f"| search{host_clause}" if host_clause else "")
+                + "| stats count by platform index host user_name src_ip auth_port | sort - count"
+            )
+            return {"query": query, "earliest_time": earliest, "latest_time": latest, "row_limit": 50}
+        if pivot_kind == "username_followup" and target_type == "username":
+            user_expr = " OR ".join(f'user_name=\"{str(value).replace(chr(34), "\\\"")}\" OR user=\"{str(value).replace(chr(34), "\\\"")}\"' for value in values[:5])
+            template = map_question_to_template("Show failed login activity in the last 24 hours")
+            query_args = template_to_query_args(template, "")
+            query = str(query_args.get("query", "")).strip()
+            if "| fillnull" in query:
+                query = query.replace("| fillnull", f"| search ({user_expr}) | fillnull", 1)
+            else:
+                query = f"{query} | search ({user_expr})"
+            query += " | sort - count"
+            return {"query": query, "earliest_time": earliest, "latest_time": latest, "row_limit": 50}
+        if pivot_kind == "privilege_escalation_check":
+            actor_expr = " OR ".join(
+                [f'actor=\"{str(v).replace(chr(34), "\\\"")}\"' for v in values[:5]]
+                + [f'target_user=\"{str(v).replace(chr(34), "\\\"")}\"' for v in values[:5]]
+            )
+            host_expr = " OR ".join(f'host=\"{str(host).replace(chr(34), "\\\"")}\"' for host in host_filters[:3])
+            clauses = [f"({actor_expr})"] if actor_expr else []
+            if host_expr:
+                clauses.append(f"({host_expr})")
+            search_clause = " AND ".join(clauses)
+            query = (
+                "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+                "(\"sudo:\" OR \"su:\" OR \"pam_unix(sudo:session)\" OR \"pam_unix(su:session)\" OR \"session opened for user root\") "
+                "| rex field=_raw \"(?i)sudo:\\s+(?<sudo_actor>[A-Za-z0-9_.-]+)\\s+:\" "
+                "| rex field=_raw \"(?i)\\buser=(?<auth_user>[^\\s;]+)\" "
+                "| eval actor=coalesce(sudo_actor,auth_user,user,account,user_name) "
+                "| eval target_user=coalesce(target_user,user,account,user_name) "
+            )
+            if search_clause:
+                query += f"| search {search_clause} "
+            query += "| table _time host actor target_user sourcetype _raw | head 50"
+            return {"query": query, "earliest_time": earliest, "latest_time": latest, "row_limit": 50}
+    if base_intent == "apache_access_top_ips" and target_type in {"source_ip", "host", "derived_field"}:
+        ip_values = values or entities.get("client_ips", [])
+        if ip_values:
+            ip_expr = " OR ".join(f'clientip=\"{str(value).replace(chr(34), "\\\"")}\"' for value in ip_values[:5])
+            query = (
+                "search index=linux sourcetype=access_combined "
+                f"| search ({ip_expr}) "
+                "| stats count values(status) as statuses values(method) as methods values(useragent) as useragents by clientip uri_path "
+                "| sort - count | head 50"
+            )
+            return {"query": query, "earliest_time": earliest, "latest_time": latest, "row_limit": 50}
+    if base_intent == "aws_cloudtrail_activity":
+        safe_values = [str(value).replace('"', '\\"') for value in values[:5]]
+        values_expr = " OR ".join(f'"{safe_value}"' for safe_value in safe_values)
+        query = (
+            "search index=main sourcetype=aws:cloudtrail "
+            f"| search ({values_expr}) "
+            "| stats count values(eventSource) as event_sources values(eventName) as event_names by userIdentity.arn sourceIPAddress "
+            "| sort - count | head 50"
+        )
+        return {"query": query, "earliest_time": earliest, "latest_time": latest, "row_limit": 50}
+    return None
+
+
+def _build_structured_pivot_context(result_body: dict[str, Any], sample_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    base_query_args = result_body.get("query_args", {}) if isinstance(result_body.get("query_args"), dict) else {}
+    base_query = str(base_query_args.get("query", "")).strip()
+    base_intent = str(result_body.get("intent", "")).strip()
+    root_question = str(result_body.get("root_question") or result_body.get("question") or "").strip()
+    entities = _extract_case_entities(sample_rows, result_body)
+    ranked_entities = _rank_entity_values(sample_rows)
+    if result_body.get("supported") is False:
+        return {
+            "root_question": root_question,
+            "base_intent": base_intent,
+            "base_query_args": base_query_args,
+            "base_query": base_query,
+            "time_range": {
+                "earliest": str(base_query_args.get("earliest_time", "")).strip() or "-24h",
+                "latest": str(base_query_args.get("latest_time", "")).strip() or "now",
+            },
+            "entities": entities,
+            "ranked_entities": ranked_entities,
+            "pivot_candidates": [],
+        }
+    raw_pivots = []
+    mitre_pivots = result_body.get("mitre_attack", {}).get("next_pivots", []) if isinstance(result_body.get("mitre_attack"), dict) else []
+    tdir_pivots = result_body.get("tdir_case", {}).get("recommended_next_pivots", []) if isinstance(result_body.get("tdir_case"), dict) else []
+    for item in (mitre_pivots if isinstance(mitre_pivots, list) and mitre_pivots else tdir_pivots if isinstance(tdir_pivots, list) else []):
+        text = str(item or "").strip()
+        if text:
+            raw_pivots.append(text)
+    candidates: list[dict[str, Any]] = []
+    for index, text in enumerate(_ordered_unique(raw_pivots)[:6]):
+        seed = _classify_pivot_seed(text)
+        target_values: list[str] = []
+        ranked_bucket: list[dict[str, Any]] = []
+        if seed["target_type"] == "source_ip":
+            ranked_bucket = ranked_entities.get("source_ips") or ranked_entities.get("client_ips") or []
+            target_values = [item.get("value", "") for item in ranked_bucket if str(item.get("value", "")).strip()]
+            if not target_values:
+                target_values = entities.get("source_ips") or entities.get("client_ips") or []
+        elif seed["target_type"] == "username":
+            ranked_bucket = ranked_entities.get("users") or []
+            target_values = [item.get("value", "") for item in ranked_bucket if str(item.get("value", "")).strip()]
+            if not target_values:
+                target_values = entities.get("users") or []
+        elif seed["target_type"] == "host":
+            ranked_bucket = ranked_entities.get("hosts") or []
+            target_values = [item.get("value", "") for item in ranked_bucket if str(item.get("value", "")).strip()]
+            if not target_values:
+                target_values = entities.get("hosts") or []
+        else:
+            ranked_bucket = ranked_entities.get("users") or ranked_entities.get("hosts") or ranked_entities.get("source_ips") or []
+            target_values = [item.get("value", "") for item in ranked_bucket if str(item.get("value", "")).strip()]
+            if not target_values:
+                target_values = entities.get("users") or entities.get("hosts") or entities.get("source_ips") or []
+        target_values = [str(item).strip() for item in target_values if str(item).strip()][:3]
+        ranked_bucket = [item for item in ranked_bucket if str(item.get("value", "")).strip()][:3]
+        direct_query_args = _build_deterministic_pivot_query_args(
+            base_intent=base_intent,
+            pivot_kind=seed["pivot_kind"],
+            target_type=seed["target_type"],
+            target_values=target_values,
+            entities=entities,
+            base_query_args=base_query_args,
+        )
+        candidates.append(
+            {
+                "id": f"pivot_{index+1}_{re.sub(r'[^a-z0-9]+', '_', seed['pivot_kind'].lower()).strip('_') or 'followup'}",
+                "index": index,
+                "title": text,
+                "target_type": seed["target_type"],
+                "target_label": seed["target_label"],
+                "target_values": target_values,
+                "target_rankings": ranked_bucket,
+                "pivot_kind": seed["pivot_kind"],
+                "execution_mode": "deterministic_query" if isinstance(direct_query_args, dict) else "stateful_followup_question",
+                "query_args": direct_query_args,
+                "next_question": _build_stateful_followup_question(text, seed["target_label"], target_values[:3], root_question),
+                "provenance": {
+                    "source": "returned_evidence",
+                    "selection_rule": "top_ranked_values_by_frequency",
+                    "explanation": f"Selected from the highest-frequency {seed['target_label'].lower()} values in the returned evidence rows.",
+                },
+            }
+        )
+    return {
+        "root_question": root_question,
+        "base_intent": base_intent,
+        "base_query_args": base_query_args,
+        "base_query": base_query,
+        "time_range": {
+            "earliest": str(base_query_args.get("earliest_time", "")).strip() or "-24h",
+            "latest": str(base_query_args.get("latest_time", "")).strip() or "now",
+        },
+        "entities": entities,
+        "ranked_entities": ranked_entities,
+        "pivot_candidates": candidates,
+    }
+
+
+def _build_graph_case_state_payload(
+    *,
+    question: str,
+    result_body: dict[str, Any],
+    sample_rows: list[dict[str, Any]],
+    case_id: str = "",
+    current_node_id: str = "",
+    parent_node_id: str = "",
+    node_type: str = "investigation",
+    previous_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    entities = _extract_case_entities(sample_rows, result_body)
+    ranked_entities = _rank_entity_values(sample_rows)
+    pivot_context = result_body.get("pivot_context", {}) if isinstance(result_body.get("pivot_context"), dict) else {}
+    pivot_candidates = pivot_context.get("pivot_candidates", []) if isinstance(pivot_context.get("pivot_candidates"), list) else []
+    return snapshot_graph_case_state(
+        previous=previous_state,
+        question=question,
+        result_body=result_body,
+        case_id=case_id,
+        current_node_id=current_node_id,
+        parent_node_id=parent_node_id,
+        node_type=node_type,
+        evidence_entities=entities,
+        ranked_entities=ranked_entities,
+        pivot_candidates=pivot_candidates,
+    )
+
+
+def _write_pivot_artifact(*, result_body: dict[str, Any], session_id: str, question: str, pivot_candidate: dict[str, Any]) -> str:
+    ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    safe_session = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(session_id or "manual").strip() or "manual")
+    target_dir = ARTIFACTS_ROOT / "runs" / "pivots" / safe_session
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"pivot_investigation_{ts}.json"
+    payload = {
+        "meta": {
+            "artifact": str(target.relative_to(PROJECT_ROOT)),
+            "pipeline": "structured_pivot",
+            "session_id": safe_session,
+            "question": question,
+            "pivot_candidate": pivot_candidate,
+            "written_at_epoch": int(time.time()),
+        },
+        "result": result_body,
+    }
+    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return str(target.relative_to(PROJECT_ROOT))
+
+
+def _run_structured_pivot_investigation(
+    *,
+    question: str,
+    pivot_context: dict[str, Any],
+    pivot_candidate: dict[str, Any],
+    session_id: str,
+    write_artifact: bool,
+) -> dict[str, Any]:
+    query_args = pivot_candidate.get("query_args", {}) if isinstance(pivot_candidate.get("query_args"), dict) else {}
+    if not query_args or not str(query_args.get("query", "")).strip():
+        raise ValueError("structured pivot candidate is missing deterministic query_args")
+    intent = str(pivot_context.get("base_intent", "")).strip() or "agentic_pivot"
+    summary_hint = "Summarize the pivot findings, what changed from the prior search scope, and the best next investigative check."
+    splunk_data = run_splunk_query_args(query_args, intent=intent, summary_hint=summary_hint)
+    structured = splunk_data.get("structured", {}) if isinstance(splunk_data.get("structured"), dict) else {}
+    rows = structured.get("results", []) if isinstance(structured.get("results"), list) else []
+    total_rows = int(structured.get("total_rows", len(rows) if isinstance(rows, list) else 0) or 0)
+    try:
+        summary = summarize_with_ollama_model(question, splunk_data, model=DEFAULT_MODEL_FINAL_SUMMARY, think=False)
+    except Exception:
+        summary = "Structured pivot executed. Review the returned evidence rows and decide whether a narrower follow-up is warranted."
+    selected_values = ", ".join(pivot_candidate.get("target_values", [])[:3]) or "derived values"
+    if total_rows <= 0:
+        summary = (
+            f"The pivot executed successfully using preserved case context for {pivot_candidate.get('target_label', 'pivot target')} "
+            f"value(s): {selected_values}, but no matching rows were returned. Review the same evidence in Splunk, narrow to a single value, "
+            "or choose a different pivot."
+        )
+    result_body: dict[str, Any] = {
+        "question": question,
+        "root_question": str(pivot_context.get("root_question", question)).strip() or question,
+        "active_question": question,
+        "intent": intent,
+        "supported": True,
+        "selected_tool": "splunk_run_query",
+        "query_args": query_args,
+        "selected_spl_details": [
+            {
+                "tool": "splunk_run_query",
+                "query": str(query_args.get("query", "")).strip(),
+                "rows_returned": len(rows) if isinstance(rows, list) else 0,
+                "total_rows": total_rows,
+            }
+        ],
+        "rows_returned": len(rows) if isinstance(rows, list) else 0,
+        "total_rows": total_rows,
+        "summary": summary,
+        "evidence": {
+            "query_or_args": query_args,
+            "top_entities": rows[:25] if isinstance(rows, list) else [],
+        },
+        "search_strategy_summary": f"Structured pivot executed from preserved case context using {pivot_candidate.get('target_label', 'pivot target')} value(s): {selected_values}.",
+        "pivot_source": {
+            "kind": "structured_pivot",
+            "candidate": pivot_candidate,
+        },
+        "tdir_case": {
+            "question": question,
+            "selected_intent": intent,
+            "pipeline": "structured_pivot",
+            "rows_returned": len(rows) if isinstance(rows, list) else 0,
+            "recommended_next_pivots": [],
+        },
+        "phase_status": {
+            "detect": "complete",
+            "triage": "complete",
+            "investigate": "complete" if rows else "no_evidence",
+        },
+    }
+    meta: dict[str, Any] = {"pipeline": "structured_pivot"}
+    if write_artifact:
+        meta["artifact"] = _write_pivot_artifact(
+            result_body=result_body,
+            session_id=session_id,
+            question=question,
+            pivot_candidate=pivot_candidate,
+        )
+    return {"meta": meta, "result": result_body}
+
+
 def _default_expected_models() -> list[str]:
     ordered: list[str] = []
     for key in EXPECTED_MODEL_KEYS:
@@ -732,6 +1223,7 @@ def _global_nav(active: str) -> str:
                 ("/langgraph-graph", "LangGraph Graph", "Canonical workflow, active topology, and run path"),
                 ("/docs", "Docs", "Whitepapers, guides, and references"),
                 ("/configure", "Configuration", "Endpoints, models, validation"),
+                ("/cases", "Case Workspace", "Persistent cases, pivots, and branch history"),
                 ("/learning", "SPL Optimization", "AI-driven SPL improvement and review"),
                 ("/spl-assets", "SPL Asset Repository", "Approved reusable SPL assets"),
                 ("/users", "Users", "Local users and audit trail"),
@@ -770,6 +1262,7 @@ def _control_subnav(active: str) -> str:
         ("/langgraph-graph", "LangGraph Graph"),
         ("/docs", "Docs"),
         ("/configure", "Configuration"),
+        ("/cases", "Case Workspace"),
         ("/learning", "SPL Optimization"),
         ("/spl-assets", "SPL Asset Repository"),
         ("/users", "Users"),
@@ -1589,6 +2082,43 @@ def _run_environment_profile_refresh() -> None:
             ENV_PROFILE_REFRESH_LOCK.unlink()
         except Exception:
             pass
+
+
+def _wipe_environment_profile_artifacts() -> list[str]:
+    removed: list[str] = []
+    targets = [
+        ENV_PROFILE_PATH,
+        ENV_PROFILE_BOOTSTRAP_LOCK,
+        ENV_PROFILE_REFRESH_LOCK,
+        ENV_PROFILE_REFRESH_LOG,
+        ENV_PROFILE_REFRESH_STATE,
+        PERSONALIZATION_LOCK,
+        PERSONALIZATION_LOG,
+        PERSONALIZATION_STATE,
+        SPL_SKILLPACK_PATH,
+    ]
+    environment_dir = ENV_PROFILE_PATH.parent
+    if environment_dir.exists():
+        for candidate in sorted(environment_dir.glob("environment_profile_*.json")):
+            if candidate not in targets:
+                targets.append(candidate)
+    for target in targets:
+        try:
+            if target.exists():
+                target.unlink()
+                removed.append(display_path(target))
+        except Exception:
+            continue
+    return removed
+
+
+def _run_environment_profile_wipe_refresh() -> None:
+    removed = _wipe_environment_profile_artifacts()
+    detail = "Starting fresh Data Domains rebuild..."
+    if removed:
+        detail = f"Cleared {len(removed)} existing Data Domains artifact(s). Starting fresh rebuild..."
+    _set_env_refresh_state("in_progress", detail, 4, "wipe")
+    _run_environment_profile_refresh()
 
 
 def _maybe_trigger_environment_profile_bootstrap(validation: dict[str, Any]) -> str:
@@ -3024,18 +3554,24 @@ APP_HTML = """<!doctype html>
     }
     .advanced-drawer-head{
       display:flex;
-      flex-direction:row;
+      flex-direction:column;
+      align-items:flex-start;
+      gap:5px;
+      min-width:0;
+    }
+    .advanced-drawer-title-row{
+      display:flex;
       align-items:center;
       gap:8px;
       min-width:0;
-      white-space:nowrap;
+      flex-wrap:wrap;
     }
     .advanced-drawer-copy{
       color:#9fb4cc;
       font-size:11px;
       line-height:1.2;
       font-weight:400;
-      white-space:nowrap;
+      white-space:normal;
     }
     .advanced-summary-main{
       min-width:0;
@@ -3051,6 +3587,30 @@ APP_HTML = """<!doctype html>
       gap:8px;
       min-width:0;
       flex-wrap:nowrap;
+    }
+    .drawer-update-indicator{
+      display:none;
+      align-items:center;
+      gap:6px;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid rgba(52,211,153,.38);
+      background:rgba(6,78,59,.32);
+      color:#bbf7d0;
+      font-size:11px;
+      font-weight:700;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      white-space:nowrap;
+      box-shadow:0 0 0 1px rgba(16,185,129,.08), 0 0 22px rgba(16,185,129,.12);
+    }
+    .drawer-update-indicator.visible{display:inline-flex;}
+    .drawer-update-dot{
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      background:#34d399;
+      box-shadow:0 0 0 4px rgba(16,185,129,.12);
     }
     .drawer-jump-links{
       display:flex;
@@ -3072,6 +3632,11 @@ APP_HTML = """<!doctype html>
       background:linear-gradient(135deg,#0ea5e9,#1d4ed8);
       border-color:#60a5fa;
       color:#f8fafc;
+    }
+    .drawer-jump-links .jump-link.has-update{
+      border-color:rgba(52,211,153,.48);
+      color:#d1fae5;
+      box-shadow:0 0 0 1px rgba(16,185,129,.14);
     }
     .drawer-spl-toggle{
       margin-top:0;
@@ -3532,6 +4097,365 @@ APP_HTML = """<!doctype html>
       display:grid;
       grid-template-columns:repeat(3,minmax(0,1fr));
       gap:8px;
+    }
+    .case-rail{
+      margin-top:12px;
+      border:1px solid #294560;
+      border-radius:12px;
+      background:#091423;
+      padding:10px 12px;
+      display:grid;
+      gap:10px;
+    }
+    .drawer-narrative-shell{
+      display:grid;
+      gap:12px;
+      margin-bottom:12px;
+    }
+    .timeline-story-card{
+      border:1px solid #294560;
+      border-radius:14px;
+      background:linear-gradient(135deg,rgba(8,24,40,.98),rgba(9,32,24,.9));
+      padding:14px 16px;
+      box-shadow:0 10px 30px rgba(0,0,0,.16);
+      display:grid;
+      gap:12px;
+    }
+    .timeline-story-head{
+      display:flex;
+      flex-wrap:wrap;
+      justify-content:space-between;
+      gap:10px;
+      align-items:flex-start;
+    }
+    .timeline-story-title{
+      color:#f8fbff;
+      font-size:14px;
+      font-weight:900;
+      letter-spacing:.01em;
+    }
+    .timeline-story-copy{
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.6;
+      max-width:980px;
+    }
+    .timeline-pattern-strip,.timeline-entity-strip{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-top:10px;
+    }
+    .timeline-pattern-chip,.entity-pill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid #264760;
+      background:#081826;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:700;
+      line-height:1.2;
+    }
+    .timeline-pattern-chip strong,.entity-pill strong{
+      color:#7dd3fc;
+      font-size:10px;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .entity-pill{
+      cursor:pointer;
+      background:linear-gradient(180deg,#0a1a27,#091522);
+      transition:border-color .15s ease, transform .15s ease, opacity .15s ease;
+    }
+    .entity-pill:hover{border-color:#4f7aa1;transform:translateY(-1px);}
+    .entity-pill.active{border-color:#22c55e;background:linear-gradient(180deg,#0d2017,#0b1a14);}
+    .entity-pill .entity-count{color:#9fb4cc;font-size:10px;font-weight:800;}
+    .timeline-decision-block{
+      margin-top:10px;
+      border:1px solid #27415a;
+      border-radius:12px;
+      background:#071523;
+      padding:12px;
+      display:grid;
+      gap:8px;
+    }
+    .timeline-decision-title{
+      color:#f8fafc;
+      font-size:12px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .timeline-decision-copy{
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.55;
+    }
+    .timeline-decision-actions{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+    }
+    .timeline-filter-bar{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-top:10px;
+    }
+    .timeline-filter-chip{
+      border:1px solid #294560;
+      border-radius:999px;
+      background:#071523;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:800;
+      padding:6px 10px;
+      cursor:pointer;
+    }
+    .timeline-filter-chip.active{border-color:#22c55e;background:#0d2017;color:#effef5;}
+    .timeline-active-filter{
+      margin-top:10px;
+      border:1px solid #315a79;
+      border-radius:10px;
+      background:#08131f;
+      color:#dbeafe;
+      padding:8px 10px;
+      font-size:12px;
+      line-height:1.45;
+    }
+    .case-timeline-list{
+      display:grid;
+      gap:14px;
+      max-height:540px;
+      overflow-y:auto;
+      overflow-x:hidden;
+      padding-right:4px;
+      min-width:0;
+      position:relative;
+    }
+    .case-timeline-list::before{
+      content:'';
+      position:absolute;
+      left:20px;
+      top:8px;
+      bottom:8px;
+      width:2px;
+      background:linear-gradient(180deg,rgba(34,197,94,.2),rgba(56,189,248,.22),rgba(148,163,184,.14));
+      border-radius:999px;
+      pointer-events:none;
+    }
+    .timeline-step-card{
+      position:relative;
+      margin-left:22px;
+      border:1px solid #28415b;
+      border-radius:16px;
+      background:linear-gradient(180deg,#071523,#081727);
+      padding:14px 14px 12px;
+      display:grid;
+      gap:12px;
+      box-sizing:border-box;
+      min-width:0;
+      overflow:hidden;
+      transition:border-color .16s ease, transform .16s ease, opacity .16s ease, box-shadow .16s ease;
+      box-shadow:0 8px 24px rgba(0,0,0,.12);
+    }
+    .timeline-step-card::before{
+      content:'';
+      position:absolute;
+      left:-18px;
+      top:22px;
+      width:12px;
+      height:12px;
+      border-radius:999px;
+      border:2px solid #244762;
+      background:#061523;
+      box-shadow:0 0 0 3px rgba(6,21,35,.96);
+    }
+    .timeline-step-card[data-step-type=\"investigation\"]::before{border-color:#38bdf8;background:#0a2034;}
+    .timeline-step-card[data-step-type=\"pivot\"]::before{border-color:#22c55e;background:#0d2017;}
+    .timeline-step-card:hover{border-color:#4f7aa1;transform:translateY(-1px);}
+    .timeline-step-card.current{border-color:#22c55e;background:linear-gradient(180deg,#0d2017,#0a1724);}
+    .timeline-step-card.restored{border-color:#38bdf8;}
+    .timeline-step-card.no-results{border-color:#7c4a17;background:linear-gradient(180deg,#16100a,#0b1521);}
+    .timeline-step-card.dimmed{opacity:.36;}
+    .timeline-step-card.focused{box-shadow:0 0 0 1px rgba(34,197,94,.35), 0 12px 32px rgba(0,0,0,.18);}
+    .timeline-step-header{
+      display:flex;
+      justify-content:space-between;
+      gap:10px;
+      align-items:flex-start;
+      min-width:0;
+    }
+    .timeline-step-heading{
+      display:grid;
+      gap:8px;
+      min-width:0;
+    }
+    .timeline-step-labels{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      align-items:center;
+    }
+    .timeline-step-kicker{
+      color:#9fd3ff;
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.1em;
+      text-transform:uppercase;
+    }
+    .timeline-step-badge{
+      display:inline-flex;
+      align-items:center;
+      padding:5px 9px;
+      border-radius:999px;
+      border:1px solid #294560;
+      background:#081826;
+      color:#dbeafe;
+      font-size:10px;
+      font-weight:800;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+    }
+    .timeline-step-badge.status-current{border-color:#22c55e;background:#0d2017;color:#effef5;}
+    .timeline-step-badge.status-restored{border-color:#38bdf8;background:#0a2034;}
+    .timeline-step-badge.status-no-results{border-color:#d97706;background:#1b1408;color:#fde68a;}
+    .timeline-step-badge.status-superseded{border-color:#3c5267;background:#09131d;color:#b8c9db;}
+    .timeline-step-time{
+      color:#8fb6d9;
+      font-size:11px;
+      line-height:1.45;
+      text-align:right;
+      flex:0 0 auto;
+    }
+    .timeline-step-question{
+      color:#f8fbff;
+      font-size:15px;
+      font-weight:900;
+      line-height:1.4;
+      letter-spacing:.01em;
+      overflow-wrap:anywhere;
+      word-break:break-word;
+    }
+    .timeline-step-why{
+      border-left:3px solid rgba(125,211,252,.35);
+      padding-left:10px;
+      color:#dbeafe;
+      font-size:12px;
+      line-height:1.55;
+    }
+    .timeline-step-why strong{
+      color:#7dd3fc;
+      font-size:11px;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      display:block;
+      margin-bottom:4px;
+    }
+    .timeline-step-context{
+      color:#9fb4cc;
+      font-size:12px;
+      line-height:1.5;
+      overflow-wrap:anywhere;
+    }
+    .timeline-meta-row{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+    }
+    .timeline-meta-pill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      border-radius:999px;
+      border:1px solid #24445e;
+      background:#08131f;
+      color:#d9ebfc;
+      padding:6px 10px;
+      font-size:11px;
+      line-height:1.2;
+    }
+    .timeline-meta-pill strong{
+      color:#7dd3fc;
+      font-size:10px;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .timeline-confidence.up .timeline-meta-pill{border-color:#1f6f48;}
+    .timeline-confidence.down .timeline-meta-pill{border-color:#7c4a17;}
+    .timeline-step-summary{
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.6;
+    }
+    .timeline-step-grid{
+      display:grid;
+      grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
+      gap:10px;
+    }
+    .timeline-section-card{
+      border:1px solid #22384d;
+      border-radius:12px;
+      background:#08131f;
+      padding:10px;
+      display:grid;
+      gap:8px;
+      min-width:0;
+    }
+    .timeline-section-title{
+      color:#9fd3ff;
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.1em;
+      text-transform:uppercase;
+    }
+    .timeline-section-copy{
+      color:#dbeafe;
+      font-size:12px;
+      line-height:1.55;
+      overflow-wrap:anywhere;
+    }
+    .timeline-section-copy.muted{color:#9fb4cc;}
+    .timeline-step-actions{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+    }
+    .timeline-step-actions .btn-secondary,.timeline-step-actions .btn-primary,.timeline-step-actions .btn-splunk{
+      margin-top:0;
+      padding:6px 10px;
+      font-size:11px;
+    }
+    .timeline-inline-spl{
+      border:1px solid #22384d;
+      border-radius:12px;
+      background:#06111a;
+      overflow:hidden;
+    }
+    .timeline-inline-spl summary{
+      cursor:pointer;
+      padding:10px 12px;
+      color:#dbeafe;
+      font-size:12px;
+      font-weight:800;
+      list-style:none;
+    }
+    .timeline-inline-spl summary::-webkit-details-marker{display:none;}
+    .timeline-inline-spl pre{
+      margin:0;
+      padding:0 12px 12px;
+      color:#dbeafe;
+      font-size:11px;
+      line-height:1.55;
+      white-space:pre-wrap;
+      overflow-wrap:anywhere;
+      word-break:break-word;
+      max-height:220px;
+      overflow:auto;
+      font-family:"Consolas","SFMono-Regular",Menlo,monospace;
     }
     .phase-pill-mini{
       border:1px solid #294560;
@@ -4432,15 +5356,19 @@ APP_HTML = """<!doctype html>
             <summary>
               <div class=\"advanced-summary-main\">
                 <div class=\"advanced-drawer-head\">
-                  <span>Investigation Drawer</span>
-                  <span class=\"advanced-drawer-copy\">Pivot back into Splunk or inspect the review trace.</span>
+                  <div class=\"advanced-drawer-title-row\">
+                    <span>Investigation Drawer</span>
+                    <span id=\"drawer-update-indicator\" class=\"drawer-update-indicator\"><span class=\"drawer-update-dot\"></span><span id=\"drawer-update-text\">New drawer content</span></span>
+                  </div>
+                  <span class=\"advanced-drawer-copy\">Pivot back into Splunk, inspect supporting evidence, or reopen earlier steps in this investigation path.</span>
                 </div>
                 <div class=\"advanced-summary-controls\">
                   <div class=\"drawer-jump-links\">
+                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"case\">Investigation Timeline</button>
                     <button class=\"jump-link active\" type=\"button\" data-tray-tab=\"pivot\">Pivot</button>
                     <button class=\"jump-link\" type=\"button\" data-tray-tab=\"evidence\">Evidence</button>
                     <button class=\"jump-link\" type=\"button\" data-tray-tab=\"spl\">SPL</button>
-                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"timeline\">Case Flow</button>
+                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"timeline\">Process</button>
                     <button class=\"jump-link\" type=\"button\" data-tray-tab=\"attack\">ATT&amp;CK</button>
                     <button class=\"jump-link\" type=\"button\" data-tray-tab=\"review\">Decision Trace</button>
                     <button class=\"jump-link\" type=\"button\" data-tray-tab=\"json\">JSON</button>
@@ -4454,6 +5382,36 @@ APP_HTML = """<!doctype html>
               </div>
             </summary>
             <div class=\"advanced-body\">
+              <div id=\"drawer-investigation-narrative\" class=\"drawer-narrative-shell\"></div>
+              <div class=\"advanced-panel\" data-tray-panel=\"case\">
+                <div class=\"advanced-subhead\">Investigation Timeline</div>
+                <div class=\"drawer-clone-grid\">
+                  <div class=\"drawer-clone-card\">
+                    <div style=\"display:flex;align-items:center;justify-content:space-between;gap:10px;\">
+                      <div class=\"drawer-clone-title\">Current Investigation Timeline</div>
+                      <div style=\"display:flex;align-items:center;gap:8px;\">
+                        <a id=\"case-workspace-link\" class=\"btn-secondary\" href=\"/cases\" style=\"margin-top:0;padding:6px 10px;\">Open Cases</a>
+                        <button id=\"case-latest-btn\" class=\"btn-secondary\" type=\"button\" style=\"display:none;margin-top:0;padding:6px 10px;\">Return To Latest</button>
+                        <span id=\"case-badge\" class=\"badge\">New</span>
+                      </div>
+                    </div>
+                    <div id=\"case-summary\" class=\"drawer-clone-copy\" style=\"margin-top:8px;\">Start an investigation to create a saved investigation timeline. The original finding and each deeper pivot will be tracked here so you can reopen earlier steps without rerunning them.</div>
+                    <div id=\"case-pattern-strip\" class=\"timeline-pattern-strip\"></div>
+                    <div id=\"case-entity-strip\" class=\"timeline-entity-strip\"></div>
+                    <div id=\"case-decision-block\" class=\"timeline-decision-block\"></div>
+                    <div id=\"case-filter-bar\" class=\"timeline-filter-bar\">
+                      <button type=\"button\" class=\"timeline-filter-chip active\" data-case-filter=\"all\">All Steps</button>
+                      <button type=\"button\" class=\"timeline-filter-chip\" data-case-filter=\"pivots\">Pivots</button>
+                      <button type=\"button\" class=\"timeline-filter-chip\" data-case-filter=\"no_results\">No Results</button>
+                    </div>
+                    <div id=\"case-active-filter\" class=\"timeline-active-filter\" style=\"display:none;\"></div>
+                  </div>
+                  <div class=\"drawer-clone-card\">
+                    <div class=\"drawer-clone-title\">Timeline Steps</div>
+                    <div id=\"case-timeline-list\" class=\"case-timeline-list\"></div>
+                  </div>
+                </div>
+              </div>
               <div class=\"advanced-panel active\" data-tray-panel=\"pivot\">
                 <div class=\"advanced-subhead\">Pivot | Recommended Next Steps</div>
                 <div id=\"drawer-pivot-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">Recommended next steps will appear here after Splunk evidence is returned and reviewed.</div></div></div>
@@ -4474,7 +5432,7 @@ APP_HTML = """<!doctype html>
                 </div>
               </div>
               <div class=\"advanced-panel\" data-tray-panel=\"timeline\">
-                <div class=\"advanced-subhead\">Case Flow</div>
+                <div class=\"advanced-subhead\">Investigation Process Flow</div>
                 <div id=\"drawer-timeline-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">Timeline detail will appear here after the investigation progresses.</div></div></div>
                 <div id=\"tdir-card\" class=\"tdir-card\" style=\"display:none;\">
                   <div id=\"tdir-head\" class=\"tdir-head\"></div>
@@ -4591,7 +5549,13 @@ APP_HTML = """<!doctype html>
     let lastAskResult = null;
     let pendingContinuationState = null;
     let selectedFollowup = null;
+    let latestCaseRef = null;
+    let inspectingSavedNode = false;
     let activeTrayTab = 'pivot';
+    let activeTimelineEntityFilter = '';
+    let activeTimelineStepFilter = 'all';
+    let drawerHasUnread = false;
+    let drawerUnreadTab = '';
     const trayModeStorageKey = 'agtsmith_investigation_tray_mode';
     const trayTabStorageKey = 'agtsmith_investigation_tray_tab';
 
@@ -4670,13 +5634,648 @@ APP_HTML = """<!doctype html>
         return;
       }
       panel.classList.remove('empty');
+      const metaView = pivotPresentation(selectedFollowup.candidate || selectedFollowup);
       badge.textContent = `Pivot ${selectedFollowup.index + 1}`;
       text.className = 'followup-body';
       text.textContent = selectedFollowup.text;
       meta.style.display = 'block';
-      meta.textContent = selectedFollowup.origin ? `From ATT&CK: ${selectedFollowup.origin}` : 'Recommended follow-up question';
+      meta.innerHTML = `${selectedFollowup.origin ? `From ATT&CK: ${esc(selectedFollowup.origin)}` : 'Structured follow-up from the previous investigation'}<br><strong>Target:</strong> <code>${esc(metaView.targetDisplay)}</code>${metaView.provenanceText ? `<br><strong>Why this value:</strong> ${esc(metaView.provenanceText)}` : ''}`;
       runBtn.style.display = 'inline-flex';
       clearBtn.style.display = 'inline-flex';
+    }
+
+    async function loadCaseNode(caseId, nodeId) {
+      const cid = String(caseId || '').trim();
+      const nid = String(nodeId || '').trim();
+      if (!cid || !nid) return;
+      $('status').textContent = 'Loading saved case node...';
+      try {
+        const resp = await fetch(`/api/case-node?case_id=${encodeURIComponent(cid)}&node_id=${encodeURIComponent(nid)}`);
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(String(data?.error || 'Unable to load case node'));
+        const result = data?.result && typeof data.result === 'object' ? data.result : {};
+        try {
+          const caseResp = await fetch(`/api/case?case_id=${encodeURIComponent(cid)}`);
+          const caseData = await caseResp.json();
+          const caseRecord = caseData?.case && typeof caseData.case === 'object' ? caseData.case : null;
+          if (caseResp.ok && caseRecord) {
+            result.case_context = Object.assign({}, result.case_context || {}, {
+              case_id: caseRecord.case_id || cid,
+              root_question: caseRecord.root_question || result.case_context?.root_question || '',
+              timeline: Array.isArray(caseRecord.timeline) ? caseRecord.timeline : [],
+              node_id: nid,
+            });
+          }
+        } catch (_caseErr) {}
+        if (result?.pivot_context && typeof result.pivot_context === 'object') {
+          result.pivot_context.case_id = String(result?.case_context?.case_id || cid || result.pivot_context.case_id || '').trim();
+          result.pivot_context.current_node_id = String(result?.case_context?.node_id || nid || result.pivot_context.current_node_id || '').trim();
+          if (result?.graph_case_state && typeof result.graph_case_state === 'object') {
+            result.pivot_context.graph_case_state = result.graph_case_state;
+          }
+        }
+        inspectingSavedNode = true;
+        lastAskResult = result;
+        if (Array.isArray(result?.sample_rows)) result.__ui_sample_rows = result.sample_rows;
+        $('question').value = String(result?.active_question || result?.question || $('question').value || '');
+        if (hasEvidenceRows(result)) {
+          $('summary').innerHTML = renderSummaryText(result?.summary || '');
+          renderModelDecisions(result);
+          renderTDIRCase(result);
+          renderInvestigationJourney(result);
+          renderWorkflowTimeline(result);
+          renderContinuationControls(result);
+        } else {
+          renderNoEvidenceOutcome(result);
+          clearContinuationControls();
+        }
+        $('status').textContent = 'Loaded saved case node without rerunning the search.';
+      } catch (err) {
+        $('status').textContent = `Unable to load saved case node: ${String(err?.message || err)}`;
+      }
+    }
+
+    function timelineOrdinalLabel(index) {
+      const n = Number(index || 0);
+      if (n <= 0) return 'Original';
+      const labels = ['First Pivot', 'Second Pivot', 'Third Pivot', 'Fourth Pivot', 'Fifth Pivot'];
+      return labels[n - 1] || `Pivot ${n}`;
+    }
+
+    function timelineCleanSummary(text) {
+      const raw = String(text || '')
+        .replaceAll('**', '')
+        .replace(/^\\s*-\\s*/gm, '')
+        .replace(/\\s+/g, ' ')
+        .trim();
+      if (!raw) return '';
+      const firstSentence = raw.split(/(?<=[.!?])\\s+/)[0] || raw;
+      return firstSentence.length > 220 ? `${firstSentence.slice(0, 217).trim()}...` : firstSentence;
+    }
+
+    function timelineFmtStamp(ts) {
+      const raw = Number(ts || 0);
+      if (!raw) return '';
+      return new Date(raw * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+
+    function timelineElapsedText(node, previousNode) {
+      const now = Number(node?.created_at || 0);
+      const before = Number(previousNode?.created_at || 0);
+      if (!now || !before || now <= before) return '';
+      const delta = now - before;
+      const mins = Math.floor(delta / 60);
+      const secs = delta % 60;
+      if (mins <= 0) return `+${secs}s after the previous step`;
+      return `+${mins}m ${secs}s after the previous step`;
+    }
+
+    function timelineHumanIntent(intent) {
+      const raw = String(intent || '').trim();
+      if (!raw) return 'General Investigation';
+      const known = {
+        failed_login_activity: 'Credential Access Validation',
+        linux_auth_failures: 'Linux Authentication Follow-up',
+        apache_access_top_ips: 'Web Access Triage',
+        aws_cloudtrail_activity: 'Cloud API Activity Review',
+      };
+      if (known[raw]) return known[raw];
+      return raw.split('_').map((part) => part ? `${part.charAt(0).toUpperCase()}${part.slice(1)}` : '').join(' ');
+    }
+
+    function timelinePatternLabel(timeline) {
+      const root = timeline[0] || {};
+      const latest = timeline[timeline.length - 1] || root;
+      const pivotKind = String((latest?.pivot_source || {}).target_type || '');
+      if (String(root?.intent || '') === 'failed_login_activity' && pivotKind === 'source_ip') {
+        return 'Failed Authentication → Success Check';
+      }
+      if (String(root?.intent || '') === 'apache_access_top_ips') {
+        return 'Top Client IPs → URI / User-Agent Drilldown';
+      }
+      return latest?.depth > 0 ? 'Root Finding → Follow-up Pivot' : 'Single-Step Investigation';
+    }
+
+    function timelineStatusMeta(node, currentNodeId, latestNodeId) {
+      const isCurrent = String(node?.node_id || '') === String(currentNodeId || '');
+      const isLatest = String(node?.node_id || '') === String(latestNodeId || '');
+      if (isCurrent && !isLatest) return { label: 'Restored', className: 'status-restored' };
+      if (isCurrent) return { label: 'Current', className: 'status-current' };
+      if (node?.supported === false) return { label: 'Blocked', className: 'status-no-results' };
+      if (Number(node?.row_count || 0) <= 0) return { label: 'No Results', className: 'status-no-results' };
+      if (!isLatest) return { label: 'Superseded', className: 'status-superseded' };
+      return { label: 'Complete', className: '' };
+    }
+
+    function timelineStepType(node) {
+      const depth = Number(node?.depth || 0);
+      const pivotKind = String((node?.pivot_source || {}).kind || '');
+      const title = String(node?.title || node?.question || '').toLowerCase();
+      if (depth <= 0) return 'Initial Query';
+      if (pivotKind === 'structured_pivot') return 'Pivot';
+      if (title.includes('validate') || title.includes('check for successful')) return 'Validation';
+      if (title.includes('narrow') || title.includes('focus')) return 'Scope Narrowing';
+      return 'Follow Up';
+    }
+
+    function timelineWhyThisStep(node, previousNode) {
+      if (!previousNode) return 'Establish the original evidence set for the analyst question.';
+      const pivot = node?.pivot_source || {};
+      const pivotKind = String(pivot?.title || '').toLowerCase();
+      if (pivotKind.includes('successful logons')) return 'Validate whether the failed authentication activity led to successful compromise.';
+      if (pivotKind.includes('username')) return 'Carry forward the most important usernames to test for broader credential guessing or reuse.';
+      if (pivotKind.includes('privilege')) return 'Test whether the activity escalated beyond failed logons into higher-risk privileged behavior.';
+      const provenance = String((pivot?.provenance || {}).explanation || '').trim();
+      return provenance || 'Narrow the scope using entities discovered in the prior step.';
+    }
+
+    function timelineTimeRangeLabel(node) {
+      const range = node?.time_range && typeof node.time_range === 'object' ? node.time_range : {};
+      const earliest = String(range.earliest || '').trim();
+      const latest = String(range.latest || '').trim();
+      if (!earliest && !latest) return 'Not saved';
+      return `${earliest || 'default'} → ${latest || 'now'}`;
+    }
+
+    function timelineConfidenceDelta(node, previousNode) {
+      const current = Number(node?.confidence);
+      const previous = previousNode?.confidence;
+      if (!Number.isFinite(current)) return { text: 'Not scored', className: '' };
+      if (!Number.isFinite(previous)) return { text: `${current.toFixed(2)}`, className: '' };
+      const delta = current - Number(previous);
+      if (Math.abs(delta) < 0.005) return { text: `${Number(previous).toFixed(2)} → ${current.toFixed(2)}`, className: '' };
+      return {
+        text: `${Number(previous).toFixed(2)} → ${current.toFixed(2)}`,
+        className: delta > 0 ? 'up' : 'down',
+      };
+    }
+
+    function timelineCollectEntityRefs(node) {
+      const entities = node?.evidence_entities && typeof node.evidence_entities === 'object' ? node.evidence_entities : {};
+      const refs = [];
+      Object.values(entities).forEach((arr) => {
+        if (Array.isArray(arr)) arr.forEach((value) => refs.push(String(value || '').trim().toLowerCase()));
+      });
+      const pivotVals = Array.isArray(node?.pivot_source?.target_values) ? node.pivot_source.target_values : [];
+      pivotVals.forEach((value) => refs.push(String(value || '').trim().toLowerCase()));
+      return Array.from(new Set(refs.filter(Boolean)));
+    }
+
+    function timelineEntityStepCounts(timeline) {
+      const counts = new Map();
+      (Array.isArray(timeline) ? timeline : []).forEach((node) => {
+        timelineCollectEntityRefs(node).forEach((value) => counts.set(value, (counts.get(value) || 0) + 1));
+      });
+      return counts;
+    }
+
+    function renderEntityPills(values, counts, opts = {}) {
+      const items = Array.isArray(values) ? values.filter(Boolean) : [];
+      if (!items.length) return '<div class="timeline-section-copy muted">None carried forward.</div>';
+      return items.map((value) => {
+        const raw = String(value || '').trim();
+        const key = raw.toLowerCase();
+        const isActive = activeTimelineEntityFilter && key === activeTimelineEntityFilter;
+        const count = counts instanceof Map ? Number(counts.get(key) || 0) : 0;
+        return `<button type="button" class="entity-pill ${isActive ? 'active' : ''}" data-entity-value="${esc(key)}" data-entity-label="${esc(raw)}"><strong>${esc(opts.label || 'Entity')}</strong><span>${esc(raw)}</span>${count > 0 ? `<span class="entity-count">${esc(String(count))} step${count === 1 ? '' : 's'}</span>` : ''}</button>`;
+      }).join('');
+    }
+
+    function timelineDifference(currentValues, previousValues) {
+      const prev = new Set((Array.isArray(previousValues) ? previousValues : []).map((value) => String(value || '').trim().toLowerCase()));
+      return (Array.isArray(currentValues) ? currentValues : []).filter((value) => !prev.has(String(value || '').trim().toLowerCase()));
+    }
+
+    function timelineSharedStatePreview(node) {
+      const preview = node?.state_preview && typeof node.state_preview === 'object' ? node.state_preview : {};
+      const chips = [];
+      chips.push(`<span class="timeline-meta-pill"><strong>Intent</strong><span>${esc(timelineHumanIntent(node?.intent || ''))}</span></span>`);
+      chips.push(`<span class="timeline-meta-pill"><strong>Rows</strong><span>${esc(String(Number(node?.row_count || 0)))}</span></span>`);
+      chips.push(`<span class="timeline-meta-pill"><strong>Tool</strong><span>${esc(String(node?.selected_tool || 'not saved'))}</span></span>`);
+      if (Number(preview.pivot_candidate_count || 0) > 0) chips.push(`<span class="timeline-meta-pill"><strong>Pivots</strong><span>${esc(String(preview.pivot_candidate_count))}</span></span>`);
+      if (Number(preview.matching_active_spl_assets || 0) > 0) chips.push(`<span class="timeline-meta-pill"><strong>Assets</strong><span>${esc(String(preview.matching_active_spl_assets))}</span></span>`);
+      return chips.join('');
+    }
+
+    function timelineSectionCard(title, body) {
+      return `<div class="timeline-section-card"><div class="timeline-section-title">${esc(title)}</div>${body}</div>`;
+    }
+
+    function timelinePrimaryEntityValues(node, previousNode) {
+      const pivotSourceValues = Array.isArray(node?.pivot_source?.target_values) ? node.pivot_source.target_values : [];
+      if (pivotSourceValues.length) return pivotSourceValues.slice(0, 4);
+      const ranked = node?.ranked_entities && typeof node.ranked_entities === 'object' ? node.ranked_entities : {};
+      const fromRanked = ['source_ips', 'users', 'hosts', 'client_ips'].map((key) => Array.isArray(ranked[key]) ? ranked[key].map((item) => item.value) : []).find((arr) => arr && arr.length);
+      if (fromRanked && fromRanked.length) return fromRanked.slice(0, 4);
+      if (previousNode && Array.isArray(previousNode?.pivot_source?.target_values) && previousNode.pivot_source.target_values.length) return previousNode.pivot_source.target_values.slice(0, 4);
+      return [];
+    }
+
+    function timelineMissingSummary(node) {
+      if (node?.supported === false) return 'guarded execution approval';
+      if (Number(node?.row_count || 0) > 0) return '';
+      const pivotLabel = String(node?.pivot_source?.target_label || '').trim();
+      if (pivotLabel) return `matching evidence for ${pivotLabel.toLowerCase()} values`;
+      return 'matching evidence';
+    }
+
+    function timelineInterpretation(node) {
+      if (node?.supported === false) return 'The hypothesis could not be tested because the guarded path did not pass validation.';
+      if (Number(node?.row_count || 0) <= 0 && Number(node?.depth || 0) > 0) return 'The child pivot executed correctly, but the hypothesis was not supported by returned evidence.';
+      if (Number(node?.row_count || 0) <= 0) return 'No evidence matched the initial search scope in this time range.';
+      return timelineCleanSummary(node?.saved_summary || node?.summary || 'Evidence was returned for this step.');
+    }
+
+    function timelineNarrativeModel(timeline) {
+      const root = Array.isArray(timeline) && timeline.length ? timeline[0] : null;
+      const latest = Array.isArray(timeline) && timeline.length ? timeline[timeline.length - 1] : null;
+      if (!root || !latest) {
+        return {
+          lines: ['Run an investigation to create a saved reasoning path.', 'Each original finding and pivot will be preserved here.', 'Use the drawer to reopen prior evidence without rerunning Splunk.'],
+          investigationType: 'Investigation Memory',
+          pattern: 'Awaiting first case',
+          recommendations: [],
+          disposition: 'Not started',
+        };
+      }
+      const rootIps = timelinePrimaryEntityValues(root).slice(0, 3);
+      const lines = [];
+      if (String(root.intent || '') === 'failed_login_activity' && rootIps.length) {
+        lines.push(`Failed login activity returned ${Number(root.row_count || 0)} row(s) and surfaced ${rootIps.length} high-priority source IP${rootIps.length === 1 ? '' : 's'}.`);
+      } else {
+        lines.push(`${timelineHumanIntent(root.intent)} returned ${Number(root.row_count || 0)} row(s) in the original step.`);
+      }
+      if (Number(latest.depth || 0) > 0 && Array.isArray(latest?.pivot_source?.target_values) && latest.pivot_source.target_values.length) {
+        lines.push(`A child pivot checked ${latest.pivot_source.target_values.length} carried-forward ${String(latest.pivot_source.target_label || 'entity').toLowerCase()} value(s) discovered earlier.`);
+      } else if (Number(latest.depth || 0) > 0) {
+        lines.push('A child pivot narrowed the scope using evidence discovered in the previous step.');
+      }
+      if (Number(latest.row_count || 0) <= 0 && Number(latest.depth || 0) > 0) {
+        lines.push('No matching evidence was found in the pivot step, which weakens the compromise hypothesis so far.');
+      } else if (Number(latest.row_count || 0) > 0 && Number(latest.depth || 0) > 0) {
+        lines.push(`The pivot added ${Number(latest.row_count || 0)} matching row(s), extending the evidence set beyond the original finding.`);
+      } else if (Number(root.row_count || 0) > 0) {
+        lines.push('The original finding is ready for a targeted follow-up pivot or scope change.');
+      }
+      const recommendations = [];
+      if (String(root.intent || '') === 'failed_login_activity' && Number(latest.row_count || 0) <= 0 && Number(latest.depth || 0) > 0) {
+        recommendations.push('Consider checking usernames discovered earlier.');
+        recommendations.push('Consider expanding the time range.');
+        recommendations.push('Consider additional authentication sources.');
+      } else if (Number(latest.row_count || 0) > 0) {
+        recommendations.push('Pivot on the strongest returned entity.');
+        recommendations.push('Validate the finding in Splunk.');
+      } else {
+        recommendations.push('Review source coverage before pivoting further.');
+      }
+      return {
+        lines: lines.slice(0, 3),
+        investigationType: timelineHumanIntent(root.intent),
+        pattern: timelinePatternLabel(timeline),
+        recommendations,
+        disposition: Number(latest.row_count || 0) <= 0 && Number(latest.depth || 0) > 0 ? 'Suspicious but unconfirmed' : (Number(latest.row_count || 0) > 0 ? 'Evidence present' : 'Awaiting evidence'),
+      };
+    }
+
+    function timelineCardHtml(node, opts) {
+      const currentNodeId = String(opts.currentNodeId || '');
+      const latestNodeId = String(opts.latestNodeId || '');
+      const caseId = String(opts.caseId || '');
+      const counts = opts.entityCounts instanceof Map ? opts.entityCounts : new Map();
+      const stepIndex = Number(opts.stepIndex || 0);
+      const previousNode = opts.previousNode || null;
+      const parentNode = opts.parentNode || null;
+      const kind = timelineOrdinalLabel(stepIndex);
+      const stepType = timelineStepType(node);
+      const status = timelineStatusMeta(node, currentNodeId, latestNodeId);
+      const confidence = timelineConfidenceDelta(node, parentNode || previousNode);
+      const carriedForward = timelinePrimaryEntityValues(parentNode || previousNode || node, parentNode || previousNode).slice(0, 4);
+      const currentPrimary = timelinePrimaryEntityValues(node, parentNode || previousNode).slice(0, 4);
+      const newEntities = timelineDifference(currentPrimary, carriedForward).slice(0, 4);
+      const missingSummary = timelineMissingSummary(node);
+      const previewTitle = String(node?.active_question || node?.title || node?.question || kind);
+      const parentLabel = parentNode ? timelineOrdinalLabel(Number(opts.parentIndex || 0)) : '';
+      const relationship = parentNode
+        ? `Built from ${parentLabel}${timelineElapsedText(node, previousNode) ? ` · ${timelineElapsedText(node, previousNode)}` : ''}`
+        : 'Starting point for this investigation';
+      const refs = timelineCollectEntityRefs(node).join('|');
+      const quickPivotTypes = Array.isArray(node?.pivot_candidates) ? node.pivot_candidates.map((item) => String(item?.target_type || '')) : [];
+      const query = String(node?.query || '').trim();
+      const noResults = Number(node?.row_count || 0) <= 0;
+      const classes = ['timeline-step-card', String(node?.node_id || '') === currentNodeId ? 'current' : '', status.label === 'Restored' ? 'restored' : '', noResults ? 'no-results' : ''].filter(Boolean).join(' ');
+      return `
+        <article class="${classes}" data-node-id="${esc(String(node?.node_id || ''))}" data-case-id="${esc(caseId)}" data-step-kind="${esc(stepType.toLowerCase().replace(/\\s+/g, '_'))}" data-entity-refs="${esc(refs)}" data-depth="${esc(String(Number(node?.depth || 0)))}">
+          <div class="timeline-step-header">
+            <div class="timeline-step-heading">
+              <div class="timeline-step-labels">
+                <span class="timeline-step-kicker">${esc(kind)}</span>
+                <span class="timeline-step-badge">${esc(stepType)}</span>
+                <span class="timeline-step-badge ${esc(status.className)}">${esc(status.label)}</span>
+              </div>
+              <div class="timeline-step-question">${esc(previewTitle)}</div>
+            </div>
+            <div class="timeline-step-time">${esc(timelineFmtStamp(node?.created_at))}${timelineElapsedText(node, previousNode) ? `<br>${esc(timelineElapsedText(node, previousNode))}` : ''}</div>
+          </div>
+          <div class="timeline-step-why"><strong>Why This Step</strong>${esc(timelineWhyThisStep(node, previousNode))}</div>
+          <div class="timeline-step-context">${esc(relationship)}</div>
+          <div class="timeline-meta-row ${esc(confidence.className ? `timeline-confidence ${confidence.className}` : '')}">
+            ${timelineSharedStatePreview(node)}
+            <span class="timeline-meta-pill"><strong>Time Range</strong><span>${esc(timelineTimeRangeLabel(node))}</span></span>
+            <span class="timeline-meta-pill"><strong>Confidence</strong><span>${esc(confidence.text)}</span></span>
+          </div>
+          <div class="timeline-step-summary">${esc(timelineCleanSummary(node?.saved_summary || node?.summary || previewTitle))}</div>
+          <div class="timeline-step-grid">
+            ${timelineSectionCard('Carried Forward Evidence', renderEntityPills((Array.isArray(node?.pivot_source?.target_values) && node.pivot_source.target_values.length ? node.pivot_source.target_values : carriedForward), counts, { label: String(node?.pivot_source?.target_label || 'Entity') }))}
+            ${timelineSectionCard('New In This Step', newEntities.length ? renderEntityPills(newEntities, counts, { label: 'New' }) : '<div class="timeline-section-copy muted">No new high-priority entities were added in this step.</div>')}
+            ${timelineSectionCard('Missing Or Not Found', missingSummary ? `<div class="timeline-section-copy">No matching evidence found for <code>${esc(missingSummary)}</code>.</div>` : '<div class="timeline-section-copy muted">No major evidence gaps were called out for this step.</div>')}
+            ${timelineSectionCard('Evidence Interpretation', `<div class="timeline-section-copy">${esc(timelineInterpretation(node))}</div>`)}
+            ${timelineSectionCard('Pivot Options', Array.isArray(node?.pivot_candidates) && node.pivot_candidates.length ? `<div class="timeline-section-copy">${esc(String(node.pivot_candidates.length))} saved pivot option(s) are available from this step.</div><div class="timeline-pattern-strip">${node.pivot_candidates.slice(0, 2).map((item) => `<span class="timeline-pattern-chip"><strong>Pivot</strong><span>${esc(String(item?.target_label || item?.title || 'Next Step'))}</span></span>`).join('')}</div>` : '<div class="timeline-section-copy muted">No saved pivot candidates were captured on this step.</div>')}
+            ${timelineSectionCard('Shared Investigation State', `<div class="timeline-section-copy">${esc(String(node?.search_strategy_summary || 'Saved state includes the executed query, entity extraction, pivot candidates, and result summary.'))}</div>${Array.isArray(node?.mitre_preview) && node.mitre_preview.length ? `<div class="timeline-pattern-strip">${node.mitre_preview.slice(0, 2).map((item) => `<span class="timeline-pattern-chip"><strong>ATT&CK</strong><span>${esc(item)}</span></span>`).join('')}</div>` : ''}`)}
+          </div>
+          ${query ? `<details class="timeline-inline-spl"><summary>Executed SPL</summary><pre>${esc(query)}</pre></details>` : ''}
+          <div class="timeline-step-actions">
+            <button type="button" class="btn-secondary" data-timeline-action="restore" data-case-id="${esc(caseId)}" data-node-id="${esc(String(node?.node_id || ''))}">Restore Step</button>
+            <button type="button" class="btn-secondary" data-timeline-action="open" data-case-id="${esc(caseId)}" data-node-id="${esc(String(node?.node_id || ''))}">Open In Investigation</button>
+            ${quickPivotTypes.includes('source_ip') ? `<button type="button" class="btn-primary" data-timeline-action="pivot-ip" data-node-id="${esc(String(node?.node_id || ''))}">Pivot on IP</button>` : ''}
+            ${quickPivotTypes.includes('username') ? `<button type="button" class="btn-secondary" data-timeline-action="pivot-username" data-node-id="${esc(String(node?.node_id || ''))}">Pivot on Username</button>` : ''}
+            <button type="button" class="btn-secondary" data-timeline-action="expand-time" data-node-id="${esc(String(node?.node_id || ''))}">Expand Time Range</button>
+          </div>
+        </article>
+      `;
+    }
+
+    async function runTimelineAction(action, nodeId, caseId) {
+      const timeline = Array.isArray(window.__agtsmithTimelineNodes) ? window.__agtsmithTimelineNodes : [];
+      const node = timeline.find((item) => String(item?.node_id || '') === String(nodeId || ''));
+      if (!node) return;
+      if (action === 'restore') {
+        await loadCaseNode(caseId, nodeId);
+        return;
+      }
+      if (action === 'open') {
+        await loadCaseNode(caseId, nodeId);
+        const drawer = $('advanced-section');
+        if (drawer) drawer.open = false;
+        clearDrawerUpdate();
+        return;
+      }
+      if (action === 'pivot-ip' || action === 'pivot-username') {
+        const targetType = action === 'pivot-ip' ? 'source_ip' : 'username';
+        const candidate = Array.isArray(node?.pivot_candidates) ? node.pivot_candidates.find((item) => String(item?.target_type || '') === targetType) : null;
+        if (!candidate) return;
+        selectFollowup(candidate, Number(candidate?.index || 0), 'Investigation Timeline');
+        if (selectedFollowup) {
+          const baseQuery = String(node?.query || '').trim();
+          const timeRange = node?.time_range && typeof node.time_range === 'object' ? node.time_range : {};
+          selectedFollowup.contextOverride = {
+            case_id: String(caseId || '').trim(),
+            current_node_id: String(node?.node_id || '').trim(),
+            parent_node_id: String(node?.parent_node_id || '').trim(),
+            root_question: String((timeline[0] && (timeline[0].question || timeline[0].title)) || node?.question || '').trim(),
+            base_intent: String(node?.intent || '').trim(),
+            base_query_args: {
+              query: baseQuery,
+              earliest_time: String(timeRange.earliest || '').trim(),
+              latest_time: String(timeRange.latest || '').trim(),
+              row_limit: 50,
+            },
+            base_query: baseQuery,
+            time_range: {
+              earliest: String(timeRange.earliest || '').trim(),
+              latest: String(timeRange.latest || '').trim(),
+            },
+            entities: node?.evidence_entities && typeof node.evidence_entities === 'object' ? node.evidence_entities : {},
+            ranked_entities: node?.ranked_entities && typeof node.ranked_entities === 'object' ? node.ranked_entities : {},
+            pivot_candidates: Array.isArray(node?.pivot_candidates) ? node.pivot_candidates : [],
+            graph_case_state: {
+              case_id: String(caseId || '').trim(),
+              current_node_id: String(node?.node_id || '').trim(),
+              parent_node_id: String(node?.parent_node_id || '').trim(),
+              root_question: String((timeline[0] && (timeline[0].question || timeline[0].title)) || node?.question || '').trim(),
+              current_question: String(node?.question || node?.title || '').trim(),
+              intent: String(node?.intent || '').trim(),
+              node_type: String(node?.node_type || '').trim(),
+              selected_tool: String(node?.selected_tool || '').trim(),
+              time_range: {
+                earliest: String(timeRange.earliest || '').trim(),
+                latest: String(timeRange.latest || '').trim(),
+              },
+              query_args: {
+                query: baseQuery,
+                earliest_time: String(timeRange.earliest || '').trim(),
+                latest_time: String(timeRange.latest || '').trim(),
+                row_limit: 50,
+              },
+              rows_returned: Number(node?.row_count || 0),
+              evidence_entities: node?.evidence_entities && typeof node.evidence_entities === 'object' ? node.evidence_entities : {},
+              ranked_entities: node?.ranked_entities && typeof node.ranked_entities === 'object' ? node.ranked_entities : {},
+              pivot_candidates: Array.isArray(node?.pivot_candidates) ? node.pivot_candidates : [],
+              summary: String(node?.saved_summary || node?.summary || '').trim(),
+            },
+          };
+        }
+        setActiveTrayTab('pivot', { openDrawer: true });
+        return;
+      }
+      if (action === 'expand-time') {
+        const baseQuestion = String(node?.active_question || node?.question || '').trim();
+        $('question').value = `Expand the time range to the last 72 hours and continue this investigation from: ${baseQuestion}`;
+        $('question').focus();
+      }
+    }
+
+    function applyTimelineVisualFilters() {
+      document.querySelectorAll('.timeline-step-card').forEach((card) => {
+        const stepKind = String(card.getAttribute('data-step-kind') || '');
+        const refs = String(card.getAttribute('data-entity-refs') || '');
+        const noResults = card.classList.contains('no-results');
+        let matchesMode = true;
+        if (activeTimelineStepFilter === 'pivots') matchesMode = stepKind !== 'initial_query';
+        if (activeTimelineStepFilter === 'no_results') matchesMode = noResults;
+        const matchesEntity = !activeTimelineEntityFilter || refs.split('|').includes(activeTimelineEntityFilter);
+        card.classList.toggle('dimmed', !(matchesMode && matchesEntity));
+        card.classList.toggle('focused', !!activeTimelineEntityFilter && matchesEntity);
+      });
+      const filterShell = $('case-active-filter');
+      if (filterShell) {
+        if (activeTimelineEntityFilter) {
+          filterShell.style.display = '';
+          filterShell.innerHTML = `Highlighting steps that reference <code>${esc(activeTimelineEntityFilter)}</code>. <button type="button" class="btn-secondary" id="timeline-clear-filter" style="margin-top:0;padding:4px 8px;">Clear Filter</button>`;
+          const clearBtn = $('timeline-clear-filter');
+          if (clearBtn) clearBtn.onclick = () => {
+            activeTimelineEntityFilter = '';
+            document.querySelectorAll('.entity-pill').forEach((pill) => pill.classList.remove('active'));
+            applyTimelineVisualFilters();
+          };
+        } else {
+          filterShell.style.display = 'none';
+          filterShell.innerHTML = '';
+        }
+      }
+    }
+
+    function renderCaseTimeline(result) {
+      const badge = $('case-badge');
+      const latestBtn = $('case-latest-btn');
+      const workspaceLink = $('case-workspace-link');
+      const summary = $('case-summary');
+      const shell = $('case-timeline-list');
+      const narrativeShell = $('drawer-investigation-narrative');
+      const patternStrip = $('case-pattern-strip');
+      const entityStrip = $('case-entity-strip');
+      const decisionBlock = $('case-decision-block');
+      const caseContext = result?.case_context && typeof result.case_context === 'object' ? result.case_context : null;
+      const timeline = Array.isArray(caseContext?.timeline) ? caseContext.timeline : [];
+      const currentNodeId = String(caseContext?.node_id || '').trim();
+      const caseId = String(caseContext?.case_id || '').trim();
+      window.__agtsmithTimelineNodes = timeline;
+      if (!caseId || !timeline.length) {
+        badge.textContent = 'New';
+        summary.textContent = 'Run an investigation to create a durable analyst timeline. Original findings, deeper pivots, and restored steps will appear here without forcing you to rerun Splunk.';
+        shell.innerHTML = '';
+        if (narrativeShell) narrativeShell.innerHTML = '';
+        if (patternStrip) patternStrip.innerHTML = '';
+        if (entityStrip) entityStrip.innerHTML = '';
+        if (decisionBlock) decisionBlock.innerHTML = '';
+        if (workspaceLink) workspaceLink.href = '/cases';
+        if (latestBtn) latestBtn.style.display = 'none';
+        return;
+      }
+      const latestNode = timeline[timeline.length - 1] || null;
+      const currentNode = timeline.find((node) => String(node?.node_id || '') === currentNodeId) || latestNode || null;
+      const entityCounts = timelineEntityStepCounts(timeline);
+      const pivotCount = timeline.filter((node) => Number(node?.depth || 0) > 0).length;
+      const nodeIndexMap = new Map(timeline.map((node, index) => [String(node?.node_id || ''), index]));
+      const rootCount = timeline.length ? 1 : 0;
+      const story = timelineNarrativeModel(timeline);
+      badge.textContent = caseId;
+      if (workspaceLink) workspaceLink.href = `/cases?case_id=${encodeURIComponent(caseId)}`;
+      summary.innerHTML = `This investigation timeline preserves <strong>${timeline.length}</strong> saved step(s): <strong>${rootCount}</strong> original finding and <strong>${pivotCount}</strong> deeper pivot step(s). Click any card to restore that exact state, inspect its evidence, and continue the investigation from there.`;
+      if (latestBtn && latestCaseRef && latestCaseRef.case_id === caseId && latestCaseRef.node_id && latestCaseRef.node_id !== currentNodeId) {
+        latestBtn.style.display = 'inline-flex';
+      } else if (latestBtn) {
+        latestBtn.style.display = 'none';
+      }
+      if (narrativeShell) {
+        narrativeShell.innerHTML = `
+          <div class="timeline-story-card">
+            <div class="timeline-story-head">
+              <div>
+                <div class="drawer-clone-title" style="margin-bottom:4px;">Investigation Narrative</div>
+                <div class="timeline-story-title">${esc(story.investigationType)}</div>
+              </div>
+              <div class="timeline-pattern-strip">
+                <span class="timeline-pattern-chip"><strong>Pattern</strong><span>${esc(story.pattern)}</span></span>
+                <span class="timeline-pattern-chip"><strong>Disposition</strong><span>${esc(story.disposition)}</span></span>
+              </div>
+            </div>
+            <div class="timeline-story-copy">${story.lines.map((line) => esc(line)).join('<br>')}</div>
+          </div>
+        `;
+      }
+      if (patternStrip) {
+        patternStrip.innerHTML = `
+          <span class="timeline-pattern-chip"><strong>Investigation Type</strong><span>${esc(story.investigationType)}</span></span>
+          <span class="timeline-pattern-chip"><strong>Pattern</strong><span>${esc(story.pattern)}</span></span>
+          <span class="timeline-pattern-chip"><strong>Current Focus</strong><span>${esc(timelineOrdinalLabel(Number(nodeIndexMap.get(String(currentNode?.node_id || '')) || 0)))}</span></span>
+        `;
+      }
+      if (entityStrip) {
+        const featured = [];
+        timeline.forEach((node) => timelinePrimaryEntityValues(node).forEach((value) => { if (value && !featured.includes(value)) featured.push(value); }));
+        entityStrip.innerHTML = featured.length
+          ? renderEntityPills(featured.slice(0, 8), entityCounts, { label: 'Tracked' })
+          : '<div class="timeline-section-copy muted">Tracked entities will appear here once evidence is returned.</div>';
+      }
+      if (decisionBlock) {
+        decisionBlock.innerHTML = `
+          <div class="timeline-decision-title">Decision Moment</div>
+          <div class="timeline-decision-copy">${Number(latestNode?.row_count || 0) <= 0 && Number(latestNode?.depth || 0) > 0 ? 'No evidence of successful compromise has been observed in the latest pivot. The current chain still supports suspicion, but not confirmation.' : 'The latest step is ready for analyst follow-up, validation in Splunk, or a narrower continuation.'}</div>
+          <div class="timeline-decision-actions">
+            ${story.recommendations.map((item) => `<span class="timeline-pattern-chip"><strong>Next</strong><span>${esc(item)}</span></span>`).join('')}
+          </div>
+        `;
+      }
+      shell.innerHTML = timeline.map((node, index) => {
+        const previousNode = index > 0 ? timeline[index - 1] : null;
+        const parentIndex = nodeIndexMap.get(String(node?.parent_node_id || ''));
+        const parentNode = Number.isInteger(parentIndex) ? timeline[parentIndex] : null;
+        return timelineCardHtml(node, {
+          currentNodeId,
+          latestNodeId: latestNode?.node_id || '',
+          caseId,
+          entityCounts,
+          stepIndex: index,
+          previousNode,
+          parentNode,
+          parentIndex: Number.isInteger(parentIndex) ? parentIndex : 0,
+        });
+      }).join('');
+      document.querySelectorAll('.timeline-filter-chip').forEach((btn) => {
+        btn.onclick = () => {
+          activeTimelineStepFilter = String(btn.getAttribute('data-case-filter') || 'all');
+          document.querySelectorAll('.timeline-filter-chip').forEach((node) => node.classList.toggle('active', node === btn));
+          applyTimelineVisualFilters();
+        };
+      });
+      document.querySelectorAll('.timeline-step-card').forEach((card) => {
+        card.onclick = async (event) => {
+          if (event.target && event.target.closest('[data-timeline-action], .entity-pill, details, summary')) return;
+          await loadCaseNode(card.getAttribute('data-case-id') || '', card.getAttribute('data-node-id') || '');
+        };
+      });
+      document.querySelectorAll('[data-timeline-action]').forEach((btn) => {
+        btn.onclick = async (event) => {
+          event.stopPropagation();
+          await runTimelineAction(
+            btn.getAttribute('data-timeline-action') || '',
+            btn.getAttribute('data-node-id') || '',
+            btn.getAttribute('data-case-id') || caseId,
+          );
+        };
+      });
+      document.querySelectorAll('.entity-pill[data-entity-value]').forEach((pill) => {
+        pill.onclick = (event) => {
+          event.stopPropagation();
+          const value = String(pill.getAttribute('data-entity-value') || '');
+          activeTimelineEntityFilter = activeTimelineEntityFilter === value ? '' : value;
+          document.querySelectorAll('.entity-pill').forEach((node) => node.classList.toggle('active', activeTimelineEntityFilter && String(node.getAttribute('data-entity-value') || '') === activeTimelineEntityFilter));
+          applyTimelineVisualFilters();
+        };
+      });
+      if (latestBtn) {
+        latestBtn.onclick = async () => {
+          if (!latestCaseRef?.case_id || !latestCaseRef?.node_id) return;
+          await loadCaseNode(latestCaseRef.case_id, latestCaseRef.node_id);
+        };
+      }
+      applyTimelineVisualFilters();
+    }
+
+    function markDrawerUpdate(tab, message) {
+      const drawer = $('advanced-section');
+      if (drawer && drawer.open) {
+        clearDrawerUpdate();
+        return;
+      }
+      drawerHasUnread = true;
+      drawerUnreadTab = String(tab || activeTrayTab || 'pivot');
+      const indicator = $('drawer-update-indicator');
+      const text = $('drawer-update-text');
+      if (indicator) indicator.classList.add('visible');
+      if (text) text.textContent = String(message || 'New drawer content');
+      document.querySelectorAll('[data-tray-tab]').forEach((node) => {
+        const isTarget = String(node.getAttribute('data-tray-tab') || '') === drawerUnreadTab;
+        node.classList.toggle('has-update', isTarget);
+      });
+    }
+
+    function clearDrawerUpdate() {
+      drawerHasUnread = false;
+      drawerUnreadTab = '';
+      const indicator = $('drawer-update-indicator');
+      if (indicator) indicator.classList.remove('visible');
+      document.querySelectorAll('[data-tray-tab]').forEach((node) => node.classList.remove('has-update'));
     }
 
     function drawerPreferredTab(result) {
@@ -4691,11 +6290,13 @@ APP_HTML = """<!doctype html>
       return 'pivot';
     }
 
-    function selectFollowup(text, index, origin) {
+    function selectFollowup(candidate, index, origin) {
+      const nextQuestion = String(candidate?.next_question || candidate?.title || candidate?.text || '').trim();
       selectedFollowup = {
-        text: String(text || '').trim(),
+        text: nextQuestion,
         index: Number(index || 0),
         origin: String(origin || '').trim(),
+        candidate: candidate && typeof candidate === 'object' ? candidate : null,
       };
       if (!selectedFollowup.text) {
         selectedFollowup = null;
@@ -4830,6 +6431,22 @@ APP_HTML = """<!doctype html>
       return (mitrePivots.length ? mitrePivots : tdirPivots).map((item) => String(item || '').trim()).filter(Boolean);
     }
 
+    function collectPivotCandidates(result) {
+      const structured = Array.isArray(result?.pivot_context?.pivot_candidates)
+        ? result.pivot_context.pivot_candidates.filter((item) => item && typeof item === 'object')
+        : [];
+      if (structured.length) return structured;
+      return collectPivotItems(result).map((text, index) => ({
+        id: `legacy_pivot_${index + 1}`,
+        index,
+        title: text,
+        target_label: classifyPivot(text).entity,
+        target_values: [],
+        execution_mode: 'stateful_followup_question',
+        next_question: text,
+      }));
+    }
+
     function collectEvidenceRows(result) {
       const raw =
         (Array.isArray(result?.__ui_sample_rows) && result.__ui_sample_rows.length
@@ -4924,23 +6541,24 @@ APP_HTML = """<!doctype html>
       if (result?.supported === false) {
         return '<div class="drawer-inline-note">This request was blocked before a valid pivot path could be approved. Refine the question first, then return here for Splunk follow-up actions.</div>';
       }
-      const pivots = collectPivotItems(result);
-      if (!pivots.length) {
+      const pivotCandidates = collectPivotCandidates(result);
+      if (!pivotCandidates.length) {
         return '<div class="drawer-inline-note">No next-step pivots are available yet. When evidence review completes, this tab will highlight the best follow-up move back into Splunk.</div>';
       }
-      return `<div class="drawer-action-list">${pivots.slice(0, 3).map((item, index) => {
-        const meta = classifyPivot(item);
+      return `<div class="drawer-action-list">${pivotCandidates.slice(0, 3).map((candidate, index) => {
+        const meta = pivotPresentation(candidate);
         return `
           <div class="drawer-action-card">
             <div class="drawer-action-head">
               <div>
                 <div class="drawer-action-kicker">Best next move ${index + 1}</div>
-                <div class="drawer-action-title">${esc(meta.title)}</div>
+                <div class="drawer-action-title">${esc(meta.title || String(candidate?.title || ''))}</div>
               </div>
               <span class="drawer-chip">${esc(meta.scope)}</span>
             </div>
             <div class="drawer-action-meta-item"><strong>Why</strong>${esc(meta.why)}</div>
-            <div class="drawer-action-meta-item"><strong>Pivot target</strong><code>${esc(meta.entity)}</code></div>
+            <div class="drawer-action-meta-item"><strong>Pivot target</strong><code>${esc(meta.targetDisplay)}</code></div>
+            ${meta.provenanceText ? `<div class="drawer-action-meta-item"><strong>Why this value</strong>${esc(meta.provenanceText)}</div>` : ''}
             <div class="drawer-action-meta-item"><strong>Expected value</strong>${esc(meta.expected)}</div>
             <div class="drawer-action-buttons">
               <button type="button" class="btn-secondary drawer-pivot-open" data-drawer-pivot-index="${index}">Load Into Follow-Up Drawer</button>
@@ -5140,7 +6758,9 @@ APP_HTML = """<!doctype html>
       $('journey').textContent = 'This request did not become an investigation because policy blocked the final execution path.';
       setSplVisibility(false);
       syncDrawerMirrors();
-      setActiveTrayTab(drawerPreferredTab(result));
+      const preferredTab = drawerPreferredTab(result);
+      setActiveTrayTab(preferredTab, { openDrawer: false });
+      markDrawerUpdate(preferredTab, preferredTab === 'review' ? 'New blocked-case trace is ready' : 'New drawer details are ready');
     }
 
     function mitreTone(tactic){
@@ -5399,20 +7019,45 @@ APP_HTML = """<!doctype html>
       return { why, entity, expected, scope, title: text.length > 72 ? `${text.slice(0, 72).trim()}...` : text };
     }
 
+    function pivotPresentation(candidate) {
+      const meta = classifyPivot(candidate?.title || candidate?.text || '');
+      const targetValues = Array.isArray(candidate?.target_values)
+        ? candidate.target_values.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+      const targetRankings = Array.isArray(candidate?.target_rankings)
+        ? candidate.target_rankings.filter((item) => item && typeof item === 'object')
+        : [];
+      const targetLabel = String(candidate?.target_label || meta.entity || 'Derived field');
+      const targetDisplay = targetValues.length
+        ? `${targetLabel}: ${targetValues.slice(0, 3).join(', ')}`
+        : targetLabel;
+      const provenanceText = String(candidate?.provenance?.explanation || '').trim();
+      const rankingText = targetRankings.length
+        ? targetRankings.map((item) => `${String(item.value || '').trim()} (${Number(item.count || 0)})`).filter(Boolean).join(', ')
+        : '';
+      return {
+        ...meta,
+        title: String(candidate?.title || meta.title || '').trim() || meta.title,
+        targetLabel,
+        targetValues,
+        targetDisplay,
+        provenanceText,
+        rankingText,
+      };
+    }
+
     function renderPivotCards(result) {
       if (result?.supported === false) {
         $('pivot-cards').innerHTML = '<div class="brief-body muted">Follow-up pivots are hidden because the request did not pass the guarded execution checks.</div>';
         return [];
       }
-      const mitrePivots = Array.isArray(result?.mitre_attack?.next_pivots) ? result.mitre_attack.next_pivots : [];
-      const tdirPivots = Array.isArray(result?.tdir_case?.recommended_next_pivots) ? result.tdir_case.recommended_next_pivots : [];
-      const pivots = (mitrePivots.length ? mitrePivots : tdirPivots).map((item) => String(item || '').trim()).filter(Boolean);
+      const pivotCandidates = collectPivotCandidates(result);
       const primaryTechnique = Array.isArray(result?.mitre_attack?.techniques) && result.mitre_attack.techniques.length
         ? `${result.mitre_attack.techniques[0].technique || 'Technique'} (${result.mitre_attack.techniques[0].technique_id || ''})`.trim()
         : 'Splunk investigation follow-up';
-      $('pivot-cards').innerHTML = pivots.length
-        ? pivots.map((item, index) => {
-            const meta = classifyPivot(item);
+      $('pivot-cards').innerHTML = pivotCandidates.length
+        ? pivotCandidates.map((candidate, index) => {
+            const meta = pivotPresentation(candidate);
             return `
               <div class="pivot-card">
                 <div class="pivot-card-head">
@@ -5421,10 +7066,11 @@ APP_HTML = """<!doctype html>
                     <div class="pivot-card-title">${esc(meta.title)}</div>
                   </div>
                 </div>
-                <div class="pivot-card-copy">${esc(item)}</div>
+                <div class="pivot-card-copy">${esc(String(candidate?.title || ''))}</div>
                 <div class="pivot-meta-grid">
                   <div class="pivot-meta"><strong>Why this step matters</strong><span>${esc(meta.why)}</span></div>
-                  <div class="pivot-meta"><strong>Follow-up target</strong><span><code>${esc(meta.entity)}</code></span></div>
+                  <div class="pivot-meta"><strong>Follow-up target</strong><span><code>${esc(meta.targetDisplay)}</code></span></div>
+                  ${meta.provenanceText ? `<div class="pivot-meta"><strong>Why this value</strong><span>${esc(meta.provenanceText)}</span></div>` : ''}
                   <div class="pivot-meta"><strong>Expected value</strong><span>${esc(meta.expected)}</span></div>
                   <div class="pivot-meta"><strong>Estimated scope</strong><span>${esc(meta.scope)}</span></div>
                 </div>
@@ -5439,9 +7085,9 @@ APP_HTML = """<!doctype html>
       document.querySelectorAll('.pivot-open-btn').forEach((btn) => {
         btn.onclick = () => {
           const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
-          const text = pivots[idx] || '';
-          if (!text) return;
-          selectFollowup(text, idx, primaryTechnique);
+          const candidate = pivotCandidates[idx] || null;
+          if (!candidate) return;
+          selectFollowup(candidate, idx, primaryTechnique);
           $('status').textContent = 'Follow-up step opened in the left drawer. Review it there, then run when ready.';
           window.scrollTo({ top: 0, behavior: 'smooth' });
         };
@@ -5449,16 +7095,20 @@ APP_HTML = """<!doctype html>
       document.querySelectorAll('.pivot-run-btn').forEach((btn) => {
         btn.onclick = async () => {
           const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
-          const text = pivots[idx] || '';
-          if (!text) return;
-          selectFollowup(text, idx, primaryTechnique);
-          $('question').value = text;
+          const candidate = pivotCandidates[idx] || null;
+          if (!candidate) return;
+          selectFollowup(candidate, idx, primaryTechnique);
+          $('question').value = String(candidate?.next_question || candidate?.title || '');
           $('status').textContent = 'Running selected follow-up investigation...';
           window.scrollTo({ top: 0, behavior: 'smooth' });
-          await executeInvestigation({ question: text });
+          await executeInvestigation({
+            question: String(candidate?.next_question || candidate?.title || ''),
+            pivot_context: result?.pivot_context || null,
+            pivot_candidate: candidate,
+          });
         };
       });
-      return pivots;
+      return pivotCandidates;
     }
 
     function hasEvidenceRows(result) {
@@ -5501,8 +7151,13 @@ APP_HTML = """<!doctype html>
         triage: 'complete',
         investigate: 'no_evidence',
       });
+      renderCaseTimeline(result || {});
       syncDrawerMirrors();
-      setActiveTrayTab(drawerPreferredTab(result));
+      {
+        const preferredTab = drawerPreferredTab(result);
+        setActiveTrayTab(preferredTab, { openDrawer: false });
+        markDrawerUpdate(preferredTab, preferredTab === 'evidence' ? 'No-evidence outcome details are ready' : 'New drawer details are ready');
+      }
     }
 
     function syncUtilityBarVisibility() {
@@ -5526,6 +7181,7 @@ APP_HTML = """<!doctype html>
         $('pivot-cards').innerHTML = '';
         $('decision-support-summary').innerHTML = '';
         $('investigation-timeline').innerHTML = '';
+        renderCaseTimeline(null);
         syncUtilityBarVisibility();
         return;
       }
@@ -5535,6 +7191,7 @@ APP_HTML = """<!doctype html>
       const coverage = extractCoverage(result, spl);
       if (result?.supported === false) {
         renderBlockedOutcome(result || {});
+        renderCaseTimeline(result || {});
         $('model-personas').innerHTML = '';
         $('model-decisions').innerHTML = '';
         $('workflow-track').innerHTML = '';
@@ -5549,6 +7206,7 @@ APP_HTML = """<!doctype html>
       renderCoverageVisibility(result, coverage);
       renderPivotCards(result);
       renderSplunkTimeline(result, coverage, String(result?.summary || '').trim());
+      renderCaseTimeline(result);
       renderPhaseStrip({
         detect: 'complete',
         triage: String(result?.tdir_case?.phase_status?.triage || 'complete'),
@@ -5858,7 +7516,11 @@ APP_HTML = """<!doctype html>
         `${workflowHtml.length ? `<div class="decision-subhead">Pipeline Roles</div>${workflowHtml.join('')}` : ''}` +
         `${detailHtml ? `<div class="decision-subhead">Key Outputs</div>${detailHtml}` : ''}`;
       syncDrawerMirrors();
-      setActiveTrayTab(drawerPreferredTab(result));
+      {
+        const preferredTab = drawerPreferredTab(result);
+        setActiveTrayTab(preferredTab, { openDrawer: false });
+        markDrawerUpdate(preferredTab, preferredTab === 'pivot' ? 'New pivots and evidence are ready' : 'New drawer details are ready');
+      }
     }
 
     function renderInvestigationJourney(result) {
@@ -6023,7 +7685,7 @@ APP_HTML = """<!doctype html>
         node.addEventListener('click', (event) => {
           event.preventDefault();
           event.stopPropagation();
-          setActiveTrayTab(String(node.getAttribute('data-tray-tab') || 'pivot'));
+          setActiveTrayTab(String(node.getAttribute('data-tray-tab') || 'pivot'), { openDrawer: true, clearUnread: true });
         });
       });
       summary.querySelectorAll('button').forEach((node) => {
@@ -6048,6 +7710,7 @@ APP_HTML = """<!doctype html>
       };
       drawer.addEventListener('toggle', () => {
         if (!drawer.open) drawer.dataset.mode = 'medium';
+        if (drawer.open) clearDrawerUpdate();
         sync();
       });
       fullToggle.onclick = () => {
@@ -6069,10 +7732,11 @@ APP_HTML = """<!doctype html>
       sync();
     }
 
-    function setActiveTrayTab(tab) {
+    function setActiveTrayTab(tab, options) {
       const drawer = $('advanced-section');
       const body = drawer ? drawer.querySelector('.advanced-body') : null;
-      if (drawer && !drawer.open) {
+      const opts = (options && typeof options === 'object') ? options : {};
+      if (drawer && !drawer.open && opts.openDrawer) {
         drawer.open = true;
         drawer.dataset.mode = 'medium';
       }
@@ -6084,6 +7748,7 @@ APP_HTML = """<!doctype html>
         node.classList.toggle('active', String(node.getAttribute('data-tray-panel') || '') === activeTrayTab);
       });
       if (body) body.scrollTop = 0;
+      if (opts.clearUnread) clearDrawerUpdate();
       try {
         sessionStorage.setItem(trayTabStorageKey, activeTrayTab);
       } catch (_err) {}
@@ -6108,6 +7773,7 @@ APP_HTML = """<!doctype html>
       const drawerSplLink = $('drawer-spl-link');
       const drawerSplInlineLink = $('drawer-spl-inline-link');
       const splModel = buildDrawerSplMarkup(result, coverage, spl, latestRun);
+      renderCaseTimeline(result || {});
       if (pivotContent) {
         pivotContent.innerHTML = buildDrawerPivotMarkup(result);
       }
@@ -6152,24 +7818,29 @@ APP_HTML = """<!doctype html>
       document.querySelectorAll('.drawer-pivot-open').forEach((btn) => {
         btn.onclick = () => {
           const idx = Number(btn.getAttribute('data-drawer-pivot-index') || '-1');
-          const pivots = collectPivotItems(result || {});
-          const text = pivots[idx] || '';
-          if (!text) return;
-          selectFollowup(text, idx, 'Pivot');
+          const pivotCandidates = collectPivotCandidates(result || {});
+          const candidate = pivotCandidates[idx] || null;
+          if (!candidate) return;
+          selectFollowup(candidate, idx, 'Pivot');
           $('status').textContent = 'Follow-up step loaded into the left drawer for review.';
         };
       });
       document.querySelectorAll('.drawer-pivot-run').forEach((btn) => {
         btn.onclick = async () => {
           const idx = Number(btn.getAttribute('data-drawer-pivot-index') || '-1');
-          const pivots = collectPivotItems(result || {});
-          const text = pivots[idx] || '';
-          if (!text) return;
-          selectFollowup(text, idx, 'Pivot');
-          $('question').value = text;
+          const pivotCandidates = collectPivotCandidates(result || {});
+          const candidate = pivotCandidates[idx] || null;
+          if (!candidate) return;
+          selectFollowup(candidate, idx, 'Pivot');
+          const nextQuestion = String(candidate?.next_question || candidate?.title || '');
+          $('question').value = nextQuestion;
           $('status').textContent = 'Running selected pivot from the investigation drawer...';
           window.scrollTo({ top: 0, behavior: 'smooth' });
-          await executeInvestigation({ question: text });
+          await executeInvestigation({
+            question: nextQuestion,
+            pivot_context: result?.pivot_context || null,
+            pivot_candidate: candidate,
+          });
         };
       });
       document.querySelectorAll('.drawer-row-link').forEach((row) => {
@@ -6460,7 +8131,7 @@ APP_HTML = """<!doctype html>
       $('brief-supported').textContent = 'Running';
       setSplVisibility(false);
       syncDrawerMirrors();
-      setActiveTrayTab('pivot');
+      setActiveTrayTab('pivot', { openDrawer: false });
       clearContinuationControls();
       try {
         const payload = {
@@ -6471,6 +8142,8 @@ APP_HTML = """<!doctype html>
           pipeline: $('pipeline').value,
           approved_deeper_investigation: Boolean(options.approved_deeper_investigation),
           continuation_state: options.continuation_state || null,
+          pivot_context: options.pivot_context || null,
+          pivot_candidate: options.pivot_candidate || null,
         };
         runAbortController = new AbortController();
         const resp = await fetch('/api/ask', {
@@ -6497,6 +8170,13 @@ APP_HTML = """<!doctype html>
               splunk_search_url_base: data.splunk_search_url_base || lastAskResult.splunk_search_url_base || '',
             };
           }
+          if (lastAskResult?.case_context?.case_id && lastAskResult?.case_context?.node_id) {
+            latestCaseRef = {
+              case_id: String(lastAskResult.case_context.case_id),
+              node_id: String(lastAskResult.case_context.node_id),
+            };
+          }
+          inspectingSavedNode = false;
           if (Array.isArray(data.sample_rows)) {
             lastAskResult.__ui_sample_rows = data.sample_rows;
           }
@@ -6558,7 +8238,11 @@ APP_HTML = """<!doctype html>
       $('question').value = selectedFollowup.text;
       $('status').textContent = 'Running selected follow-up investigation...';
       window.scrollTo({top: 0, behavior: 'smooth'});
-      await executeInvestigation({ question: selectedFollowup.text });
+      await executeInvestigation({
+        question: selectedFollowup.text,
+        pivot_context: selectedFollowup.contextOverride || lastAskResult?.pivot_context || null,
+        pivot_candidate: selectedFollowup.candidate || null,
+      });
     };
     $('selected-followup-clear').onclick = () => {
       selectedFollowup = null;
@@ -6591,9 +8275,9 @@ APP_HTML = """<!doctype html>
     syncDrawerMirrors();
     try {
       const rememberedTab = sessionStorage.getItem(trayTabStorageKey) || 'pivot';
-      setActiveTrayTab(rememberedTab);
+      setActiveTrayTab(rememberedTab, { openDrawer: false });
     } catch (_err) {
-      setActiveTrayTab('pivot');
+      setActiveTrayTab('pivot', { openDrawer: false });
     }
     let hintTimer = null;
     $('question').addEventListener('input', () => {
@@ -6615,6 +8299,15 @@ APP_HTML = """<!doctype html>
         drawerJsonToggleBtn.textContent = showing ? 'Show JSON' : 'Hide JSON';
       };
     }
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const initialCaseId = String(params.get('case_id') || '').trim();
+      const initialNodeId = String(params.get('node_id') || '').trim();
+      if (initialCaseId && initialNodeId) {
+        latestCaseRef = { case_id: initialCaseId, node_id: initialNodeId };
+        loadCaseNode(initialCaseId, initialNodeId);
+      }
+    } catch (_err) {}
   </script>
 </body>
 </html>
@@ -9042,13 +10735,58 @@ def _active_spl_asset_matches_for_intent(intent: str) -> list[dict[str, Any]]:
 def _environment_page_body() -> str:
     profile = _load_environment_profile_payload()
     if not profile:
+        refresh_meta = _environment_profile_refresh_status()
         if _running_in_container():
             return f"""
 <div class=\"card\">
+  <style>
+    .env-work-panel{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px;margin:12px 0;}}
+    .env-actions{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px;}}
+    .env-action-btn{{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 16px;border-radius:14px;border:1px solid #33506a;background:linear-gradient(180deg,#16324a,#102435);color:#e0f2fe;font-size:13px;font-weight:800;cursor:pointer;box-shadow:0 12px 24px rgba(8,23,37,.22), inset 0 1px 0 rgba(255,255,255,.05);transition:transform .16s ease, filter .16s ease, border-color .16s ease;}}
+    .env-action-btn:hover{{transform:translateY(-1px);filter:brightness(1.04);border-color:#60a5fa;}}
+    .env-action-btn:disabled{{cursor:not-allowed;opacity:.6;transform:none;filter:none;}}
+    .env-action-btn.green{{border-color:#1f7a44;background:linear-gradient(180deg,#22c55e,#15803d);color:#04140c;box-shadow:0 12px 24px rgba(21,128,61,.22), inset 0 1px 0 rgba(255,255,255,.16);}}
+    .env-action-btn.green:hover{{border-color:#4ade80;filter:brightness(1.03);}}
+    .env-refresh-status{{margin-top:10px;color:#9fb4cc;font-size:13px;line-height:1.55;}}
+  </style>
   <h1>Data Domains</h1>
   <p class=\"muted\">Container deployments do not expose Data Domains until Splunk MCP has been validated and the initial environment profile has finished building.</p>
   <p>Current profile path: <code>{html.escape(str(ENV_PROFILE_PATH.relative_to(PROJECT_ROOT)))}</code></p>
   <p>Next step: open <a href=\"/configure\">Configuration</a>, validate the Splunk MCP connection, then wait for the first environment profile build to complete.</p>
+  <div class=\"env-work-panel\">
+    <strong>Fresh Start Controls</strong>
+    <div class=\"env-summary-copy\" style=\"margin-top:6px;\">Need to rebuild Data Domains from scratch for this new system? Use the green button below after validating the runtime.</div>
+    <div class=\"env-actions\">
+      <button id=\"env-wipe-refresh-btn\" class=\"env-action-btn green\" type=\"button\">Wipe And Refresh</button>
+      <span id=\"env-refresh-inline-status\" class=\"badge\">state={html.escape(str(refresh_meta.get('state', 'pending')))}</span>
+    </div>
+    <div id=\"env-refresh-inline-detail\" class=\"env-refresh-status\"><strong>Status:</strong> {html.escape(str(refresh_meta.get('detail', 'Ready to refresh Data Domains.')))}</div>
+  </div>
+  <script>
+    (() => {{
+      const statusBadge = document.getElementById('env-refresh-inline-status');
+      const statusDetail = document.getElementById('env-refresh-inline-detail');
+      const wipeBtn = document.getElementById('env-wipe-refresh-btn');
+      const setStatus = (meta, fallback) => {{
+        const state = String(meta?.state || 'pending');
+        statusBadge.textContent = `state=${{state}}`;
+        statusDetail.innerHTML = `<strong>Status:</strong> ${{String(meta?.detail || fallback || 'Ready to refresh Data Domains.')}}`;
+        wipeBtn.disabled = state === 'in_progress';
+      }};
+      wipeBtn?.addEventListener('click', async () => {{
+        const confirmed = window.confirm('Wipe the current Data Domains profile and rebuild it from scratch for this system? This clears the existing profile artifacts before refreshing.');
+        if(!confirmed) return;
+        setStatus({{ state:'in_progress', detail:'Wiping current Data Domains artifacts and starting a fresh rebuild...' }}, 'Wiping current Data Domains artifacts and starting a fresh rebuild...');
+        try {{
+          const resp = await fetch('/api/environment/wipe-refresh', {{ method:'POST', credentials:'same-origin' }});
+          const data = await resp.json();
+          setStatus(data.refresh || {{ state:'pending', detail:data.detail || data.error || 'Wipe and refresh request submitted.' }}, data.detail || data.error || 'Wipe and refresh request submitted.');
+        }} catch (_err) {{
+          setStatus({{ state:'error', detail:'Could not start wipe and refresh.' }}, 'Could not start wipe and refresh.');
+        }}
+      }});
+    }})();
+  </script>
 </div>
 """
         return f"""
@@ -9062,6 +10800,7 @@ def _environment_page_body() -> str:
 """
 
     timestamp = str(profile.get("timestamp_utc", "unknown"))
+    refresh_meta = _environment_profile_refresh_status()
     counts = profile.get("counts", {}) if isinstance(profile.get("counts"), dict) else {}
     index_count = counts.get("index_count", 0)
     sourcetype_count = counts.get("sourcetype_count", 0)
@@ -9221,6 +10960,14 @@ def _environment_page_body() -> str:
     .env-summary-value{{font-size:18px;font-weight:900;color:#f8fafc;}}
     .env-summary-copy{{margin-top:4px;color:#9fb4cc;font-size:12px;line-height:1.45;}}
     .env-work-panel{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px;margin:12px 0;}}
+    .env-actions{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px;}}
+    .env-action-btn{{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 16px;border-radius:14px;border:1px solid #33506a;background:linear-gradient(180deg,#16324a,#102435);color:#e0f2fe;font-size:13px;font-weight:800;cursor:pointer;box-shadow:0 12px 24px rgba(8,23,37,.22), inset 0 1px 0 rgba(255,255,255,.05);transition:transform .16s ease, filter .16s ease, border-color .16s ease;}}
+    .env-action-btn:hover{{transform:translateY(-1px);filter:brightness(1.04);border-color:#60a5fa;}}
+    .env-action-btn:disabled{{cursor:not-allowed;opacity:.6;transform:none;filter:none;}}
+    .env-action-btn.green{{border-color:#1f7a44;background:linear-gradient(180deg,#22c55e,#15803d);color:#04140c;box-shadow:0 12px 24px rgba(21,128,61,.22), inset 0 1px 0 rgba(255,255,255,.16);}}
+    .env-action-btn.green:hover{{border-color:#4ade80;filter:brightness(1.03);}}
+    .env-refresh-status{{margin-top:10px;color:#9fb4cc;font-size:13px;line-height:1.55;}}
+    .env-refresh-status strong{{color:#f8fafc;}}
     @media (max-width:900px){{.env-summary-grid{{grid-template-columns:1fr 1fr;}}}}
     @media (max-width:620px){{.env-summary-grid{{grid-template-columns:1fr;}}}}
   </style>
@@ -9233,6 +10980,16 @@ def _environment_page_body() -> str:
     <div class=\"env-summary-card\"><div class=\"env-summary-title\">Time Window</div><div class=\"env-summary-value\">{html.escape(earliest)}</div><div class=\"env-summary-copy\">Profile window ending at {html.escape(latest)}.</div></div>
   </div>
   <div class=\"env-work-panel\"><strong>How to use this page:</strong> Start here when you want to know whether the environment actually has the telemetry needed for a hunt. The detailed index and sourcetype cards below are the proof surface. Most users can ignore maintenance internals unless a refresh is still catching up.</div>
+  <div class=\"env-work-panel\">
+    <strong>Fresh Start Controls</strong>
+    <div class=\"env-summary-copy\" style=\"margin-top:6px;\">When you connect A.G.E.N.T. Smith to a new system, use <strong>Wipe And Refresh</strong> to clear the current Data Domains profile and rebuild it from scratch against the new environment.</div>
+    <div class=\"env-actions\">
+      <button id=\"env-refresh-btn\" class=\"env-action-btn\" type=\"button\">Refresh Data Domains</button>
+      <button id=\"env-wipe-refresh-btn\" class=\"env-action-btn green\" type=\"button\">Wipe And Refresh</button>
+      <span id=\"env-refresh-inline-status\" class=\"badge\">state={html.escape(str(refresh_meta.get('state', 'pending')))}</span>
+    </div>
+    <div id=\"env-refresh-inline-detail\" class=\"env-refresh-status\"><strong>Status:</strong> {html.escape(str(refresh_meta.get('detail', 'Ready to refresh Data Domains.')))}</div>
+  </div>
   <div class=\"statline\">
     <span class=\"badge\">indexes={html.escape(str(index_count))}</span>
     <span class=\"badge\">sourcetypes={html.escape(str(sourcetype_count))}</span>
@@ -9256,6 +11013,54 @@ make env-profile-check</pre>
     <summary>Show Raw Environment Profile JSON</summary>
     <pre>{profile_json}</pre>
   </details>
+  <script>
+    (() => {{
+      const statusBadge = document.getElementById('env-refresh-inline-status');
+      const statusDetail = document.getElementById('env-refresh-inline-detail');
+      const refreshBtn = document.getElementById('env-refresh-btn');
+      const wipeBtn = document.getElementById('env-wipe-refresh-btn');
+      const setStatus = (meta, fallback) => {{
+        const state = String(meta?.state || 'pending');
+        statusBadge.textContent = `state=${{state}}`;
+        statusDetail.innerHTML = `<strong>Status:</strong> ${{String(meta?.detail || fallback || 'Ready to refresh Data Domains.')}}`;
+        const busy = state === 'in_progress';
+        refreshBtn.disabled = busy;
+        wipeBtn.disabled = busy;
+      }};
+      const loadStatus = async () => {{
+        try {{
+          const resp = await fetch('/api/config/env-refresh', {{ credentials:'same-origin' }});
+          const data = await resp.json();
+          setStatus(data.refresh || {{}}, 'Ready to refresh Data Domains.');
+        }} catch (_err) {{
+          setStatus({{ state:'unknown', detail:'Unable to load refresh status right now.' }}, 'Unable to load refresh status right now.');
+        }}
+      }};
+      refreshBtn?.addEventListener('click', async () => {{
+        setStatus({{ state:'in_progress', detail:'Starting Data Domains refresh...' }}, 'Starting Data Domains refresh...');
+        try {{
+          const resp = await fetch('/api/config/env-refresh', {{ method:'POST', credentials:'same-origin' }});
+          const data = await resp.json();
+          setStatus(data.refresh || {{ state:'pending', detail:data.detail || data.error || 'Refresh request submitted.' }}, data.detail || data.error || 'Refresh request submitted.');
+        }} catch (_err) {{
+          setStatus({{ state:'error', detail:'Could not start Data Domains refresh.' }}, 'Could not start Data Domains refresh.');
+        }}
+      }});
+      wipeBtn?.addEventListener('click', async () => {{
+        const confirmed = window.confirm('Wipe the current Data Domains profile and rebuild it from scratch for this system? This clears the existing profile artifacts before refreshing.');
+        if(!confirmed) return;
+        setStatus({{ state:'in_progress', detail:'Wiping current Data Domains artifacts and starting a fresh rebuild...' }}, 'Wiping current Data Domains artifacts and starting a fresh rebuild...');
+        try {{
+          const resp = await fetch('/api/environment/wipe-refresh', {{ method:'POST', credentials:'same-origin' }});
+          const data = await resp.json();
+          setStatus(data.refresh || {{ state:'pending', detail:data.detail || data.error || 'Wipe and refresh request submitted.' }}, data.detail || data.error || 'Wipe and refresh request submitted.');
+        }} catch (_err) {{
+          setStatus({{ state:'error', detail:'Could not start wipe and refresh.' }}, 'Could not start wipe and refresh.');
+        }}
+      }});
+      loadStatus();
+    }})();
+  </script>
 </div>
 """
 
@@ -9760,6 +11565,7 @@ def _configure_page_body() -> str:
           <div id="cfg-env-refresh-detail" class="cfg-personalize-copy">Waiting for configuration load.</div>
           <div class="cfg-actions">
             <button id="cfg-env-refresh">Refresh Data Domains</button>
+            <button id="cfg-env-wipe-refresh" class="btn-green" type="button">Wipe And Refresh</button>
             <span id="cfg-env-refresh-status" class="cfg-status">Not started.</span>
           </div>
           <div class="cfg-progress-wrap">
@@ -10037,6 +11843,9 @@ def _configure_page_body() -> str:
     cfg$('cfg-env-refresh-log').textContent = meta?.output || 'No refresh output yet.';
     cfg$('cfg-env-refresh-path').textContent = meta?.log_path ? `Refresh log: ${meta.log_path}` : 'Refresh log path will appear here.';
     cfg$('cfg-env-refresh').disabled = state === 'in_progress';
+    if(cfg$('cfg-env-wipe-refresh')){
+      cfg$('cfg-env-wipe-refresh').disabled = state === 'in_progress';
+    }
   }
   let cfgEnvRefreshPoll = null;
   async function cfgPollEnvRefresh(){
@@ -10490,6 +12299,27 @@ def _configure_page_body() -> str:
     cfg$('cfg-env-refresh-status').textContent = data.detail || 'Data Domains refresh started.';
     await cfgPollEnvRefresh();
   };
+  if(cfg$('cfg-env-wipe-refresh')){
+    cfg$('cfg-env-wipe-refresh').onclick = async () => {
+      const confirmed = window.confirm('Wipe the current Data Domains profile and rebuild it from scratch for this system? This clears the existing profile artifacts before refreshing.');
+      if(!confirmed) return;
+      cfg$('cfg-env-refresh-status').textContent = 'Wiping current Data Domains artifacts and starting a fresh rebuild...';
+      const resp = await fetch('/api/environment/wipe-refresh', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: '{}'
+      });
+      const data = await resp.json();
+      if(!resp.ok){
+        cfgRenderEnvRefresh(data.refresh || {});
+        cfg$('cfg-env-refresh-status').textContent = data.detail || data.error || `wipe and refresh failed (${resp.status})`;
+        return;
+      }
+      cfgRenderEnvRefresh(data.refresh || {});
+      cfg$('cfg-env-refresh-status').textContent = data.detail || 'Wipe and refresh started.';
+      await cfgPollEnvRefresh();
+    };
+  }
   cfg$('cfg-edge-save').onclick = async () => { await cfgSave('edge'); };
   cfg$('cfg-edge-validate').onclick = cfgValidateEdge;
   cfg$('cfg-validate').onclick = cfgValidate;
@@ -12268,7 +14098,121 @@ class Handler(BaseHTTPRequestHandler):
             "</form>"
             "</div>"
             "</div>"
-        )
+    )
+
+
+    def _cases_workspace_page_body(self) -> str:
+        return (
+        "<style>"
+        ".cases-wrap{display:grid;grid-template-columns:360px minmax(0,1fr);gap:18px;align-items:start;}"
+        ".cases-side{position:sticky;top:94px;display:grid;gap:14px;}"
+        ".cases-panel{border:1px solid #203448;border-radius:18px;background:#091423;padding:18px;box-shadow:0 18px 36px rgba(0,0,0,.24);min-width:0;}"
+        ".cases-hero{background:linear-gradient(135deg,rgba(12,38,59,.96),rgba(9,24,33,.96) 58%,rgba(8,38,30,.88));}"
+        ".cases-kicker{font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:#7dd3fc;}"
+        ".cases-title{margin:8px 0 6px;font-size:34px;line-height:1.05;}"
+        ".cases-copy{color:#9fb4cc;font-size:14px;line-height:1.65;max-width:860px;}"
+        ".cases-meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;}"
+        ".cases-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;border:1px solid #284154;background:#0b2130;color:#cfe8ff;font-size:12px;font-weight:800;}"
+        ".cases-list{display:grid;gap:10px;max-height:72vh;overflow:auto;padding-right:4px;}"
+        ".case-list-item{width:100%;text-align:left;border:1px solid #203448;border-radius:14px;background:#081523;padding:12px;cursor:pointer;color:#e5eef8;display:grid;gap:6px;}"
+        ".case-list-item.active{border-color:#45b8ff;background:#0d2234;box-shadow:0 0 0 1px rgba(69,184,255,.2) inset;}"
+        ".case-list-title{font-size:13px;font-weight:800;line-height:1.45;}"
+        ".case-list-meta{display:flex;gap:8px;flex-wrap:wrap;color:#9fb4cc;font-size:11px;font-weight:700;}"
+        ".cases-main{display:grid;gap:18px;min-width:0;}"
+        ".cases-grid{display:grid;grid-template-columns:1.15fr .95fr;gap:18px;align-items:start;min-width:0;}"
+        ".case-tree{display:grid;gap:12px;min-width:0;}"
+        ".case-tree-node{border:1px solid #203448;border-radius:14px;background:#071523;padding:12px 14px;display:grid;gap:6px;cursor:pointer;min-width:0;}"
+        ".case-tree-node.active{border-color:#22c55e;background:#0b1d17;box-shadow:0 0 0 1px rgba(34,197,94,.18) inset;}"
+        ".case-tree-head{display:flex;align-items:center;justify-content:space-between;gap:10px;}"
+        ".case-tree-title{font-size:13px;font-weight:800;line-height:1.45;min-width:0;}"
+        ".case-tree-copy{font-size:12px;color:#a7b8cb;line-height:1.55;}"
+        ".case-tree-meta{display:flex;gap:8px;flex-wrap:wrap;}"
+        ".case-tree-indent-1{margin-left:22px;}.case-tree-indent-2{margin-left:44px;}.case-tree-indent-3{margin-left:66px;}.case-tree-indent-4{margin-left:88px;}"
+        ".case-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}"
+        ".case-stat{border:1px solid #203448;border-radius:14px;background:#071523;padding:12px;display:grid;gap:4px;min-width:0;}"
+        ".case-stat-kicker{font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:#7dd3fc;}"
+        ".case-stat-value{font-size:20px;font-weight:900;color:#f8fafc;}"
+        ".case-stat-copy{font-size:12px;color:#9fb4cc;line-height:1.5;}"
+        ".case-node-card{display:grid;gap:14px;min-width:0;}"
+        ".case-node-section{border:1px solid #203448;border-radius:14px;background:#071523;padding:14px;min-width:0;}"
+        ".case-node-section h3{margin:0 0 8px;font-size:14px;}"
+        ".case-node-detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}"
+        ".case-node-detail{border:1px solid #203448;border-radius:12px;background:#08131f;padding:10px 12px;min-width:0;}"
+        ".case-node-detail strong{display:block;font-size:11px;color:#7dd3fc;letter-spacing:.12em;text-transform:uppercase;margin-bottom:5px;}"
+        ".case-node-detail span{display:block;color:#e5eef8;font-size:13px;line-height:1.5;word-break:break-word;}"
+        ".case-spl-shell{border:1px solid #203448;border-radius:12px;background:#040c18;overflow:auto;max-height:360px;}"
+        ".case-spl-shell pre{margin:0;padding:14px;font-size:12px;line-height:1.55;color:#dbeafe;white-space:pre-wrap;word-break:break-word;}"
+        ".case-empty{color:#94a3b8;font-size:13px;line-height:1.6;}"
+        "@media (max-width: 1180px){.cases-wrap{grid-template-columns:1fr;}.cases-side{position:static;}.cases-grid{grid-template-columns:1fr;}.case-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.case-node-detail-grid{grid-template-columns:1fr;}}"
+        "</style>"
+        "<section class=\"cases-hero cases-panel\">"
+        "<div class=\"cases-kicker\">Case Workspace</div>"
+        "<h1 class=\"cases-title\">Persistent Investigation Cases</h1>"
+        "<p class=\"cases-copy\">Every investigation and pivot now writes a durable case node. Use this workspace to inspect the original finding, branch through pivots, reopen any prior node without rerunning Splunk, and review the shared investigation state that carried the case forward.</p>"
+        f"<div class=\"cases-meta\"><span class=\"cases-pill\">Case Store: <strong>{html.escape(case_store_backend())}</strong></span><span class=\"cases-pill\">Branching: parent/child node timeline</span><span class=\"cases-pill\">Reuse prior findings without rerun</span></div>"
+        "</section>"
+        "<section class=\"cases-wrap\">"
+        "<aside class=\"cases-side\">"
+        "<div class=\"cases-panel\">"
+        "<div class=\"cases-kicker\">Recent Cases</div>"
+        "<h2 style=\"margin:8px 0 6px;font-size:20px;\">Open A Saved Case</h2>"
+        "<p class=\"case-empty\">Select a saved case to inspect the branch history and reopen a node.</p>"
+        "<div id=\"cases-list\" class=\"cases-list\"></div>"
+        "</div>"
+        "</aside>"
+        "<div class=\"cases-main\">"
+        "<div class=\"case-stat-grid\">"
+        "<div class=\"case-stat\"><div class=\"case-stat-kicker\">Case</div><div id=\"case-stat-id\" class=\"case-stat-value\">-</div><div class=\"case-stat-copy\">Current selected case id.</div></div>"
+        "<div class=\"case-stat\"><div class=\"case-stat-kicker\">Status</div><div id=\"case-stat-status\" class=\"case-stat-value\">-</div><div class=\"case-stat-copy\">Latest known case state.</div></div>"
+        "<div class=\"case-stat\"><div class=\"case-stat-kicker\">Nodes</div><div id=\"case-stat-nodes\" class=\"case-stat-value\">0</div><div class=\"case-stat-copy\">Saved investigation and pivot nodes.</div></div>"
+        "<div class=\"case-stat\"><div class=\"case-stat-kicker\">Latest Rows</div><div id=\"case-stat-rows\" class=\"case-stat-value\">0</div><div class=\"case-stat-copy\">Rows from the selected node.</div></div>"
+        "</div>"
+        "<div class=\"cases-grid\">"
+        "<section class=\"cases-panel\">"
+        "<div class=\"cases-kicker\">Branch View</div>"
+        "<h2 style=\"margin:8px 0 6px;font-size:20px;\">Case Timeline</h2>"
+        "<p class=\"case-empty\">The current case path appears here as a root investigation with child pivot nodes.</p>"
+        "<div id=\"case-tree\" class=\"case-tree\"></div>"
+        "</section>"
+        "<section class=\"case-node-card\">"
+        "<div class=\"cases-panel\">"
+        "<div class=\"cases-kicker\">Node Detail</div>"
+        "<div style=\"display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;\">"
+        "<h2 style=\"margin:8px 0 6px;font-size:20px;\">Selected Node</h2>"
+        "<a id=\"case-open-investigation\" class=\"btn-secondary\" href=\"/investigation\" style=\"text-decoration:none;\">Open In Investigation</a>"
+        "</div>"
+        "<div id=\"case-node-meta\" class=\"case-node-detail-grid\"></div>"
+        "</div>"
+        "<div class=\"cases-panel\">"
+        "<div class=\"cases-kicker\">Saved Summary</div>"
+        "<div id=\"case-node-summary\" class=\"case-empty\">Select a node to inspect the saved result.</div>"
+        "</div>"
+        "<div class=\"cases-panel\">"
+        "<div class=\"cases-kicker\">Shared Investigation State</div>"
+        "<div id=\"case-node-state\" class=\"case-empty\">Shared case state will appear here after you select a saved node.</div>"
+        "</div>"
+        "<div class=\"cases-panel\">"
+        "<div class=\"cases-kicker\">Executed SPL</div>"
+        "<div id=\"case-node-spl\" class=\"case-spl-shell\"><pre>(No saved SPL for this node)</pre></div>"
+        "</div>"
+        "</section>"
+        "</div>"
+        "</div>"
+        "</section>"
+        "<script>"
+        "let selectedCaseId='';let selectedNodeId='';"
+        "function esc(v){return String(v??'').replace(/[&<>\\\"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','\\\"':'&quot;',\"'\":'&#39;'}[c]));}"
+        "function fmtStamp(epoch){const n=Number(epoch||0);if(!n)return 'n/a';return new Date(n*1000).toLocaleString();}"
+        "function q(name){return new URLSearchParams(location.search).get(name)||'';}"
+        "async function loadCases(){const resp=await fetch('/api/cases?limit=30');const data=await resp.json();const items=Array.isArray(data.items)?data.items:[];const shell=document.getElementById('cases-list');if(!items.length){shell.innerHTML='<div class=\"case-empty\">No saved cases yet. Run an investigation and then a pivot to populate this workspace.</div>';return;}shell.innerHTML=items.map((item)=>`<button class=\"case-list-item${item.case_id===selectedCaseId?' active':''}\" data-case-id=\"${esc(item.case_id)}\"><div class=\"case-list-title\">${esc(item.root_question||item.case_id)}</div><div class=\"case-list-meta\"><span class=\"pill\">${esc(item.status||'unknown')}</span><span class=\"pill\">nodes ${esc(item.node_count)}</span><span class=\"pill\">updated ${esc(fmtStamp(item.updated_at))}</span></div></button>`).join('');shell.querySelectorAll('[data-case-id]').forEach((btn)=>btn.onclick=()=>selectCase(String(btn.getAttribute('data-case-id')||'')));if(!selectedCaseId){selectedCaseId=q('case_id')||String(items[0].case_id||'');}}"
+        "function renderCaseTree(payload){const timeline=Array.isArray(payload?.timeline)?payload.timeline:[];document.getElementById('case-stat-id').textContent=payload?.case_id||'-';document.getElementById('case-stat-status').textContent=payload?.status||'-';document.getElementById('case-stat-nodes').textContent=String(timeline.length);const shell=document.getElementById('case-tree');if(!timeline.length){shell.innerHTML='<div class=\"case-empty\">No nodes saved for this case yet.</div>';return;}if(!selectedNodeId){selectedNodeId=String(timeline[timeline.length-1].node_id||'');}shell.innerHTML=timeline.map((node)=>`<button class=\"case-tree-node case-tree-indent-${Math.min(Number(node.depth||0),4)}${String(node.node_id)===selectedNodeId?' active':''}\" data-node-id=\"${esc(node.node_id)}\"><div class=\"case-tree-head\"><div class=\"case-tree-title\">${esc(node.title||node.question||node.node_id)}</div><span class=\"pill\">${esc(node.node_type||'investigation')}</span></div><div class=\"case-tree-meta\"><span class=\"pill\">${esc(node.intent||'unknown')}</span><span class=\"pill\">rows ${esc(node.row_count||0)}</span><span class=\"pill\">${esc(fmtStamp(node.created_at))}</span></div><div class=\"case-tree-copy\">${esc(node.summary||'No saved summary yet.')}</div></button>`).join('');shell.querySelectorAll('[data-node-id]').forEach((btn)=>btn.onclick=()=>selectNode(String(btn.getAttribute('data-node-id')||'')));}"
+        "function renderNode(result){const meta=document.getElementById('case-node-meta');const summary=document.getElementById('case-node-summary');const spl=document.getElementById('case-node-spl');const stateShell=document.getElementById('case-node-state');const investigationLink=document.getElementById('case-open-investigation');const qargs=result?.query_args&&typeof result.query_args==='object'?result.query_args:{};const graph=result?.graph_case_state&&typeof result.graph_case_state==='object'?result.graph_case_state:{};const entities=graph?.evidence_entities&&typeof graph.evidence_entities==='object'?graph.evidence_entities:{};const pivots=Array.isArray(graph?.pivot_candidates)?graph.pivot_candidates:[];document.getElementById('case-stat-rows').textContent=String(result?.total_rows ?? result?.rows_returned ?? 0);meta.innerHTML=`<div class=\"case-node-detail\"><strong>Question</strong><span>${esc(result?.active_question||result?.question||'')}</span></div><div class=\"case-node-detail\"><strong>Intent</strong><span>${esc(result?.intent||'')}</span></div><div class=\"case-node-detail\"><strong>Selected Tool</strong><span>${esc(result?.selected_tool||'')}</span></div><div class=\"case-node-detail\"><strong>Supported</strong><span>${esc(String(result?.supported ?? true))}</span></div><div class=\"case-node-detail\"><strong>Rows Returned</strong><span>${esc(result?.rows_returned ?? 0)}</span></div><div class=\"case-node-detail\"><strong>Time Range</strong><span>${esc(graph?.time_range?.earliest_time||graph?.time_range?.earliest||qargs.earliest_time||'-')} → ${esc(graph?.time_range?.latest_time||graph?.time_range?.latest||qargs.latest_time||'-')}</span></div>`;summary.innerHTML=result?.summary?`<div style=\"color:#dbeafe;font-size:14px;line-height:1.7;\">${esc(result.summary).replace(/\\n/g,'<br>')}</div>`:'<div class=\"case-empty\">No saved summary for this node.</div>';const entityHtml=Object.keys(entities).filter((key)=>Array.isArray(entities[key])&&entities[key].length).map((key)=>`<div class=\"case-node-detail\"><strong>${esc(key.replaceAll('_',' '))}</strong><span>${esc(entities[key].slice(0,5).join(', '))}</span></div>`).join('');stateShell.innerHTML=(entityHtml||'<div class=\"case-empty\">No structured evidence entities were saved for this node.</div>') + `<div class=\"case-node-detail-grid\" style=\"margin-top:10px;\"><div class=\"case-node-detail\"><strong>Pivot Candidates</strong><span>${esc(String(pivots.length))}</span></div><div class=\"case-node-detail\"><strong>Case Id</strong><span>${esc(String(graph?.case_id||selectedCaseId||''))}</span></div></div>`;spl.innerHTML=`<pre>${esc(String(qargs.query||'' ).trim()||'(No saved SPL for this node)')}</pre>`;if(investigationLink){investigationLink.href=`/investigation?case_id=${encodeURIComponent(selectedCaseId)}&node_id=${encodeURIComponent(selectedNodeId)}`;}}"
+        "async function selectCase(caseId){if(!caseId)return;selectedCaseId=caseId;selectedNodeId='';history.replaceState(null,'',`/cases?case_id=${encodeURIComponent(caseId)}`);await loadCases();const resp=await fetch(`/api/case?case_id=${encodeURIComponent(caseId)}`);const data=await resp.json();if(!resp.ok||!data.case){document.getElementById('case-tree').innerHTML='<div class=\"case-empty\">Unable to load this case.</div>';return;}renderCaseTree(data.case);if(selectedNodeId){await selectNode(selectedNodeId);}else{const t=Array.isArray(data.case.timeline)?data.case.timeline:[];if(t.length) await selectNode(String(t[t.length-1].node_id||''));}}"
+        "async function selectNode(nodeId){if(!selectedCaseId||!nodeId)return;selectedNodeId=nodeId;const resp=await fetch(`/api/case-node?case_id=${encodeURIComponent(selectedCaseId)}&node_id=${encodeURIComponent(nodeId)}`);const data=await resp.json();if(resp.ok&&data.result){renderNode(data.result);}await selectCaseRenderOnly(selectedCaseId);}"
+        "async function selectCaseRenderOnly(caseId){const resp=await fetch(`/api/case?case_id=${encodeURIComponent(caseId)}`);const data=await resp.json();if(resp.ok&&data.case){renderCaseTree(data.case);}}"
+        "window.addEventListener('load',async()=>{await loadCases();if(selectedCaseId) await selectCase(selectedCaseId);});"
+        "</script>"
+    )
 
     def _first_run_page_body(self, error: str = "") -> str:
         error_html = ""
@@ -12805,7 +14749,9 @@ class Handler(BaseHTTPRequestHandler):
             if not record_id:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "id is required"})
                 return
-            ok = set_learning_record_status(record_id, action)
+            status_map = {"approve": "approved", "reject": "rejected", "stale": "stale"}
+            target_status = status_map.get(action, action)
+            ok = set_learning_record_status(record_id, target_status)
             if not ok:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "record not found"})
                 return
@@ -12813,7 +14759,7 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "status": "ok",
-                    "detail": f"Learning record {record_id} set to {action}.",
+                    "detail": f"Learning record {record_id} set to {target_status}.",
                     "local_learning": _local_learning_status(),
                 },
             )
@@ -12844,6 +14790,29 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "status": "started",
                 "detail": "Environment profile refresh started.",
+                "refresh": _environment_profile_refresh_status(),
+            },
+        )
+
+    def _api_environment_wipe_refresh_post(self) -> None:
+        if not self._require_ops_role({}):
+            return
+        if _environment_profile_refresh_in_progress():
+            self._json(
+                HTTPStatus.ACCEPTED,
+                {
+                    "status": "in_progress",
+                    "detail": "Environment profile refresh is already running.",
+                    "refresh": _environment_profile_refresh_status(),
+                },
+            )
+            return
+        threading.Thread(target=_run_environment_profile_wipe_refresh, daemon=True).start()
+        self._json(
+            HTTPStatus.ACCEPTED,
+            {
+                "status": "started",
+                "detail": "Wiping current Data Domains artifacts and starting a fresh rebuild.",
                 "refresh": _environment_profile_refresh_status(),
             },
         )
@@ -13023,6 +14992,40 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def _api_case_node(self, parsed: Any) -> None:
+        query = parse_qs(parsed.query)
+        case_id = str(query.get("case_id", [""])[0]).strip()
+        node_id = str(query.get("node_id", [""])[0]).strip()
+        if not case_id or not node_id:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "case_id and node_id are required"})
+            return
+        result = load_case_node(case_id, node_id)
+        if not result:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "case node not found"})
+            return
+        self._json(HTTPStatus.OK, {"case_id": case_id, "node_id": node_id, "result": result})
+
+    def _api_cases(self, parsed: Any) -> None:
+        query = parse_qs(parsed.query)
+        try:
+            limit = max(1, min(100, int(str(query.get("limit", ["30"])[0]))))
+        except Exception:
+            limit = 30
+        items = list_recent_cases(limit=limit)
+        self._json(HTTPStatus.OK, {"items": items, "backend": case_store_backend()})
+
+    def _api_case(self, parsed: Any) -> None:
+        query = parse_qs(parsed.query)
+        case_id = str(query.get("case_id", [""])[0]).strip()
+        if not case_id:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "case_id is required"})
+            return
+        payload = load_case(case_id)
+        if not payload:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "case not found"})
+            return
+        self._json(HTTPStatus.OK, {"case": payload, "backend": case_store_backend()})
+
     def _api_mcp_chat(self) -> None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -13158,6 +15161,15 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/environment/hint":
             self._api_environment_hint(parsed)
             return
+        if parsed.path == "/api/case-node":
+            self._api_case_node(parsed)
+            return
+        if parsed.path == "/api/cases":
+            self._api_cases(parsed)
+            return
+        if parsed.path == "/api/case":
+            self._api_case(parsed)
+            return
         if parsed.path == "/api/config/runtime":
             self._api_config_runtime_get()
             return
@@ -13181,6 +15193,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/config/env-refresh":
             self._api_config_env_refresh_get()
+            return
+        if parsed.path == "/api/environment/wipe-refresh":
+            self.send_error(HTTPStatus.METHOD_NOT_ALLOWED, "POST required")
             return
         if parsed.path == "/api/config/personalize":
             self._api_config_personalize_get()
@@ -13311,6 +15326,10 @@ class Handler(BaseHTTPRequestHandler):
             self._html(HTTPStatus.OK, _spl_asset_repository_page_body(), title="SPL Asset Repository", nav_active="control")
             return
 
+        if parsed.path == "/cases":
+            self._html(HTTPStatus.OK, self._cases_workspace_page_body(), title="Case Workspace", nav_active="control")
+            return
+
         if parsed.path == "/users":
             if not self._require_admin_page():
                 return
@@ -13406,6 +15425,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
             return
+        if parsed.path == "/api/environment/wipe-refresh":
+            if not self._require_auth(api_mode=True):
+                return
+            try:
+                self._api_environment_wipe_refresh_post()
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            return
         if parsed.path == "/api/session/onboarding":
             if not self._require_auth(api_mode=True):
                 return
@@ -13432,6 +15459,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "question is required"})
                 return
             session_id = str(data.get("session_id", "")).strip()
+            case_id = str(data.get("case_id", "")).strip()
+            parent_node_id = str(data.get("parent_node_id", "")).strip()
             max_steps = data.get("max_steps", 3)
             if not isinstance(max_steps, int):
                 try:
@@ -13441,9 +15470,22 @@ class Handler(BaseHTTPRequestHandler):
             write_artifact = bool(data.get("write_artifact", True))
             approved_deeper_investigation = bool(data.get("approved_deeper_investigation", False))
             continuation_state = data.get("continuation_state", None)
+            pivot_context = data.get("pivot_context", None)
+            pivot_candidate = data.get("pivot_candidate", None)
+            if isinstance(pivot_context, dict):
+                case_id = case_id or str(pivot_context.get("case_id", "")).strip()
+                parent_node_id = parent_node_id or str(pivot_context.get("current_node_id", "")).strip()
 
             pipeline = str(data.get("pipeline", "multi_model")).strip().lower()
-            if pipeline == "agentic":
+            if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict):
+                result = _run_structured_pivot_investigation(
+                    question=question,
+                    pivot_context=pivot_context,
+                    pivot_candidate=pivot_candidate,
+                    session_id=session_id,
+                    write_artifact=write_artifact,
+                )
+            elif pipeline == "agentic":
                 result = run_agentic_investigation(
                     question,
                     max_steps=max_steps,
@@ -13531,6 +15573,49 @@ class Handler(BaseHTTPRequestHandler):
                     artifact_path = str(meta.get("artifact", "")).strip()
                     if artifact_path:
                         _persist_mitre_bundle_to_artifact(artifact_path, mitre_bundle)
+                    pivot_context_payload = _build_structured_pivot_context(result_body, sample_rows)
+                    result_body["pivot_context"] = pivot_context_payload
+                    result_body["sample_rows"] = sample_rows
+                    result_body["sample_rows_source"] = sample_source
+                    result_body["splunk_search_url_base"] = _splunk_search_url_base()
+                    previous_graph_state = pivot_context.get("graph_case_state") if isinstance(pivot_context, dict) and isinstance(pivot_context.get("graph_case_state"), dict) else None
+                    graph_case_state_payload = _build_graph_case_state_payload(
+                        question=question,
+                        result_body=result_body,
+                        sample_rows=sample_rows,
+                        case_id=case_id or "",
+                        parent_node_id=parent_node_id or "",
+                        node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
+                        previous_state=previous_graph_state,
+                    )
+                    result_body["graph_case_state"] = graph_case_state_payload
+                    case_context_payload = persist_case_result(
+                        session_id=session_id,
+                        question=question,
+                        result_body=result_body,
+                        graph_case_state=graph_case_state_payload,
+                        case_id=case_id or None,
+                        parent_node_id=parent_node_id or None,
+                        node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
+                    )
+                    result_body["case_context"] = case_context_payload
+                    result_body["graph_case_state"]["case_id"] = case_context_payload.get("case_id", "")
+                    result_body["graph_case_state"]["current_node_id"] = case_context_payload.get("node_id", "")
+                    result_body["graph_case_state"]["parent_node_id"] = case_context_payload.get("parent_node_id", "")
+                    if isinstance(result_body.get("pivot_context"), dict):
+                        result_body["pivot_context"]["case_id"] = case_context_payload.get("case_id", "")
+                        result_body["pivot_context"]["current_node_id"] = case_context_payload.get("node_id", "")
+                        result_body["pivot_context"]["graph_case_state"] = result_body.get("graph_case_state", {})
+                    artifact_path = str(meta.get("artifact", "")).strip()
+                    if artifact_path:
+                        _persist_result_updates_to_artifact(
+                            artifact_path,
+                            {
+                                "pivot_context": result_body.get("pivot_context", {}),
+                                "case_context": case_context_payload,
+                                "graph_case_state": result_body.get("graph_case_state", {}),
+                            },
+                        )
                 result["sample_rows"] = sample_rows
                 result["sample_rows_source"] = sample_source
                 result["sample_rows_error"] = sample_error

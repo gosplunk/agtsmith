@@ -1,37 +1,27 @@
 # Changelog
 
-## v1.2.4
+## v1.0.0
 
-- redesigned the investigation drawer into a sticky Splunk-first analyst workbench with non-redundant `Pivot`, `Evidence`, `SPL`, `Case Flow`, `ATT&CK`, `Decision Trace`, and `JSON` views
-- improved investigation trust cues with phase-state visibility, clearer long-running guidance, stronger evidence handoff, and row-level Splunk drill-down links that preserve the original search scope and time range
-- expanded the SPL Optimization AI Engine into a real repository-backed workflow with reusable SPL assets, explicit approval flow, and a dedicated SPL Asset Repository surface
-- reorganized the admin/control surfaces around current state, next action, and working context, including grouped Operator Audit history and workflow-first artifact views
-- refreshed the public README screenshots and release notes so the GitHub view matches the current `v1.2.4` interface
+- first public release of A.G.E.N.T. Smith
+- Docker-first deployment flow with first-run bootstrap
+- controller-hosted LangGraph orchestration with bounded Splunk MCP retrieval
+- configurable primary inference host and optional edge helper
+- runtime validation, dependency checks, and live MCP probe in the UI
+- architecture, setup, and operator documentation aligned to the current product state
 
-## v1.2.3
+## v1.0.1
 
-- clarified SPL Optimization AI Engine operator messaging so the page explicitly reports whether the run used the fast deterministic mode or the guarded model-assisted path
-- added clearer no-gain messaging when a learning run finds no environment-aware SPL-writing improvement beyond the current baseline
-- added active learned-state, cache hit/miss, candidate filtering, and run-duration visibility so operators can tell what changed between runs
-- hardened the Learning page client behavior by fixing the onboarding modal click interception on `/learning` and removing the JavaScript parse error that made `Run Optimization Cycle` appear dead
-- added the current `v1.2.3` Learning page screenshot to the public README screenshot set
+- local guarded Linux-auth grounding improvements
+- local working clone on 8788 for learning and personalization design
 
-## v1.2.2
+## v1.1.0
 
-- improved SPL Optimization AI Engine messaging so operators can understand what it does, why it helps, and what approving a suggestion actually changes
-- cleaned local learning history handling by auto-staling older pending suggestions and stripping legacy truncated sourcetype references from learned proposals
-- bounded SPL Optimization AI Engine runs to a smaller, faster working set and shortened per-model timeouts so the page no longer appears stuck at the same bundle for long periods
-- hardened local learning run-state handling so interrupted runs surface as interrupted instead of appearing to remain in progress indefinitely
-- rebuilt and refreshed the public `v1.2.1` screenshot set from the live `v1.2.1` container so the repo visuals match the actual running UI
-
-## v1.2.1
-
-- aligned the live investigation runtime to the saved role model assignments instead of falling back to process defaults
-- moved security review, evidence review, continuation review, and final summary to `Foundation-Sec-8B-Reasoning` while keeping `Qwen` for planning and `deepseek-coder-v2:lite` for SPL generation and repair
-- updated architecture docs, runbooks, model strategy guidance, and investigation graphs to reflect the split-role model pipeline
-- added a canonical next-release planning document for `v1.3.0`, including the planned persistent follow-up context enhancement for standard pivots
-- fixed the runtime configuration save flow so host changes persist cleanly without leaving the UI stuck on `Saving...`
-- verified remote Ollama host validation and end-to-end live investigation execution through the web UI
+- added guarded local learning with a dedicated Control Center page, pending/approved/stale state, and model-driven candidate generation
+- improved Linux auth, Windows auth, Apache, and cross-platform failed-login investigation quality
+- added async local-learning status, progress, and run-log visibility in the UI
+- improved Investigation UI sample-result rendering so it matches working MCP query behavior more reliably
+- added pilot benchmark pack generation and a full-pipeline hardening benchmark runner
+- validated core live-environment and BOTSv3 benchmark slices to pilot-ready quality locally
 
 ## v1.2.0
 
@@ -45,25 +35,44 @@
 - masked the Splunk bearer token in Configuration and preserved it server-side without rendering it back in plain text
 - sanitized repo defaults and shipped logic to remove hardcoded environment URLs and local-environment learning assumptions before publish
 
-## v1.1.0
+## v1.2.1
 
-- added guarded local learning with a dedicated Control Center page, pending/approved/stale state, and model-driven candidate generation
-- improved Linux auth, Windows auth, Apache, and cross-platform failed-login investigation quality
-- added async local-learning status, progress, and run-log visibility in the UI
-- improved Investigation UI sample-result rendering so it matches working MCP query behavior more reliably
-- added pilot benchmark pack generation and a full-pipeline hardening benchmark runner
-- validated core live-environment and BOTSv3 benchmark slices to pilot-ready quality locally
+- aligned the live investigation runtime to the saved role model assignments instead of falling back to process defaults
+- moved security review, evidence review, continuation review, and final summary to `Foundation-Sec-8B-Reasoning` while keeping `Qwen` for planning and `deepseek-coder-v2:lite` for SPL generation and repair
+- updated architecture docs, runbooks, model strategy guidance, and investigation graphs to reflect the split-role model pipeline
+- added a canonical next-release planning document for `v1.3.0`, including the planned persistent follow-up context enhancement for standard pivots
+- fixed the runtime configuration save flow so host changes persist cleanly without leaving the UI stuck on `Saving...`
+- verified remote Ollama host validation and end-to-end live investigation execution through the web UI
 
-## v1.0.1
+## v1.2.2
 
-- local guarded Linux-auth grounding improvements
-- local working clone on 8788 for learning and personalization design
+- improved SPL Optimization AI Engine messaging so operators can understand what it does, why it helps, and what approving a suggestion actually changes
+- cleaned local learning history handling by auto-staling older pending suggestions and stripping legacy truncated sourcetype references from learned proposals
+- bounded SPL Optimization AI Engine runs to a smaller, faster working set and shortened per-model timeouts so the page no longer appears stuck at the same bundle for long periods
+- hardened local learning run-state handling so interrupted runs surface as interrupted instead of appearing to remain in progress indefinitely
+- rebuilt and refreshed the public `v1.2.1` screenshot set from the live `v1.2.1` container so the repo visuals match the actual running UI
 
-## v1.0.0
+## v1.2.3
 
-- first public release of A.G.E.N.T. Smith
-- Docker-first deployment flow with first-run bootstrap
-- controller-hosted LangGraph orchestration with bounded Splunk MCP retrieval
-- configurable primary inference host and optional edge helper
-- runtime validation, dependency checks, and live MCP probe in the UI
-- architecture, setup, and operator documentation aligned to the current product state
+- clarified SPL Optimization AI Engine operator messaging so the page explicitly reports whether the run used the fast deterministic mode or the guarded model-assisted path
+- added clearer no-gain messaging when a learning run finds no environment-aware SPL-writing improvement beyond the current baseline
+- added active learned-state, cache hit/miss, candidate filtering, and run-duration visibility so operators can tell what changed between runs
+- hardened the Learning page client behavior by fixing the onboarding modal click interception on `/learning` and removing the JavaScript parse error that made `Run Optimization Cycle` appear dead
+- added the current `v1.2.3` Learning page screenshot to the public README screenshot set
+
+## v1.2.4
+
+- redesigned the investigation drawer into a sticky Splunk-first analyst workbench with non-redundant `Pivot`, `Evidence`, `SPL`, `Case Flow`, `ATT&CK`, `Decision Trace`, and `JSON` views
+- improved investigation trust cues with phase-state visibility, clearer long-running guidance, stronger evidence handoff, and row-level Splunk drill-down links that preserve the original search scope and time range
+- expanded the SPL Optimization AI Engine into a real repository-backed workflow with reusable SPL assets, explicit approval flow, and a dedicated SPL Asset Repository surface
+- reorganized the admin/control surfaces around current state, next action, and working context, including grouped Operator Audit history and workflow-first artifact views
+- refreshed the public README screenshots and release notes so the GitHub view matches the current `v1.2.4` interface
+
+## v1.3.1
+
+- made environment grounding materially more authoritative by learning field inventory per `index + sourcetype`, rewriting generic SPL toward the discovered local domains, and blocking unsupported data families instead of inventing fake local mappings
+- fixed several demo-breaking intent paths so successful logins, Apache web activity, Linux session activity, Office 365 management activity, and CloudTrail routing use learned local domains and pass the same runtime validation path the UI enforces
+- replaced the old saved-step investigation memory with a durable PostgreSQL-backed case store, persistent case/node ids, structured pivot context, and a richer Investigation Timeline workflow for reopening original findings and deeper pivots without rerunning Splunk
+- added a dedicated Case Workspace and a rebuilt Investigation Drawer timeline that behaves like an analyst reasoning surface instead of a chronological log
+- fixed SPL asset repository approval and rejection so actions resolve correctly against persisted records
+- hardened analyst-facing output so even when the final-summary model falls back, the UI still shows intent-aware, evidence-aware current assessments instead of a generic execution stub
