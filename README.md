@@ -1,6 +1,6 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.3.3`
+Current release: `v1.3.4`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
@@ -50,32 +50,32 @@ Then:
 - run the first investigation
 
 ## Screenshots
-These screenshots reflect the current `v1.3.3` interface.
+These screenshots reflect the current `v1.3.4` interface.
 
 ### Login
-`v1.3.3` login flow for the analyst console.
+`v1.3.4` login flow for the analyst console.
 
-![A.G.E.N.T. Smith v1.3.3 login](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-login.png)
+![A.G.E.N.T. Smith v1.3.4 login](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-login.png)
 
 ### Investigation Workspace
-`v1.3.3` Splunk-first investigation workflow with durable case memory, Investigation Timeline reasoning cards, current assessment, recommended next steps, and ATT&CK context.
+`v1.3.4` Splunk-first investigation workflow with durable case memory, Investigation Timeline reasoning cards, current assessment, recommended next steps, and ATT&CK context.
 
-![A.G.E.N.T. Smith v1.3.3 investigation workspace](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-investigation.png)
+![A.G.E.N.T. Smith v1.3.4 investigation workspace](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-investigation.png)
 
 ### Architecture View
-`v1.3.3` system architecture and role separation view for the bounded Splunk investigation pipeline.
+`v1.3.4` system architecture and role separation view for the bounded Splunk investigation pipeline.
 
-![A.G.E.N.T. Smith v1.3.3 architecture view](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-architecture.png)
+![A.G.E.N.T. Smith v1.3.4 architecture view](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-architecture.png)
 
 ### Data Domains And Personalization
-`v1.3.3` environment-aware Data Domains view showing local index and sourcetype discovery, per-domain field inventory, and portable query grounding built from the live Splunk environment.
+`v1.3.4` environment-aware Data Domains view showing local index and sourcetype discovery, per-domain field inventory, and portable query grounding built from the live Splunk environment.
 
-![A.G.E.N.T. Smith v1.3.3 Data Domains personalization view](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-data-domains.png)
+![A.G.E.N.T. Smith v1.3.4 Data Domains personalization view](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-data-domains.png)
 
 ### SPL Optimization AI Engine
-`v1.3.3` SPL Optimization AI Engine showing the simplified operator view, reusable SPL asset workflow, and repository-backed optimization state.
+`v1.3.4` SPL Optimization AI Engine showing the simplified operator view, reusable SPL asset workflow, and repository-backed optimization state.
 
-![A.G.E.N.T. Smith v1.3.3 SPL Optimization AI Engine](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-learning.png)
+![A.G.E.N.T. Smith v1.3.4 SPL Optimization AI Engine](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-learning.png)
 
 ## How It Works
 The default SPL path is a split-role pipeline:
@@ -146,7 +146,7 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - added a stronger analyst reasoning surface in the Investigation Drawer, including narrative continuity, richer timeline cards, clickable step restore behavior, and stateful pivot continuation
 - hardened current assessment output so fallback summaries remain useful and evidence-aware when the final-summary model fails or times out
 
-## What's New In v1.3.3
+## What's New In v1.3.4
 - fixed `/api/ask` so optional post-run enrichment and case persistence fail open instead of returning HTTP 500 after a successful investigation result already exists
 - surfaced multi-model summary diagnostics in the runtime result shape, including `summary_fallback_used`, `summary_error`, and `summary_quality_reason`
 - clarified new-box setup guidance in both the public Initial Setup Guide and the live Configuration page so operators refresh Data Domains and run real investigations before starting SPL Optimization
@@ -154,6 +154,8 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - removed the unintended fallback default UI credential path so a new deployment no longer invents `analyst/changeme123!` before first-run setup
 - restored the intended first-run bootstrap flow so `/login` redirects to `/setup/first-run` until the initial operator account is created
 - fixed MCP chat and investigation query execution after Configuration changes by resolving `SPLUNK_MCP_URL` from current runtime config on each call instead of using a stale startup-time value
+- fixed Splunk handoff URL resolution so explicit `SPLUNK_WEB_URL` overrides are honored correctly
+- hardened `Open In Splunk` and clickable evidence-row drilldown across different A.G.E.N.T. Smith hosts by trying more than one reasonable Splunk Web URL when no explicit override is configured
 
 ## What It Is Not
 - Autonomous response or recovery

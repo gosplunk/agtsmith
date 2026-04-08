@@ -192,7 +192,7 @@ def _resolve_config_value_for_merge(key: str, incoming: Any, current_values: dic
 def _splunk_search_url_base() -> str:
     values = parse_env_file(UI_ENV_PATH)
     if isinstance(values, tuple):
-        values = values[0]
+        values = values[1]
     values = values if isinstance(values, dict) else {}
     explicit = str(values.get("SPLUNK_WEB_URL", "")).strip().rstrip("/")
     if explicit:
@@ -227,13 +227,19 @@ def _splunk_search_url_base() -> str:
         except Exception:
             return False
 
-    candidates = [
+    candidates: list[str] = []
+    if parsed.scheme in {"http", "https"}:
+        if parsed.port and parsed.port != 8089:
+            candidates.append(f"{parsed.scheme}://{host}:{parsed.port}")
+        candidates.append(f"{parsed.scheme}://{host}:8000")
+    candidates.extend([
         f"https://{host}:8000",
         f"http://{host}:8000",
-    ]
-    if parsed.scheme in {"http", "https"}:
-        preferred = f"{parsed.scheme}://{host}:8000"
-        candidates = [preferred] + [item for item in candidates if item != preferred]
+        f"https://{host}",
+        f"http://{host}",
+    ])
+    seen: set[str] = set()
+    candidates = [item for item in candidates if not (item in seen or seen.add(item))]
 
     for candidate in candidates:
         if _probe(candidate):
