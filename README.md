@@ -151,6 +151,9 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - surfaced multi-model summary diagnostics in the runtime result shape, including `summary_fallback_used`, `summary_error`, and `summary_quality_reason`
 - clarified new-box setup guidance in both the public Initial Setup Guide and the live Configuration page so operators refresh Data Domains and run real investigations before starting SPL Optimization
 - retained green `Open In Splunk` handoff in the Investigation drawer and MCP chat client, and restored clickable evidence-row drilldown so analysts can jump directly back into Splunk from returned sample rows
+- removed the unintended fallback default UI credential path so a new deployment no longer invents `analyst/changeme123!` before first-run setup
+- restored the intended first-run bootstrap flow so `/login` redirects to `/setup/first-run` until the initial operator account is created
+- fixed MCP chat and investigation query execution after Configuration changes by resolving `SPLUNK_MCP_URL` from current runtime config on each call instead of using a stale startup-time value
 
 ## What It Is Not
 - Autonomous response or recovery

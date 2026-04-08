@@ -26,7 +26,6 @@ from question_intelligence import infer_question_dimensions, infer_time_window, 
 from query_templates import DEFAULT_TEMPLATE, TEMPLATES, QueryTemplate
 from runtime_config import get_ollama_host, get_runtime_secret, get_splunk_mcp_url
 
-SPLUNK_MCP_URL = get_splunk_mcp_url()
 OLLAMA_HOST = get_ollama_host()
 DEFAULT_OLLAMA_MODEL_PRIMARY = "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
 DEFAULT_OLLAMA_MODEL_REASONING = "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
@@ -293,7 +292,7 @@ def template_to_query_args(template: QueryTemplate, question: str = "", *, apply
 
 
 def mcp_call(client: httpx.Client, headers: dict[str, str], payload: dict[str, Any]) -> tuple[int, Any]:
-    resp = client.post(SPLUNK_MCP_URL, headers=headers, json=payload)
+    resp = client.post(get_splunk_mcp_url(), headers=headers, json=payload)
     try:
         return resp.status_code, resp.json()
     except Exception:

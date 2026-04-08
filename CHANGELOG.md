@@ -83,3 +83,6 @@
 - added surfaced multi-model summary diagnostics for fallback behavior: `summary_fallback_used`, `summary_error`, and `summary_quality_reason`
 - clarified new-install guidance in the Initial Setup Guide and live Configuration page so operators build Data Domains and run real investigations before starting SPL Optimization
 - retained green `Open In Splunk` handoff in the Investigation drawer and MCP chat client, and restored clickable evidence-row drilldown so analysts can open focused searches directly from sample rows
+- removed the unintended fallback default UI credential path so fresh installs no longer invent or honor `analyst/changeme123!` before first-run setup completes
+- restored clean first-run bootstrap behavior for deployment installs by allowing the server to stay up with no configured users and redirect `/login` to `/setup/first-run`
+- fixed live MCP query execution after runtime configuration changes by resolving `SPLUNK_MCP_URL` at call time instead of caching a stale startup value while the Configuration probe uses the current saved value

@@ -2525,6 +2525,7 @@ def _first_run_setup_required() -> bool:
 
 def _load_auth_users() -> dict[str, dict[str, str]]:
     _lines, file_values = parse_env_file(UI_ENV_PATH)
+    initialized = str(os.getenv("SOC_UI_AUTH_INITIALIZED", file_values.get("SOC_UI_AUTH_INITIALIZED", ""))).strip().lower()
     users_env = str(os.getenv("SOC_UI_AUTH_USERS_JSON", file_values.get("SOC_UI_AUTH_USERS_JSON", ""))).strip()
     users: dict[str, dict[str, str]] = {}
 
@@ -2558,9 +2559,13 @@ def _load_auth_users() -> dict[str, dict[str, str]]:
     if users:
         return users
 
-    username = str(os.getenv("SOC_UI_AUTH_USERNAME", file_values.get("SOC_UI_AUTH_USERNAME", "analyst"))).strip()
-    password = str(os.getenv("SOC_UI_AUTH_PASSWORD", file_values.get("SOC_UI_AUTH_PASSWORD", "changeme123!"))).strip()
-    role = str(os.getenv("SOC_UI_AUTH_ROLE", file_values.get("SOC_UI_AUTH_ROLE", "ops"))).strip().lower()
+    # Before first-run completes, the UI must not invent or honor a fallback login.
+    if initialized not in {"1", "true", "yes", "on"}:
+        return {}
+
+    username = str(os.getenv("SOC_UI_AUTH_USERNAME", file_values.get("SOC_UI_AUTH_USERNAME", ""))).strip()
+    password = str(os.getenv("SOC_UI_AUTH_PASSWORD", file_values.get("SOC_UI_AUTH_PASSWORD", ""))).strip()
+    role = str(os.getenv("SOC_UI_AUTH_ROLE", file_values.get("SOC_UI_AUTH_ROLE", ""))).strip().lower()
     if role not in ALLOWED_APP_ROLES:
         role = "analyst"
     if username and password:
@@ -15758,13 +15763,17 @@ def main() -> int:
     args = parser.parse_args()
 
     if _auth_enabled():
-        users = _load_auth_users()
-        if not users:
-            print("Startup validation failed for UI auth.")
-            print("No auth users configured. Set SOC_UI_AUTH_USERS_JSON or SOC_UI_AUTH_USERNAME/SOC_UI_AUTH_PASSWORD.")
-            return 2
-        if "analyst" in users and users["analyst"].get("password") == "changeme123!":
-            print("WARNING: default UI auth credential detected (analyst/changeme123!). Change it in config/ui.env.")
+        if _first_run_setup_required():
+            print("First-run setup required.")
+            print("Open /setup/first-run to create the initial UI user.")
+        else:
+            users = _load_auth_users()
+            if not users:
+                print("Startup validation failed for UI auth.")
+                print("No auth users configured. Set SOC_UI_AUTH_USERS_JSON or complete first-run setup.")
+                return 2
+            if "analyst" in users and users["analyst"].get("password") == "changeme123!":
+                print("WARNING: default UI auth credential detected (analyst/changeme123!). Change it in config/ui.env.")
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     scheme = "http"
