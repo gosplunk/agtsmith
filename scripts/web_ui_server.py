@@ -143,6 +143,7 @@ EDGE_CONFIG_KEYS = [
 CONFIG_EDITABLE_KEYS = [
     "OLLAMA_HOST",
     "SPLUNK_BASE_URL",
+    "SPLUNK_WEB_URL",
     "SPLUNK_MCP_URL",
     "SPLUNK_LAB_BEARER_TOKEN",
     "SOC_UI_AUTH_ENABLED",
@@ -197,55 +198,61 @@ def _splunk_search_url_base() -> str:
     explicit = str(values.get("SPLUNK_WEB_URL", "")).strip().rstrip("/")
     if explicit:
         return f"{explicit}/en-US/app/search/search"
-    base = str(values.get("SPLUNK_BASE_URL", "")).strip().rstrip("/") or str(get_splunk_base_url()).strip().rstrip("/")
-    if not base:
+    detected = _auto_detect_splunk_web_url(values)
+    return f"{detected}/en-US/app/search/search" if detected else ""
+
+
+def _splunk_host_from_values(values: dict[str, str] | None = None) -> str:
+    merged = values if isinstance(values, dict) else {}
+    for raw in [
+        str(merged.get("SPLUNK_MCP_URL", "")).strip(),
+        str(merged.get("SPLUNK_BASE_URL", "")).strip(),
+        str(get_splunk_mcp_url()).strip(),
+        str(get_splunk_base_url()).strip(),
+    ]:
+        if not raw:
+            continue
+        parsed = urlparse(raw)
+        if parsed.hostname:
+            return parsed.hostname
+    return ""
+
+
+def _probe_splunk_web_candidate(candidate: str) -> bool:
+    req = urllib.request.Request(
+        f"{candidate}/en-US/account/login",
+        headers={"User-Agent": "A.G.E.N.T.-Smith/1.2"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(
+            req,
+            timeout=3.0,
+            context=ssl._create_unverified_context() if candidate.startswith("https://") else None,
+        ) as resp:
+            status = getattr(resp, "status", 200)
+            return 200 <= int(status) < 500
+    except urllib.error.HTTPError as exc:
+        return 200 <= int(exc.code) < 500
+    except Exception:
+        return False
+
+
+def _auto_detect_splunk_web_url(values: dict[str, str] | None = None) -> str:
+    merged = values if isinstance(values, dict) else {}
+    explicit = str(merged.get("SPLUNK_WEB_URL", "")).strip().rstrip("/")
+    if explicit:
+        return explicit
+    host = _splunk_host_from_values(merged)
+    if not host:
         return ""
-    parsed = urlparse(base)
-    if not parsed.hostname:
-        return ""
-    host = parsed.hostname
     cached = _SPLUNK_WEB_BASE_CACHE.get(host)
     if cached:
         return cached
-
-    def _probe(candidate: str) -> bool:
-        req = urllib.request.Request(
-            f"{candidate}/en-US/account/login",
-            headers={"User-Agent": "A.G.E.N.T.-Smith/1.2"},
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(
-                req,
-                timeout=3.0,
-                context=ssl._create_unverified_context() if candidate.startswith("https://") else None,
-            ) as resp:
-                status = getattr(resp, "status", 200)
-                return 200 <= int(status) < 500
-        except urllib.error.HTTPError as exc:
-            return 200 <= int(exc.code) < 500
-        except Exception:
-            return False
-
-    candidates: list[str] = []
-    if parsed.scheme in {"http", "https"}:
-        if parsed.port and parsed.port != 8089:
-            candidates.append(f"{parsed.scheme}://{host}:{parsed.port}")
-        candidates.append(f"{parsed.scheme}://{host}:8000")
-    candidates.extend([
-        f"https://{host}:8000",
-        f"http://{host}:8000",
-        f"https://{host}",
-        f"http://{host}",
-    ])
-    seen: set[str] = set()
-    candidates = [item for item in candidates if not (item in seen or seen.add(item))]
-
-    for candidate in candidates:
-        if _probe(candidate):
-            resolved = f"{candidate}/en-US/app/search/search"
-            _SPLUNK_WEB_BASE_CACHE[host] = resolved
-            return resolved
+    for candidate in [f"https://{host}:8000", f"http://{host}:8000"]:
+        if _probe_splunk_web_candidate(candidate):
+            _SPLUNK_WEB_BASE_CACHE[host] = candidate
+            return candidate
     return ""
 
 
@@ -2152,6 +2159,8 @@ def _config_snapshot() -> dict[str, Any]:
         values["OLLAMA_HOST"] = get_ollama_host()
     if not values.get("SPLUNK_BASE_URL"):
         values["SPLUNK_BASE_URL"] = get_splunk_base_url()
+    if not values.get("SPLUNK_WEB_URL"):
+        values["SPLUNK_WEB_URL"] = _auto_detect_splunk_web_url(values)
     if not values.get("SPLUNK_MCP_URL"):
         values["SPLUNK_MCP_URL"] = get_splunk_mcp_url()
     if not values.get("EDGE_LLM_ENABLED"):
@@ -2371,6 +2380,12 @@ def _validate_runtime_config(values: dict[str, str], scope: str = "full") -> dic
                 add_result("splunk_base", "ok", f"Splunk base URL reachable and returned HTTP {exc.code}.")
             except Exception as exc:
                 add_result("splunk_base", "error", f"Could not reach Splunk base URL: {type(exc).__name__}: {exc}")
+
+        splunk_web = str(values.get("SPLUNK_WEB_URL", "")).strip().rstrip("/") or _auto_detect_splunk_web_url(values)
+        if splunk_web:
+            add_result("splunk_web", "ok", f"Splunk Web handoff URL resolved to {splunk_web}.")
+        else:
+            add_result("splunk_web", "warn", "Could not auto-detect Splunk Web on the configured Splunk host. Open In Splunk links stay hidden until https://HOST:8000 or http://HOST:8000 is reachable, or SPLUNK_WEB_URL is set explicitly.")
 
         splunk_mcp = str(values.get("SPLUNK_MCP_URL", "")).strip()
         token = str(values.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
@@ -11422,6 +11437,7 @@ def _configure_page_body() -> str:
       <div class="cfg-form-grid">
       <div class="cfg-row"><label for="cfg-ollama-host">OLLAMA_HOST</label><div class="cfg-example">Example URL: <code>http://192.168.1.50:11434</code></div><input id="cfg-ollama-host" placeholder="http://192.168.1.50:11434" /></div>
       <div class="cfg-row"><label for="cfg-splunk-base">SPLUNK_BASE_URL</label><div class="cfg-example">Example URL: <code>https://192.168.1.60:8089</code></div><input id="cfg-splunk-base" placeholder="https://192.168.1.60:8089" /></div>
+      <div class="cfg-row"><label for="cfg-splunk-web">SPLUNK_WEB_URL</label><div class="cfg-example">Optional override. If blank, A.G.E.N.T. Smith auto-detects <code>https://HOST:8000</code> first, then <code>http://HOST:8000</code> from the configured Splunk host.</div><input id="cfg-splunk-web" placeholder="https://192.168.1.60:8000" /></div>
       <div class="cfg-row wide"><label for="cfg-splunk-mcp">SPLUNK_MCP_URL</label><div class="cfg-example">Example URL: <code>https://192.168.1.60:8089/services/mcp</code></div><input id="cfg-splunk-mcp" placeholder="https://192.168.1.60:8089/services/mcp" /></div>
       <div class="cfg-row wide">
         <label for="cfg-splunk-token">SPLUNK_LAB_BEARER_TOKEN</label>
@@ -11723,6 +11739,7 @@ def _configure_page_body() -> str:
     const payload = values || {};
     cfg$('cfg-ollama-host').value = payload.OLLAMA_HOST || '';
     cfg$('cfg-splunk-base').value = payload.SPLUNK_BASE_URL || '';
+    cfg$('cfg-splunk-web').value = payload.SPLUNK_WEB_URL || '';
     cfg$('cfg-splunk-mcp').value = payload.SPLUNK_MCP_URL || '';
     cfg$('cfg-splunk-token').value = payload.SPLUNK_LAB_BEARER_TOKEN || '';
     cfgTokenMasked = String(payload.SPLUNK_LAB_BEARER_TOKEN || '') === '__KEEP_EXISTING_SPLUNK_TOKEN__';
@@ -11893,6 +11910,7 @@ def _configure_page_body() -> str:
     return {
       OLLAMA_HOST: cfg$('cfg-ollama-host').value.trim(),
       SPLUNK_BASE_URL: cfg$('cfg-splunk-base').value.trim(),
+      SPLUNK_WEB_URL: cfg$('cfg-splunk-web').value.trim(),
       SPLUNK_MCP_URL: cfg$('cfg-splunk-mcp').value.trim(),
       SPLUNK_LAB_BEARER_TOKEN: cfgTokenMasked && !tokenValue ? '' : (tokenValue || (cfgTokenMasked ? '__KEEP_EXISTING_SPLUNK_TOKEN__' : '')),
       SOC_UI_AUTH_ENABLED: cfg$('cfg-auth-enabled').value.trim(),
@@ -14662,6 +14680,12 @@ class Handler(BaseHTTPRequestHandler):
             for key in CONFIG_EDITABLE_KEYS
             if key in values
         }
+        merged_for_detection = dict(current_values)
+        merged_for_detection.update(updates)
+        if not str(updates.get("SPLUNK_WEB_URL", "")).strip():
+            detected_web = _auto_detect_splunk_web_url(merged_for_detection)
+            if detected_web:
+                updates["SPLUNK_WEB_URL"] = detected_web
         ollama_host = str(updates.get("OLLAMA_HOST", "")).strip().rstrip("/") or get_ollama_host()
         available_models = _discover_ollama_models(ollama_host)
         updates = _autofill_model_assignments(updates, available_models)

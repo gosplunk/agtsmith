@@ -77,7 +77,7 @@
 - fixed SPL asset repository approval and rejection so actions resolve correctly against persisted records
 - hardened analyst-facing output so even when the final-summary model falls back, the UI still shows intent-aware, evidence-aware current assessments instead of a generic execution stub
 
-## v1.3.4
+## v1.3.5
 
 - fixed `/api/ask` so optional post-run enrichment and case persistence can no longer turn a successful investigation into an HTTP 500 failure after the result already exists
 - added surfaced multi-model summary diagnostics for fallback behavior: `summary_fallback_used`, `summary_error`, and `summary_quality_reason`
@@ -88,3 +88,6 @@
 - fixed live MCP query execution after runtime configuration changes by resolving `SPLUNK_MCP_URL` at call time instead of caching a stale startup value while the Configuration probe uses the current saved value
 - fixed Splunk handoff URL resolution so explicit `SPLUNK_WEB_URL` overrides are honored correctly instead of being dropped by the env-file parser path
 - hardened `Open In Splunk` and clickable evidence-row drilldown across different A.G.E.N.T. Smith hosts by probing more than one candidate Splunk Web URL when no explicit override is configured
+- added deterministic Splunk Web auto-detection that derives the host from Splunk MCP/base settings and probes `https://HOST:8000` first, then `http://HOST:8000`
+- persisted auto-detected `SPLUNK_WEB_URL` during runtime configuration saves so Splunk handoff behavior stays stable after first successful detection
+- surfaced Splunk Web handoff validation explicitly in Configuration so operators can see whether `Open In Splunk` will render before leaving the page

@@ -150,24 +150,15 @@ class SplunkLinkResolutionTests(unittest.TestCase):
             "https://splunk-web.example.local:9443/en-US/app/search/search",
         )
 
-    def test_probe_can_use_same_port_when_base_is_not_management_8089(self) -> None:
+    def test_auto_detect_prefers_https_then_http_on_same_host(self) -> None:
         wus.write_env_file(
             {
-                "SPLUNK_BASE_URL": "https://splunk-web.example.local:8443",
+                "SPLUNK_BASE_URL": "https://splunk-web.example.local:8089",
             },
             wus.UI_ENV_PATH,
         )
 
         requested: list[str] = []
-
-        def fake_probe(candidate: str) -> bool:
-            requested.append(candidate)
-            return candidate == "https://splunk-web.example.local:8443"
-
-        original = getattr(wus, "_splunk_search_url_base")
-        # Rebind the nested probe behavior by patching urllib opener indirectly is overkill here;
-        # instead, patch the function body dependency through a local wrapper.
-        # We emulate the current behavior with a temporary monkeypatch on urllib.
         orig_urlopen = wus.urllib.request.urlopen
 
         class _FakeResponse:
@@ -180,10 +171,9 @@ class SplunkLinkResolutionTests(unittest.TestCase):
                 return False
 
         def fake_urlopen(req, timeout=0, context=None):
-            url = req.full_url
-            candidate = url.removesuffix("/en-US/account/login")
+            candidate = req.full_url.removesuffix("/en-US/account/login")
             requested.append(candidate)
-            if fake_probe(candidate):
+            if candidate == "http://splunk-web.example.local:8000":
                 return _FakeResponse()
             raise OSError("unreachable")
 
@@ -191,11 +181,36 @@ class SplunkLinkResolutionTests(unittest.TestCase):
             wus.urllib.request.urlopen = fake_urlopen
             self.assertEqual(
                 wus._splunk_search_url_base(),
-                "https://splunk-web.example.local:8443/en-US/app/search/search",
+                "http://splunk-web.example.local:8000/en-US/app/search/search",
             )
         finally:
             wus.urllib.request.urlopen = orig_urlopen
-        self.assertIn("https://splunk-web.example.local:8443", requested)
+        self.assertEqual(
+            requested[:2],
+            [
+                "https://splunk-web.example.local:8000",
+                "http://splunk-web.example.local:8000",
+            ],
+        )
+
+    def test_auto_detect_uses_mcp_host_when_base_missing(self) -> None:
+        detected = wus._auto_detect_splunk_web_url(
+            {
+                "SPLUNK_MCP_URL": "https://splunk-mcp.example.local:8089/services/mcp",
+            }
+        )
+        self.assertEqual(detected, "")
+        orig_probe = wus._probe_splunk_web_candidate
+        try:
+            wus._probe_splunk_web_candidate = lambda candidate: candidate == "https://splunk-mcp.example.local:8000"
+            detected = wus._auto_detect_splunk_web_url(
+                {
+                    "SPLUNK_MCP_URL": "https://splunk-mcp.example.local:8089/services/mcp",
+                }
+            )
+        finally:
+            wus._probe_splunk_web_candidate = orig_probe
+        self.assertEqual(detected, "https://splunk-mcp.example.local:8000")
 
 
 if __name__ == "__main__":
