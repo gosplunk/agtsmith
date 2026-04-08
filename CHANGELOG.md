@@ -77,7 +77,7 @@
 - fixed SPL asset repository approval and rejection so actions resolve correctly against persisted records
 - hardened analyst-facing output so even when the final-summary model falls back, the UI still shows intent-aware, evidence-aware current assessments instead of a generic execution stub
 
-## v1.3.2
+## v1.3.3
 
 - fixed `/api/ask` so optional post-run enrichment and case persistence can no longer turn a successful investigation into an HTTP 500 failure after the result already exists
 - added surfaced multi-model summary diagnostics for fallback behavior: `summary_fallback_used`, `summary_error`, and `summary_quality_reason`
