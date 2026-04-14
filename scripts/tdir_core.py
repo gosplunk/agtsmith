@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from investigation_playbooks import playbook_recommended_pivots
+
 
 def _to_int(value: Any, default: int = 0) -> int:
     try:
@@ -124,53 +126,7 @@ def _hypothesis(question: str, intent: str, rows_returned: int, entities: dict[s
 
 
 def _recommended_pivots(intent: str, entities: dict[str, list[str]]) -> list[str]:
-    intent_l = _normalize_intent(intent)
-    pivots: list[str] = []
-    if intent_l in {
-        "failed_login_activity",
-        "linux_auth_failures",
-        "windows_auth_failures",
-        "linux_privilege_escalation",
-        "linux_privilege_escalation_first_seen",
-    }:
-        pivots.extend(
-            [
-                "Pivot by host to identify concentration of auth failures.",
-                "Pivot by source IP over narrower 1h windows to detect attack bursts.",
-                "Pivot by username across sourcetypes for credential misuse patterns.",
-            ]
-        )
-    if intent_l == "linux_privilege_escalation_first_seen":
-        pivots = [
-            "Pivot by host to validate whether the first-seen sudo/su activity is expected admin behavior.",
-            "Pivot by username over the prior 30d to determine if the escalation pattern is genuinely new.",
-            "Pivot by source IP or rhost to distinguish local admin activity from remote access.",
-        ]
-    elif intent_l in {"apache_access_top_ips", "apache_404_spike", "apache_suspicious_user_agents"}:
-        pivots.extend(
-            [
-                "Pivot by client IP and user-agent pair across time windows.",
-                "Pivot 404-heavy paths to detect web enumeration behavior.",
-                "Pivot suspicious user-agents against Linux auth failures for correlation.",
-            ]
-        )
-    else:
-        pivots.extend(
-            [
-                "Pivot to index inventory for broader visibility.",
-                "Pivot to sourcetype metadata before deeper search refinement.",
-            ]
-        )
-
-    if entities.get("hosts"):
-        pivots.append(f"Priority host pivot: {entities['hosts'][0]}")
-    if entities.get("users"):
-        pivots.append(f"Priority user pivot: {entities['users'][0]}")
-    if entities.get("client_ips"):
-        pivots.append(f"Priority client IP pivot: {entities['client_ips'][0]}")
-    if entities.get("source_ips"):
-        pivots.append(f"Priority source IP pivot: {entities['source_ips'][0]}")
-    return pivots[:6]
+    return playbook_recommended_pivots(intent, entities)
 
 
 def build_tdir_case(

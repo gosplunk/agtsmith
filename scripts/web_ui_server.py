@@ -40,6 +40,9 @@ from local_learning import (
 )
 from minimal_question_to_answer import (
     map_question_to_template,
+    run_splunk_get_indexes,
+    run_splunk_get_info,
+    run_splunk_get_metadata,
     run_splunk_query_args,
     summarize_with_ollama_model,
     template_to_query_args,
@@ -52,7 +55,8 @@ from ollama_log_stream import (
     redact_secrets,
     role_allowed,
 )
-from environment_profile import suggest_domains_for_question
+from environment_profile import load_environment_profile, suggest_domains_for_question
+from investigation_playbooks import playbook_for_intent, playbook_target_order, playbook_targets_for_intent
 from runtime_config import (
     DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER,
     DEFAULT_MODEL_EVIDENCE_REVIEWER,
@@ -111,6 +115,10 @@ SESSION_TTL_SECONDS = 8 * 60 * 60
 SESSIONS: dict[str, dict[str, Any]] = {}
 SESSIONS_LOCK = threading.Lock()
 ALLOWED_APP_ROLES = {"admin", "ops", "analyst"}
+MCP_CHAT_MODE_LIVE = "live"
+MCP_CHAT_MODE_DEMO = "demo"
+MCP_CHAT_PIPELINE_ASSISTED = "assisted"
+MCP_CHAT_PIPELINE_DETERMINISTIC = "deterministic"
 EXPECTED_MODEL_KEYS = [
     "OLLAMA_MODEL_QUERY_PLANNER",
     "OLLAMA_MODEL_QUERY_WRITER",
@@ -599,37 +607,84 @@ def _extract_case_entities(rows: list[dict[str, Any]], result_body: dict[str, An
     entities: dict[str, list[str]] = {
         "hosts": [],
         "users": [],
+        "principals": [],
         "source_ips": [],
         "client_ips": [],
+        "destination_ips": [],
         "ports": [],
         "event_names": [],
         "services": [],
         "uri_paths": [],
+        "sites": [],
         "user_agents": [],
+        "process_images": [],
+        "paths": [],
+        "commands": [],
+        "dns_queries": [],
+        "query_results": [],
+        "actions": [],
+        "statuses": [],
+        "applications": [],
+        "operations": [],
+        "workloads": [],
+        "reply_codes": [],
+        "transports": [],
     }
     for row in rows:
         if not isinstance(row, dict):
             continue
-        entities["hosts"].append(_first_present(row, ("host", "Computer")))
-        entities["users"].append(_first_present(row, ("user", "user_name", "TargetUserName", "SubjectUserName", "Account_Name", "Caller_User_Name", "actor")))
-        entities["source_ips"].append(_first_present(row, ("src_ip", "Source_Network_Address", "IpAddress", "sourceIPAddress", "source_ip")))
+        entities["hosts"].append(_first_present(row, ("host", "Computer", "hostIdentifier")))
+        entities["users"].append(_first_present(row, ("user", "user_name", "TargetUserName", "SubjectUserName", "Account_Name", "Caller_User_Name", "actor", "UserId", "userPrincipalName")))
+        entities["principals"].append(_first_present(row, ("principal", "userPrincipalName", "UserId")))
+        entities["source_ips"].append(_first_present(row, ("src_ip", "Source_Network_Address", "IpAddress", "sourceIPAddress", "source_ip", "ClientIP", "ipAddress")))
         entities["client_ips"].append(_first_present(row, ("clientip", "src", "src_ip")))
+        entities["destination_ips"].append(_first_present(row, ("DestinationIp", "dest_ip", "dest", "destination_ip", "QueryResults")))
         entities["ports"].append(_first_present(row, ("port", "auth_port", "DestinationPort", "dest_port")))
         entities["event_names"].append(_first_present(row, ("eventName", "EventCode", "EventID")))
         entities["services"].append(_first_present(row, ("service", "eventSource")))
         entities["uri_paths"].append(_first_present(row, ("uri_path", "uri", "url", "file")))
+        entities["sites"].append(_first_present(row, ("site", "uri_path", "uri", "url")))
         entities["user_agents"].append(_first_present(row, ("useragent", "http_user_agent")))
+        entities["process_images"].append(_first_present(row, ("Image", "process_name", "ProcessName")))
+        entities["paths"].append(_first_present(row, ("path", "file", "Image", "ProcessName")))
+        entities["commands"].append(_first_present(row, ("cmdline", "command", "CommandLine")))
+        entities["dns_queries"].append(_first_present(row, ("QueryName", "query", "query_name")))
+        entities["query_results"].append(_first_present(row, ("QueryResults", "query_results")))
+        entities["actions"].append(_first_present(row, ("action",)))
+        entities["statuses"].append(_first_present(row, ("status", "loginStatus", "error_state")))
+        entities["applications"].append(_first_present(row, ("appDisplayName",)))
+        entities["operations"].append(_first_present(row, ("Operation", "eventName", "http_method")))
+        entities["workloads"].append(_first_present(row, ("Workload",)))
+        entities["reply_codes"].append(_first_present(row, ("reply_code",)))
+        entities["transports"].append(_first_present(row, ("transport", "Protocol")))
     return {key: _ordered_unique(values)[:5] for key, values in entities.items()}
 
 
 def _rank_entity_values(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     field_map: dict[str, tuple[str, ...]] = {
-        "hosts": ("host", "Computer"),
-        "users": ("user", "user_name", "TargetUserName", "SubjectUserName", "Account_Name", "Caller_User_Name", "actor"),
-        "source_ips": ("src_ip", "Source_Network_Address", "IpAddress", "sourceIPAddress", "source_ip"),
+        "hosts": ("host", "Computer", "hostIdentifier"),
+        "users": ("user", "user_name", "TargetUserName", "SubjectUserName", "Account_Name", "Caller_User_Name", "actor", "UserId", "userPrincipalName"),
+        "principals": ("principal", "userPrincipalName", "UserId"),
+        "source_ips": ("src_ip", "Source_Network_Address", "IpAddress", "sourceIPAddress", "source_ip", "ClientIP", "ipAddress"),
         "client_ips": ("clientip", "src", "src_ip"),
+        "destination_ips": ("DestinationIp", "dest_ip", "dest", "destination_ip", "QueryResults"),
         "event_names": ("eventName", "EventCode", "EventID"),
         "services": ("service", "eventSource"),
+        "sites": ("site", "uri_path", "uri", "url"),
+        "process_images": ("Image", "process_name", "ProcessName"),
+        "paths": ("path", "file", "Image", "ProcessName"),
+        "commands": ("cmdline", "command", "CommandLine"),
+        "dns_queries": ("QueryName", "query", "query_name"),
+        "query_results": ("QueryResults", "query_results"),
+        "uri_paths": ("uri_path", "uri", "url", "file"),
+        "user_agents": ("useragent", "http_user_agent"),
+        "actions": ("action",),
+        "statuses": ("status", "loginStatus", "error_state"),
+        "applications": ("appDisplayName",),
+        "operations": ("Operation", "eventName", "http_method"),
+        "workloads": ("Workload",),
+        "reply_codes": ("reply_code",),
+        "transports": ("transport", "Protocol"),
     }
     ranked: dict[str, list[dict[str, Any]]] = {}
     for bucket, keys in field_map.items():
@@ -654,7 +709,47 @@ def _classify_pivot_seed(text: str) -> dict[str, str]:
     target_type = "derived_field"
     target_label = "Derived field"
     pivot_kind = "generic_followup"
-    if "source ip" in lower:
+    if "dns" in lower or "domain" in lower or "queryname" in lower or "query name" in lower:
+        target_type = "dns_query"
+        target_label = "DNS Query"
+        pivot_kind = "dns_query_drilldown"
+    elif "principal" in lower:
+        target_type = "principal"
+        target_label = "Principal"
+        pivot_kind = "principal_followup"
+    elif "application" in lower or "app " in lower:
+        target_type = "application"
+        target_label = "Application"
+        pivot_kind = "application_followup"
+    elif "operation" in lower:
+        target_type = "operation"
+        target_label = "Operation"
+        pivot_kind = "operation_followup"
+    elif "workload" in lower or "service" in lower:
+        target_type = "workload"
+        target_label = "Workload"
+        pivot_kind = "workload_followup"
+    elif "site" in lower or "url" in lower or "uri" in lower:
+        target_type = "site"
+        target_label = "Site"
+        pivot_kind = "site_followup"
+    elif "status" in lower or "reply code" in lower:
+        target_type = "status"
+        target_label = "Status"
+        pivot_kind = "status_followup"
+    elif "action" in lower:
+        target_type = "action"
+        target_label = "Action"
+        pivot_kind = "action_followup"
+    elif "image" in lower or "process" in lower:
+        target_type = "process_image"
+        target_label = "Process Image"
+        pivot_kind = "process_image_drilldown"
+    elif "destination ip" in lower or "dest ip" in lower:
+        target_type = "destination_ip"
+        target_label = "Destination IP"
+        pivot_kind = "destination_ip_drilldown"
+    elif "source ip" in lower:
         target_type = "source_ip"
         target_label = "Source IP"
         pivot_kind = "same_source_ip_followup"
@@ -703,6 +798,182 @@ def _base_time_range(result_body: dict[str, Any], query_args: dict[str, Any]) ->
     return earliest, latest
 
 
+def _pivot_base_query(base_query_args: dict[str, Any]) -> str:
+    query = str(base_query_args.get("query", "")).strip()
+    if not query:
+        return ""
+    return re.sub(r"\|\s*head\s+\d+\s*$", "", query, flags=re.IGNORECASE).strip()
+
+
+PIVOT_TARGET_BUCKETS: dict[str, tuple[str, ...]] = {
+    "source_ip": ("source_ips", "client_ips"),
+    "destination_ip": ("destination_ips", "query_results"),
+    "username": ("users", "principals"),
+    "principal": ("principals", "users"),
+    "host": ("hosts",),
+    "dns_query": ("dns_queries",),
+    "process_image": ("process_images", "paths"),
+    "event_name": ("event_names", "operations"),
+    "service": ("services", "workloads"),
+    "site": ("sites", "uri_paths"),
+    "user_agent": ("user_agents",),
+    "action": ("actions",),
+    "status": ("statuses", "reply_codes"),
+    "application": ("applications",),
+    "operation": ("operations", "event_names"),
+    "workload": ("workloads", "services"),
+    "reply_code": ("reply_codes", "statuses"),
+    "transport": ("transports",),
+    "path": ("paths", "process_images"),
+    "command": ("commands",),
+    "derived_field": ("dns_queries", "process_images", "principals", "sites", "hosts", "users", "source_ips"),
+}
+
+
+DEMO_INTENT_PIVOT_SPECS: dict[str, tuple[tuple[str, str, str, str], ...]] = {
+    "windows_sysmon_dns_activity": (
+        ("Pivot on the top DNS query names from this evidence.", "dns_query", "DNS Query", "dns_query_drilldown"),
+        ("Pivot on the process images that generated these DNS queries.", "process_image", "Process Image", "process_image_drilldown"),
+        ("Pivot on the hosts that generated these DNS queries.", "host", "Host", "host_followup"),
+    ),
+    "windows_sysmon_network_activity": (
+        ("Pivot on the top destination IPs from this network evidence.", "destination_ip", "Destination IP", "destination_ip_drilldown"),
+        ("Pivot on the process images that opened these network connections.", "process_image", "Process Image", "process_image_drilldown"),
+        ("Pivot on the hosts that opened these network connections.", "host", "Host", "host_followup"),
+    ),
+    "aws_cloudtrail_activity": (
+        ("Pivot on the principals responsible for these API events.", "principal", "Principal", "principal_followup"),
+        ("Pivot on the source IPs responsible for these API events.", "source_ip", "Source IP", "same_source_ip_followup"),
+        ("Pivot on the AWS services targeted by these API events.", "service", "Service", "service_followup"),
+    ),
+    "cisco_asa_network_flows": (
+        ("Pivot on the top source IPs from these firewall flows.", "source_ip", "Source IP", "same_source_ip_followup"),
+        ("Pivot on the top destination IPs from these firewall flows.", "destination_ip", "Destination IP", "destination_ip_drilldown"),
+        ("Pivot on the firewall actions observed in these flows.", "action", "Action", "action_followup"),
+    ),
+    "stream_http_activity": (
+        ("Pivot on the destination sites from this HTTP activity.", "site", "Site", "site_followup"),
+        ("Pivot on the source IPs that generated this HTTP activity.", "source_ip", "Source IP", "same_source_ip_followup"),
+        ("Pivot on the HTTP status values observed in this activity.", "status", "Status", "status_followup"),
+    ),
+    "osquery_process_activity": (
+        ("Pivot on the executable paths from this osquery process activity.", "path", "Executable Path", "path_followup"),
+        ("Pivot on the hosts from this osquery process activity.", "host", "Host", "host_followup"),
+        ("Pivot on the actions from this osquery process activity.", "action", "Action", "action_followup"),
+    ),
+    "aws_vpc_flow_activity": (
+        ("Pivot on the top source IPs from these VPC flows.", "source_ip", "Source IP", "same_source_ip_followup"),
+        ("Pivot on the top destination IPs from these VPC flows.", "destination_ip", "Destination IP", "destination_ip_drilldown"),
+        ("Pivot on the VPC flow actions observed in this evidence.", "action", "Action", "action_followup"),
+    ),
+    "aad_signin_activity": (
+        ("Pivot on the Azure AD principals from these sign-ins.", "principal", "Principal", "principal_followup"),
+        ("Pivot on the source IPs from these sign-ins.", "source_ip", "Source IP", "same_source_ip_followup"),
+        ("Pivot on the Azure AD applications targeted by these sign-ins.", "application", "Application", "application_followup"),
+    ),
+    "stream_dns_activity": (
+        ("Pivot on the DNS query names from this stream evidence.", "dns_query", "DNS Query", "dns_query_drilldown"),
+        ("Pivot on the source IPs that generated these DNS queries.", "source_ip", "Source IP", "same_source_ip_followup"),
+        ("Pivot on the DNS reply codes observed in this evidence.", "reply_code", "Reply Code", "reply_code_followup"),
+    ),
+    "o365_management_activity": (
+        ("Pivot on the Office 365 users from this management activity.", "principal", "User", "principal_followup"),
+        ("Pivot on the Office 365 operations from this management activity.", "operation", "Operation", "operation_followup"),
+        ("Pivot on the Office 365 workloads from this management activity.", "workload", "Workload", "workload_followup"),
+    ),
+    "apache_access_top_ips": (
+        ("Pivot on the top client IPs from this HTTP evidence.", "source_ip", "Client IP", "same_source_ip_followup"),
+        ("Pivot on the destination sites and paths from this HTTP evidence.", "site", "Site", "site_followup"),
+        ("Pivot on the user agents from this HTTP evidence.", "user_agent", "User Agent", "user_agent_followup"),
+    ),
+}
+
+
+PIVOT_FILTER_FIELDS: dict[str, tuple[str, ...]] = {
+    "source_ip": ("src_ip", "Source_Network_Address", "IpAddress", "sourceIPAddress", "source_ip", "ClientIP", "ipAddress", "clientip"),
+    "destination_ip": ("DestinationIp", "dest_ip", "dest", "destination_ip", "QueryResults", "dest_ip"),
+    "username": ("user", "user_name", "TargetUserName", "SubjectUserName", "Account_Name", "Caller_User_Name", "actor", "UserId", "userPrincipalName"),
+    "principal": ("principal", "userPrincipalName", "UserId", "user", "user_name"),
+    "host": ("host", "Computer", "hostIdentifier"),
+    "dns_query": ("QueryName", "query", "query_name"),
+    "event_name": ("eventName", "Operation", "http_method"),
+    "service": ("service", "eventSource", "Workload"),
+    "site": ("site", "uri_path", "uri", "url", "file"),
+    "user_agent": ("useragent", "http_user_agent", "userAgent"),
+    "action": ("action",),
+    "status": ("status", "loginStatus", "error_state"),
+    "application": ("appDisplayName",),
+    "operation": ("Operation", "eventName", "http_method"),
+    "workload": ("Workload", "eventSource"),
+    "reply_code": ("reply_code",),
+    "transport": ("transport", "Protocol"),
+    "path": ("path", "file", "Image", "ProcessName"),
+    "command": ("cmdline", "command", "CommandLine"),
+}
+
+
+def _pivot_target_values(
+    target_type: str,
+    *,
+    ranked_entities: dict[str, list[dict[str, Any]]],
+    entities: dict[str, list[str]],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    bucket_order = PIVOT_TARGET_BUCKETS.get(target_type, ("hosts", "users", "source_ips"))
+    for bucket in bucket_order:
+        ranked_bucket = [item for item in ranked_entities.get(bucket, []) if str(item.get("value", "")).strip()]
+        if ranked_bucket:
+            return [str(item.get("value", "")).strip() for item in ranked_bucket[:3]], ranked_bucket[:3]
+        fallback = [str(item).strip() for item in entities.get(bucket, []) if str(item).strip()]
+        if fallback:
+            return fallback[:3], []
+    return [], []
+
+
+def _evidence_first_pivot_specs(base_intent: str, entities: dict[str, list[str]]) -> list[dict[str, str]]:
+    specs: list[dict[str, str]] = []
+    for item in playbook_targets_for_intent(base_intent):
+        title = str(item.get("title", "")).strip()
+        target_type = str(item.get("target_type", "")).strip()
+        target_label = str(item.get("target_label", "")).strip()
+        pivot_kind = str(item.get("pivot_kind", "")).strip()
+        if not title or not target_type or not target_label or not pivot_kind:
+            continue
+        bucket_names = PIVOT_TARGET_BUCKETS.get(target_type, ())
+        if bucket_names and not any(entities.get(bucket) for bucket in bucket_names):
+            continue
+        specs.append({"title": title, "target_type": target_type, "target_label": target_label, "pivot_kind": pivot_kind})
+    return specs
+
+
+def _build_field_filter_expr(field_names: tuple[str, ...], values: list[str]) -> str:
+    clauses: list[str] = []
+    for field_name in field_names:
+        clauses.extend(
+            f'{field_name}="{str(value).replace(chr(34), "\\\"")}"'
+            for value in values[:5]
+            if str(value).strip()
+        )
+    return " OR ".join(clauses)
+
+
+def _looks_like_ip_value(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", text):
+        return True
+    if ":" in text and re.fullmatch(r"[0-9A-Fa-f:]+", text):
+        return True
+    return False
+
+
+def _looks_like_named_site_value(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text or _looks_like_ip_value(text):
+        return False
+    return bool(re.search(r"[A-Za-z]", text))
+
+
 def _build_deterministic_pivot_query_args(
     *,
     base_intent: str,
@@ -716,6 +987,7 @@ def _build_deterministic_pivot_query_args(
     if not values:
         return None
     earliest, latest = _base_time_range({}, base_query_args)
+    base_query = _pivot_base_query(base_query_args)
     host_filters = entities.get("hosts", [])
     host_clause = ""
     if host_filters:
@@ -776,6 +1048,23 @@ def _build_deterministic_pivot_query_args(
                 query += f"| search {search_clause} "
             query += "| table _time host actor target_user sourcetype _raw | head 50"
             return {"query": query, "earliest_time": earliest, "latest_time": latest, "row_limit": 50}
+    if base_query:
+        if target_type == "process_image" or pivot_kind == "process_image_drilldown":
+            basenames = []
+            for value in values[:5]:
+                text = str(value).strip().replace("&lt;", "<").replace("&gt;", ">")
+                basename = text.replace("\\", "/").rsplit("/", 1)[-1].strip()
+                if basename:
+                    basenames.append(re.escape(basename))
+            if basenames:
+                regex = "(?i)(^|\\\\\\\\|/)(" + "|".join(_ordered_unique(basenames)) + ")$"
+                query = f'{base_query} | eval _pivot_image=coalesce(Image,process_name,ProcessName) | where match(_pivot_image, "{regex}") | fields - _pivot_image | head 50'
+                return {"query": query, "earliest_time": earliest, "latest_time": latest, "row_limit": 50}
+        filter_fields = PIVOT_FILTER_FIELDS.get(target_type, ())
+        filter_expr = _build_field_filter_expr(filter_fields, values) if filter_fields else ""
+        if filter_expr:
+            query = f"{base_query} | search ({filter_expr}) | head 50"
+            return {"query": query, "earliest_time": earliest, "latest_time": latest, "row_limit": 50}
     if base_intent == "apache_access_top_ips" and target_type in {"source_ip", "host", "derived_field"}:
         ip_values = values or entities.get("client_ips", [])
         if ip_values:
@@ -800,13 +1089,208 @@ def _build_deterministic_pivot_query_args(
     return None
 
 
-def _build_structured_pivot_context(result_body: dict[str, Any], sample_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _pivot_signature_from_candidate(candidate: dict[str, Any]) -> str:
+    target_type = str(candidate.get("target_type", "")).strip().lower()
+    pivot_kind = str(candidate.get("pivot_kind", "")).strip().lower()
+    values = candidate.get("target_values", [])
+    normalized_values = sorted(
+        {
+            str(value or "").strip().lower()
+            for value in values
+            if str(value or "").strip()
+        }
+    )[:5] if isinstance(values, list) else []
+    values_key = "|".join(normalized_values) if normalized_values else "*"
+    return f"{target_type}|{pivot_kind}|{values_key}"
+
+
+def _pivot_semantic_key(candidate: dict[str, Any]) -> str:
+    target_type = str(candidate.get("target_type", "")).strip().lower()
+    values = candidate.get("target_values", [])
+    normalized_values = sorted(
+        {
+            str(value or "").strip().lower()
+            for value in values
+            if str(value or "").strip()
+        }
+    )[:5] if isinstance(values, list) else []
+    values_key = "|".join(normalized_values) if normalized_values else "*"
+    return f"{target_type}|{values_key}"
+
+
+def _extract_graph_pivot_history(previous_graph_state: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(previous_graph_state, dict):
+        return []
+    raw = previous_graph_state.get("pivot_history", [])
+    if not isinstance(raw, list):
+        return []
+    history: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        target_values = item.get("target_values", [])
+        normalized = {
+            "title": str(item.get("title", "")).strip(),
+            "target_type": str(item.get("target_type", "")).strip(),
+            "target_label": str(item.get("target_label", "")).strip(),
+            "target_values": [str(value).strip() for value in target_values if str(value).strip()] if isinstance(target_values, list) else [],
+            "pivot_kind": str(item.get("pivot_kind", "")).strip(),
+            "question": str(item.get("question", "")).strip(),
+            "node_type": str(item.get("node_type", "")).strip() or "pivot",
+        }
+        normalized["signature"] = str(item.get("signature", "")).strip() or _pivot_signature_from_candidate(normalized)
+        if normalized["target_type"] or normalized["signature"]:
+            history.append(normalized)
+    return history
+
+
+def _merge_pivot_history(previous_graph_state: dict[str, Any] | None, result_body: dict[str, Any], *, question: str = "", node_type: str = "investigation") -> list[dict[str, Any]]:
+    history = _extract_graph_pivot_history(previous_graph_state)
+    pivot_source = result_body.get("pivot_source", {}) if isinstance(result_body.get("pivot_source"), dict) else {}
+    candidate = pivot_source.get("candidate", {}) if isinstance(pivot_source.get("candidate"), dict) else {}
+    if not candidate:
+        return history
+    target_values = candidate.get("target_values", [])
+    entry = {
+        "title": str(candidate.get("title") or candidate.get("next_question") or "").strip(),
+        "target_type": str(candidate.get("target_type", "")).strip(),
+        "target_label": str(candidate.get("target_label", "")).strip(),
+        "target_values": [str(value).strip() for value in target_values if str(value).strip()] if isinstance(target_values, list) else [],
+        "pivot_kind": str(candidate.get("pivot_kind", "")).strip(),
+        "question": str(question or result_body.get("active_question") or result_body.get("question") or "").strip(),
+        "node_type": str(node_type or "pivot"),
+    }
+    entry["signature"] = _pivot_signature_from_candidate(entry)
+    if entry["signature"] and entry["signature"] not in {str(item.get("signature", "")).strip() for item in history}:
+        history.append(entry)
+    return history
+
+
+def _playbook_stage_summary(base_intent: str, history: list[dict[str, Any]]) -> tuple[list[str], str]:
+    target_order = playbook_target_order(base_intent)
+    used_types = _ordered_unique(
+        [str(item.get("target_type", "")).strip() for item in history if str(item.get("target_type", "")).strip()]
+    )
+    next_expected = next((target for target in target_order if target not in used_types), "")
+    if next_expected:
+        return used_types, f"next:{next_expected}"
+    if used_types:
+        return used_types, "complete"
+    return used_types, "root"
+
+
+def _score_structured_pivot_candidate(
+    candidate: dict[str, Any],
+    *,
+    base_intent: str,
+    playbook: dict[str, Any],
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    target_type = str(candidate.get("target_type", "")).strip()
+    pivot_kind = str(candidate.get("pivot_kind", "")).strip()
+    target_values = [str(value).strip() for value in candidate.get("target_values", []) if str(value).strip()] if isinstance(candidate.get("target_values"), list) else []
+    signature = _pivot_signature_from_candidate(candidate)
+    order = playbook_target_order(base_intent)
+    used_types, stage = _playbook_stage_summary(base_intent, history)
+    next_expected = stage.split(":", 1)[1] if stage.startswith("next:") else ""
+    type_counts: dict[str, int] = defaultdict(int)
+    prior_values_by_type: dict[str, set[str]] = defaultdict(set)
+    prior_signatures: set[str] = set()
+    for item in history:
+        item_type = str(item.get("target_type", "")).strip()
+        item_signature = str(item.get("signature", "")).strip()
+        if item_type:
+            type_counts[item_type] += 1
+        if item_signature:
+            prior_signatures.add(item_signature)
+        item_values = item.get("target_values", [])
+        if item_type and isinstance(item_values, list):
+            for value in item_values:
+                text = str(value).strip().lower()
+                if text:
+                    prior_values_by_type[item_type].add(text)
+    exact_duplicate = bool(signature and signature in prior_signatures)
+    overlap_values = [value for value in target_values if value.lower() in prior_values_by_type.get(target_type, set())]
+    repeat_only = bool(target_values) and len(overlap_values) == len(target_values)
+    last_target_type = str(history[-1].get("target_type", "")).strip() if history else ""
+
+    score = 0.0
+    reasons: list[str] = []
+    if exact_duplicate:
+        score -= 100.0
+        reasons.append("exact history duplicate")
+    if str(candidate.get("execution_mode", "")).strip() == "deterministic_query":
+        score += 18.0
+        reasons.append("deterministic query")
+    else:
+        score += 8.0
+    if target_type in order:
+        order_idx = order.index(target_type)
+        score += max(4.0, 28.0 - float(order_idx * 5))
+    else:
+        score += 2.0
+    if next_expected and target_type == next_expected:
+        score += 30.0
+        reasons.append("advances playbook")
+    elif target_type not in used_types:
+        score += 16.0
+        reasons.append("new evidence dimension")
+    else:
+        score -= float(10 * type_counts.get(target_type, 0))
+        reasons.append("reuses prior dimension")
+    if last_target_type and target_type == last_target_type:
+        score -= 18.0
+        reasons.append("same as prior step")
+    if overlap_values:
+        score -= float(8 * len(overlap_values))
+        reasons.append("reuses prior values")
+    target_rankings = candidate.get("target_rankings", [])
+    if isinstance(target_rankings, list) and target_rankings:
+        top_count = int(target_rankings[0].get("count") or 0) if isinstance(target_rankings[0], dict) else 0
+        if top_count > 0:
+            score += min(14.0, float(top_count))
+    if target_values:
+        score += 4.0
+    return {
+        "score": round(score, 2),
+        "reasons": reasons[:4],
+        "signature": signature,
+        "exact_duplicate": exact_duplicate,
+        "repeat_only": repeat_only,
+        "stage": stage,
+        "playbook_id": str(playbook.get("id", "")).strip(),
+    }
+
+
+def _build_structured_pivot_context(
+    result_body: dict[str, Any],
+    sample_rows: list[dict[str, Any]],
+    *,
+    prior_graph_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     base_query_args = result_body.get("query_args", {}) if isinstance(result_body.get("query_args"), dict) else {}
     base_query = str(base_query_args.get("query", "")).strip()
     base_intent = str(result_body.get("intent", "")).strip()
     root_question = str(result_body.get("root_question") or result_body.get("question") or "").strip()
+    pivot_source = result_body.get("pivot_source", {}) if isinstance(result_body.get("pivot_source"), dict) else {}
+    prior_candidate = pivot_source.get("candidate", {}) if isinstance(pivot_source.get("candidate"), dict) else {}
+    prior_target_type = str(prior_candidate.get("target_type", "")).strip()
+    prior_target_values = (
+        {str(value).strip() for value in prior_candidate.get("target_values", []) if str(value).strip()}
+        if isinstance(prior_candidate.get("target_values"), list)
+        else set()
+    )
+    prior_query = str((prior_candidate.get("query_args") or {}).get("query", "")).strip() if isinstance(prior_candidate.get("query_args"), dict) else ""
     entities = _extract_case_entities(sample_rows, result_body)
     ranked_entities = _rank_entity_values(sample_rows)
+    playbook = playbook_for_intent(base_intent)
+    history = _merge_pivot_history(
+        prior_graph_state,
+        result_body,
+        question=str(result_body.get("active_question") or result_body.get("question") or root_question).strip(),
+        node_type="pivot" if prior_candidate else "investigation",
+    )
+    used_target_types, playbook_stage = _playbook_stage_summary(base_intent, history)
     if result_body.get("supported") is False:
         return {
             "root_question": root_question,
@@ -819,6 +1303,15 @@ def _build_structured_pivot_context(result_body: dict[str, Any], sample_rows: li
             },
             "entities": entities,
             "ranked_entities": ranked_entities,
+            "playbook": {
+                "id": str(playbook.get("id", "")).strip(),
+                "name": str(playbook.get("name", "")).strip(),
+                "description": str(playbook.get("description", "")).strip(),
+                "target_order": list(playbook_target_order(base_intent)),
+                "used_target_types": used_target_types,
+                "stage": playbook_stage,
+            },
+            "history_depth": len(history),
             "pivot_candidates": [],
         }
     raw_pivots = []
@@ -829,32 +1322,39 @@ def _build_structured_pivot_context(result_body: dict[str, Any], sample_rows: li
         if text:
             raw_pivots.append(text)
     candidates: list[dict[str, Any]] = []
-    for index, text in enumerate(_ordered_unique(raw_pivots)[:6]):
-        seed = _classify_pivot_seed(text)
-        target_values: list[str] = []
-        ranked_bucket: list[dict[str, Any]] = []
-        if seed["target_type"] == "source_ip":
-            ranked_bucket = ranked_entities.get("source_ips") or ranked_entities.get("client_ips") or []
-            target_values = [item.get("value", "") for item in ranked_bucket if str(item.get("value", "")).strip()]
-            if not target_values:
-                target_values = entities.get("source_ips") or entities.get("client_ips") or []
-        elif seed["target_type"] == "username":
-            ranked_bucket = ranked_entities.get("users") or []
-            target_values = [item.get("value", "") for item in ranked_bucket if str(item.get("value", "")).strip()]
-            if not target_values:
-                target_values = entities.get("users") or []
-        elif seed["target_type"] == "host":
-            ranked_bucket = ranked_entities.get("hosts") or []
-            target_values = [item.get("value", "") for item in ranked_bucket if str(item.get("value", "")).strip()]
-            if not target_values:
-                target_values = entities.get("hosts") or []
-        else:
-            ranked_bucket = ranked_entities.get("users") or ranked_entities.get("hosts") or ranked_entities.get("source_ips") or []
-            target_values = [item.get("value", "") for item in ranked_bucket if str(item.get("value", "")).strip()]
-            if not target_values:
-                target_values = entities.get("users") or entities.get("hosts") or entities.get("source_ips") or []
-        target_values = [str(item).strip() for item in target_values if str(item).strip()][:3]
-        ranked_bucket = [item for item in ranked_bucket if str(item.get("value", "")).strip()][:3]
+    seed_specs = _evidence_first_pivot_specs(base_intent, entities)
+    seen_titles = {str(spec.get("title", "")).strip().lower() for spec in seed_specs}
+    for text in _ordered_unique(raw_pivots):
+        lowered = text.strip().lower()
+        if lowered in seen_titles:
+            continue
+        seed_specs.append(_classify_pivot_seed(text))
+        seen_titles.add(lowered)
+    max_candidates = min(8, len(seed_specs))
+    scored_candidates: list[dict[str, Any]] = []
+    seen_candidate_signatures: set[str] = set()
+    seen_candidate_semantic_keys: set[str] = set()
+    for seed in seed_specs:
+        text = str(seed.get("title", "")).strip()
+        target_values, ranked_bucket = _pivot_target_values(seed["target_type"], ranked_entities=ranked_entities, entities=entities)
+        if seed["target_type"] == "site":
+            named_site_rankings = [item for item in ranked_bucket if _looks_like_named_site_value(item.get("value", ""))]
+            if named_site_rankings:
+                ranked_bucket = named_site_rankings
+                target_values = [str(item.get("value", "")).strip() for item in named_site_rankings if str(item.get("value", "")).strip()][:3]
+        if seed["target_type"] in {"source_ip", "destination_ip"}:
+            ip_rankings = [item for item in ranked_bucket if _looks_like_ip_value(item.get("value", ""))]
+            if ip_rankings:
+                ranked_bucket = ip_rankings
+                target_values = [str(item.get("value", "")).strip() for item in ip_rankings if str(item.get("value", "")).strip()][:3]
+        if prior_target_type and seed["target_type"] == prior_target_type and prior_target_values:
+            filtered_rankings = [item for item in ranked_bucket if str(item.get("value", "")).strip() not in prior_target_values]
+            filtered_values = [str(item.get("value", "")).strip() for item in filtered_rankings if str(item.get("value", "")).strip()][:3]
+            if filtered_values:
+                target_values = filtered_values
+                ranked_bucket = filtered_rankings
+            elif len(seed_specs) > 1:
+                continue
         direct_query_args = _build_deterministic_pivot_query_args(
             base_intent=base_intent,
             pivot_kind=seed["pivot_kind"],
@@ -863,26 +1363,60 @@ def _build_structured_pivot_context(result_body: dict[str, Any], sample_rows: li
             entities=entities,
             base_query_args=base_query_args,
         )
-        candidates.append(
-            {
-                "id": f"pivot_{index+1}_{re.sub(r'[^a-z0-9]+', '_', seed['pivot_kind'].lower()).strip('_') or 'followup'}",
-                "index": index,
-                "title": text,
-                "target_type": seed["target_type"],
-                "target_label": seed["target_label"],
-                "target_values": target_values,
-                "target_rankings": ranked_bucket,
-                "pivot_kind": seed["pivot_kind"],
-                "execution_mode": "deterministic_query" if isinstance(direct_query_args, dict) else "stateful_followup_question",
-                "query_args": direct_query_args,
-                "next_question": _build_stateful_followup_question(text, seed["target_label"], target_values[:3], root_question),
-                "provenance": {
-                    "source": "returned_evidence",
-                    "selection_rule": "top_ranked_values_by_frequency",
-                    "explanation": f"Selected from the highest-frequency {seed['target_label'].lower()} values in the returned evidence rows.",
-                },
-            }
+        direct_query = str((direct_query_args or {}).get("query", "")).strip() if isinstance(direct_query_args, dict) else ""
+        if prior_query and direct_query and direct_query == prior_query and len(seed_specs) > 1:
+            continue
+        candidate = {
+            "id": f"pivot_{len(scored_candidates)+1}_{re.sub(r'[^a-z0-9]+', '_', seed['pivot_kind'].lower()).strip('_') or 'followup'}",
+            "index": len(scored_candidates),
+            "title": text,
+            "target_type": seed["target_type"],
+            "target_label": seed["target_label"],
+            "target_values": target_values,
+            "target_rankings": ranked_bucket,
+            "pivot_kind": seed["pivot_kind"],
+            "execution_mode": "deterministic_query" if isinstance(direct_query_args, dict) else "stateful_followup_question",
+            "query_args": direct_query_args,
+            "next_question": _build_stateful_followup_question(text, seed["target_label"], target_values[:3], root_question),
+            "provenance": {
+                "source": "returned_evidence",
+                "selection_rule": "top_ranked_values_by_frequency",
+                "explanation": f"Selected from the highest-frequency {seed['target_label'].lower()} values in the returned evidence rows.",
+            },
+        }
+        score_meta = _score_structured_pivot_candidate(
+            candidate,
+            base_intent=base_intent,
+            playbook=playbook,
+            history=history,
         )
+        if score_meta["exact_duplicate"]:
+            continue
+        if score_meta["signature"] and score_meta["signature"] in seen_candidate_signatures:
+            continue
+        semantic_key = _pivot_semantic_key(candidate)
+        if semantic_key and semantic_key in seen_candidate_semantic_keys:
+            continue
+        candidate["score"] = score_meta["score"]
+        candidate["score_reasons"] = score_meta["reasons"]
+        candidate["signature"] = score_meta["signature"]
+        candidate["playbook_stage"] = score_meta["stage"]
+        candidate["repeat_only"] = score_meta["repeat_only"]
+        scored_candidates.append(candidate)
+        if score_meta["signature"]:
+            seen_candidate_signatures.add(score_meta["signature"])
+        if semantic_key:
+            seen_candidate_semantic_keys.add(semantic_key)
+        if len(scored_candidates) >= max_candidates:
+            break
+    if any(not bool(item.get("repeat_only")) for item in scored_candidates):
+        scored_candidates = [item for item in scored_candidates if not bool(item.get("repeat_only"))]
+    candidates = sorted(
+        scored_candidates,
+        key=lambda item: (-float(item.get("score", 0.0)), int(item.get("index", 0))),
+    )[:6]
+    for idx, candidate in enumerate(candidates):
+        candidate["index"] = idx
     return {
         "root_question": root_question,
         "base_intent": base_intent,
@@ -894,6 +1428,15 @@ def _build_structured_pivot_context(result_body: dict[str, Any], sample_rows: li
         },
         "entities": entities,
         "ranked_entities": ranked_entities,
+        "playbook": {
+            "id": str(playbook.get("id", "")).strip(),
+            "name": str(playbook.get("name", "")).strip(),
+            "description": str(playbook.get("description", "")).strip(),
+            "target_order": list(playbook_target_order(base_intent)),
+            "used_target_types": used_target_types,
+            "stage": playbook_stage,
+        },
+        "history_depth": len(history),
         "pivot_candidates": candidates,
     }
 
@@ -913,7 +1456,7 @@ def _build_graph_case_state_payload(
     ranked_entities = _rank_entity_values(sample_rows)
     pivot_context = result_body.get("pivot_context", {}) if isinstance(result_body.get("pivot_context"), dict) else {}
     pivot_candidates = pivot_context.get("pivot_candidates", []) if isinstance(pivot_context.get("pivot_candidates"), list) else []
-    return snapshot_graph_case_state(
+    state = snapshot_graph_case_state(
         previous=previous_state,
         question=question,
         result_body=result_body,
@@ -925,6 +1468,16 @@ def _build_graph_case_state_payload(
         ranked_entities=ranked_entities,
         pivot_candidates=pivot_candidates,
     )
+    history = _merge_pivot_history(previous_state, result_body, question=question, node_type=node_type)
+    playbook = playbook_for_intent(str(result_body.get("intent", "")).strip())
+    _, playbook_stage = _playbook_stage_summary(str(result_body.get("intent", "")).strip(), history)
+    state["pivot_history"] = history
+    state["pivot_signatures"] = [str(item.get("signature", "")).strip() for item in history if str(item.get("signature", "")).strip()]
+    state["investigation_depth"] = len(history)
+    state["playbook_id"] = str(playbook.get("id", "")).strip()
+    state["playbook_name"] = str(playbook.get("name", "")).strip()
+    state["playbook_stage"] = playbook_stage
+    return state
 
 
 def _write_pivot_artifact(*, result_body: dict[str, Any], session_id: str, question: str, pivot_candidate: dict[str, Any]) -> str:
@@ -948,6 +1501,33 @@ def _write_pivot_artifact(*, result_body: dict[str, Any], session_id: str, quest
     return str(target.relative_to(PROJECT_ROOT))
 
 
+def _clean_analyst_summary_text(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = cleaned.replace("<think>", "").replace("</think>", "").strip()
+    summary_markers = (
+        "Here's a concise summary",
+        "Here is a concise summary",
+        "Based on the query result",
+        "Summary of the query results",
+    )
+    lower = cleaned.lower()
+    for marker in summary_markers:
+        idx = lower.find(marker.lower())
+        if idx > 0:
+            cleaned = cleaned[idx:].strip()
+            break
+    cleaned = re.sub(
+        r"^(The task is to summarize.*?|First, let's identify.*?|Next, I need to determine.*?|Finally, I need to suggest.*?|Now, I will structure these points.*?)(?:\n\s*\n|$)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    return cleaned
+
+
 def _run_structured_pivot_investigation(
     *,
     question: str,
@@ -967,6 +1547,7 @@ def _run_structured_pivot_investigation(
     total_rows = int(structured.get("total_rows", len(rows) if isinstance(rows, list) else 0) or 0)
     try:
         summary = summarize_with_ollama_model(question, splunk_data, model=DEFAULT_MODEL_FINAL_SUMMARY, think=False)
+        summary = _clean_analyst_summary_text(summary)
     except Exception:
         summary = "Structured pivot executed. Review the returned evidence rows and decide whether a narrower follow-up is warranted."
     selected_values = ", ".join(pivot_candidate.get("target_values", [])[:3]) or "derived values"
@@ -1266,7 +1847,11 @@ def _global_nav(active: str) -> str:
             f'<span class="nav-label">{html.escape(label)}</span>'
             "</a>"
         )
-    return f'<nav class="topnav">{"".join(links)}</nav>'
+    return (
+        f'<nav class="topnav">{"".join(links)}'
+        f'<div class="nav-version-pill"><span>Release</span><strong>{html.escape(APP_VERSION_LABEL)}</strong></div>'
+        "</nav>"
+    )
 
 
 def _control_subnav(active: str) -> str:
@@ -1623,6 +2208,101 @@ def _runtime_mode_label() -> str:
         return "host_runtime"
     mounts_path = Path("/app/config")
     return "docker_container" if mounts_path.exists() else "container_runtime"
+
+
+def _botsv3_index_available(profile_path: Path = ENV_PROFILE_PATH) -> bool:
+    profile = load_environment_profile(profile_path)
+    indexes = profile.get("indexes", []) if isinstance(profile, dict) else []
+    if isinstance(indexes, list):
+        for row in indexes:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("index", "")).strip().lower() == "botsv3":
+                return True
+    try:
+        live_indexes = run_splunk_get_indexes()
+        structured = live_indexes.get("structured", {}) if isinstance(live_indexes, dict) else {}
+        rows = structured.get("indexes", []) if isinstance(structured, dict) else []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                title = str(row.get("title", row.get("index", ""))).strip().lower()
+                if title == "botsv3":
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def _mcp_chat_mode_payload(mode: str | None) -> dict[str, Any]:
+    normalized = str(mode or MCP_CHAT_MODE_LIVE).strip().lower()
+    if normalized != MCP_CHAT_MODE_DEMO:
+        return {
+            "requested_mode": MCP_CHAT_MODE_LIVE,
+            "effective_mode": MCP_CHAT_MODE_LIVE,
+            "demo_effective": False,
+            "available": _botsv3_index_available(),
+            "label": "Live Mode",
+            "detail": "Uses the discovered local environment and current time windows.",
+        }
+    available = _botsv3_index_available()
+    return {
+        "requested_mode": MCP_CHAT_MODE_DEMO,
+        "effective_mode": MCP_CHAT_MODE_DEMO if available else MCP_CHAT_MODE_LIVE,
+        "demo_effective": available,
+        "available": available,
+        "label": "Demo Mode" if available else "Live Mode",
+        "detail": (
+            "Uses the public historical BOTSv3 dataset, and widens search-style questions to all time."
+            if available
+            else "Demo Mode was requested, but index=botsv3 is not currently discoverable from this environment."
+        ),
+    }
+
+
+def _mcp_chat_pipeline_payload(pipeline: str | None) -> dict[str, Any]:
+    normalized = str(pipeline or MCP_CHAT_PIPELINE_ASSISTED).strip().lower()
+    if normalized == MCP_CHAT_PIPELINE_DETERMINISTIC:
+        return {
+            "requested_pipeline": MCP_CHAT_PIPELINE_DETERMINISTIC,
+            "effective_pipeline": MCP_CHAT_PIPELINE_DETERMINISTIC,
+            "label": "Deterministic MCP",
+            "detail": "Uses bounded templates and deterministic routing without LLM query writing.",
+        }
+    return {
+        "requested_pipeline": MCP_CHAT_PIPELINE_ASSISTED,
+        "effective_pipeline": MCP_CHAT_PIPELINE_ASSISTED,
+        "label": "LLM-Assisted MCP",
+        "detail": "Uses the guarded multi-model planner, writer, reviewer, and evidence summary path before Splunk MCP execution.",
+    }
+
+
+def _demo_mode_question(question: str) -> str:
+    base = str(question or "").strip()
+    if not base:
+        return base
+    lowered = base.lower()
+    if "botsv3" in lowered and "all time" in lowered:
+        return base
+    if "botsv3" in lowered:
+        return f"{base} all time"
+    return f"{base} using the public BOTSv3 demo dataset across all time"
+
+
+def _demo_mode_domain_hints(intent: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "index": "botsv3",
+            "sourcetypes": ["historical public demo dataset"],
+            "reasons": [
+                "demo mode is active",
+                "search-style questions are widened to all time",
+                f"intent={intent or 'demo_search'}",
+            ],
+            "score": "demo",
+        }
+    ]
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -2716,6 +3396,34 @@ APP_HTML = """<!doctype html>
       box-shadow:0 18px 34px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.03);
       backdrop-filter:blur(16px);
     }
+    .nav-version-pill{
+      flex:0 0 auto;
+      align-self:center;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      margin-left:8px;
+      padding:8px 14px;
+      border:1px solid #315a79;
+      border-radius:999px;
+      background:linear-gradient(180deg,#16324a,#102435);
+      color:#dbeafe;
+      box-shadow:0 10px 20px rgba(8,23,37,.26), inset 0 1px 0 rgba(255,255,255,.05);
+      white-space:nowrap;
+    }
+    .nav-version-pill span{
+      font-size:10px;
+      font-weight:800;
+      letter-spacing:.12em;
+      text-transform:uppercase;
+      color:#8fd3ff;
+    }
+    .nav-version-pill strong{
+      font-size:12px;
+      font-weight:900;
+      color:#f8fafc;
+      letter-spacing:.02em;
+    }
     .nav-item {
       position:relative;
       display:flex;
@@ -2882,6 +3590,62 @@ APP_HTML = """<!doctype html>
       padding:18px 18px 20px;
       background:linear-gradient(180deg,#0a1422,#07111d);
     }
+    .page-mode-banner{
+      display:grid;
+      gap:8px;
+      padding:14px 16px;
+      border:1px solid #27415a;
+      border-radius:14px;
+      background:linear-gradient(180deg,#081729,#07111f);
+      box-shadow:0 12px 26px rgba(0,0,0,.18);
+    }
+    .page-mode-banner.live{
+      border-color:#315a79;
+    }
+    .page-mode-banner.demo{
+      border-color:#b45309;
+      background:linear-gradient(180deg,#2b1606,#160d04);
+      box-shadow:0 0 0 1px rgba(245,158,11,.16), 0 14px 32px rgba(18,8,0,.28);
+    }
+    .page-mode-banner-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .page-mode-banner-kicker{
+      color:#8fb6d9;
+      font-size:11px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .page-mode-banner-copy{
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.55;
+    }
+    .page-mode-banner.demo .page-mode-banner-kicker,
+    .page-mode-banner.demo .page-mode-banner-copy{
+      color:#fef3c7;
+    }
+    .page-mode-badge{
+      display:inline-flex;
+      align-items:center;
+      padding:5px 10px;
+      border-radius:999px;
+      border:1px solid #315a79;
+      background:#0a2034;
+      color:#dbeafe;
+      font-size:12px;
+      font-weight:800;
+    }
+    .page-mode-banner.demo .page-mode-badge{
+      border-color:#f59e0b;
+      background:#422006;
+      color:#fef3c7;
+    }
     .hero-head {
       display:grid;
       grid-template-columns: minmax(0, .95fr) minmax(320px, 1.05fr);
@@ -2978,6 +3742,15 @@ APP_HTML = """<!doctype html>
       transform:translateY(-1px);
       filter:brightness(1.03);
       box-shadow:0 14px 28px rgba(20,184,106,.30), inset 0 1px 0 rgba(255,255,255,.2);
+    }
+    button.is-secondary-action{
+      background:linear-gradient(180deg,#16324a,#102435);
+      color:#dbeafe;
+      border-color:#315a79;
+      box-shadow:0 10px 20px rgba(8,23,37,.26), inset 0 1px 0 rgba(255,255,255,.05);
+    }
+    button.is-secondary-action:hover{
+      box-shadow:0 14px 28px rgba(8,23,37,.34), inset 0 1px 0 rgba(255,255,255,.06);
     }
     .btn-secondary {
       background:linear-gradient(180deg,#16324a,#102435);
@@ -3546,17 +4319,17 @@ APP_HTML = """<!doctype html>
       right:24px;
       bottom:0;
       z-index:8;
-      border:1px solid #27415a;
+      border:1px solid #3f4b59;
       border-bottom:0;
       border-radius:16px 16px 0 0;
-      background:linear-gradient(180deg,rgba(8,20,35,.98),rgba(5,13,24,.98));
-      box-shadow:0 -18px 36px rgba(2,6,23,.38);
+      background:linear-gradient(180deg,rgba(23,30,39,.98),rgba(11,15,21,.99));
+      box-shadow:0 -18px 42px rgba(2,6,23,.42);
       padding:0;
       overflow:hidden;
     }
     .advanced-shell:not([open]){
-      border-color:#23384f;
-      box-shadow:0 -12px 26px rgba(2,6,23,.28);
+      border-color:#374151;
+      box-shadow:0 -12px 28px rgba(2,6,23,.34);
     }
     .advanced-shell summary {
       cursor:pointer;
@@ -3572,7 +4345,7 @@ APP_HTML = """<!doctype html>
     }
     .advanced-shell:not([open]) summary{
       padding:10px 14px;
-      background:linear-gradient(180deg,rgba(7,19,32,.98),rgba(6,14,24,.98));
+      background:linear-gradient(180deg,rgba(20,26,34,.98),rgba(12,16,22,.98));
     }
     .advanced-shell summary::-webkit-details-marker{display:none;}
     .advanced-shell[open] .advanced-drawer-toggle{
@@ -3612,7 +4385,17 @@ APP_HTML = """<!doctype html>
       justify-content:flex-end;
       gap:8px;
       min-width:0;
-      flex-wrap:nowrap;
+      flex-wrap:wrap;
+    }
+    .drawer-focus-note{
+      color:#cbd5e1;
+      font-size:11px;
+      line-height:1.35;
+      border:1px solid #4b5563;
+      border-radius:999px;
+      padding:6px 10px;
+      background:rgba(30,41,59,.32);
+      white-space:normal;
     }
     .drawer-update-indicator{
       display:none;
@@ -3649,10 +4432,21 @@ APP_HTML = """<!doctype html>
     }
     .drawer-jump-links::-webkit-scrollbar{display:none;}
     .drawer-jump-links .jump-link{
+      appearance:none;
+      cursor:pointer;
+      color:#9fd1ff;
+      text-decoration:none;
+      font-weight:700;
       padding:4px 8px;
       font-size:11px;
+      border:1px solid #243d56;
+      border-radius:999px;
       background:rgba(8,23,37,.84);
       white-space:nowrap;
+    }
+    .drawer-jump-links .jump-link:hover{
+      color:#dbeafe;
+      border-color:#325978;
     }
     .drawer-jump-links .jump-link.active{
       background:linear-gradient(135deg,#0ea5e9,#1d4ed8);
@@ -3670,6 +4464,18 @@ APP_HTML = """<!doctype html>
       padding:6px 9px;
       font-size:11px;
       flex:0 0 auto;
+    }
+    .advanced-drawer-state{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+      min-width:0;
+    }
+    .drawer-mode-copy{
+      color:#9fb4cc;
+      font-size:11px;
+      line-height:1.35;
     }
     .advanced-drawer-actions{
       display:flex;
@@ -3718,6 +4524,43 @@ APP_HTML = """<!doctype html>
       max-height:38vh;
       overflow:auto;
     }
+    .drawer-primary-panel{
+      display:block;
+    }
+    .drawer-detail-fold{
+      margin-top:0;
+      border:1px solid #475569;
+      border-radius:12px;
+      background:linear-gradient(180deg,#171d26,#10151d);
+      overflow:hidden;
+    }
+    .drawer-detail-fold summary{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      cursor:pointer;
+      padding:10px 12px;
+      color:#e2e8f0;
+      font-size:13px;
+      font-weight:800;
+      list-style:none;
+    }
+    .drawer-detail-fold summary::-webkit-details-marker{display:none;}
+    .drawer-detail-fold summary::after{
+      content:'Show';
+      color:#94a3b8;
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .drawer-detail-fold[open] summary::after{content:'Hide';}
+    .drawer-detail-body{
+      padding:0 12px 12px;
+      display:grid;
+      gap:12px;
+    }
     .advanced-shell[data-mode="medium"] .advanced-body{
       max-height:38vh;
     }
@@ -3730,43 +4573,117 @@ APP_HTML = """<!doctype html>
       max-height:calc(100vh - 124px);
     }
     .advanced-panel {
-      border:1px solid #22384f;
+      border:1px solid #445064;
       border-radius:10px;
-      background:#081729;
+      background:linear-gradient(180deg,#151c25,#11161d);
       padding:10px;
     }
     .advanced-panel[data-tray-panel]{display:none;}
     .advanced-panel[data-tray-panel].active{display:block;}
+    .advanced-panel.drawer-tab-panel[data-tray-panel].active{display:grid;gap:12px;}
+    .drawer-panel-topline{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+    }
+    .drawer-panel-copy{
+      color:#9fb4cc;
+      font-size:12px;
+      line-height:1.5;
+      max-width:1100px;
+    }
+    .drawer-panel-shell{
+      display:grid;
+      gap:12px;
+      grid-template-columns:minmax(0,1.5fr) minmax(340px,.95fr);
+      align-items:start;
+    }
+    .drawer-panel-shell-evidence{
+      grid-template-columns:minmax(320px,.95fr) minmax(0,1.45fr);
+    }
+    .drawer-panel-shell-spl{
+      grid-template-columns:minmax(0,1.35fr) minmax(340px,.95fr);
+    }
+    .drawer-panel-shell-timeline{
+      grid-template-columns:minmax(360px,.9fr) minmax(0,1.6fr);
+    }
+    .drawer-panel-shell-context{
+      grid-template-columns:minmax(0,1.25fr) minmax(420px,1fr);
+    }
+    .drawer-panel-main,.drawer-panel-side{
+      display:grid;
+      gap:12px;
+      min-width:0;
+    }
+    .drawer-tab-header-strip{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .drawer-side-note{
+      color:#9fb4cc;
+      font-size:12px;
+      line-height:1.5;
+    }
     .drawer-clone-grid{display:grid;gap:12px;}
-    .drawer-clone-card{border:1px solid #27415a;border-radius:12px;background:#071523;padding:12px;}
-    .drawer-clone-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px;}
+    .drawer-clone-card{border:1px solid #445064;border-radius:12px;background:linear-gradient(180deg,#1a212b,#121821);padding:12px;}
+    .drawer-clone-title{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#cbd5e1;margin-bottom:6px;}
     .drawer-clone-copy{color:#dbeafe;font-size:13px;line-height:1.55;}
-    .drawer-spl-pre{white-space:pre-wrap;background:#030b17;border:1px solid #26435c;border-radius:10px;padding:10px;overflow:auto;line-height:1.45;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;color:#dbeafe;max-height:240px;}
+    .drawer-spl-pre{white-space:pre-wrap;background:#0d131b;border:1px solid #475569;border-radius:10px;padding:10px;overflow:auto;line-height:1.45;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;color:#dbeafe;max-height:240px;}
     .drawer-trust-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;}
-    .drawer-trust-card{border:1px solid #27415a;border-radius:12px;background:#071523;padding:10px 12px;}
+    .drawer-trust-card{border:1px solid #475569;border-radius:12px;background:linear-gradient(180deg,#1b232d,#131922);padding:10px 12px;}
     .drawer-trust-label{font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#9fb4cc;margin-bottom:6px;}
     .drawer-trust-value{color:#f8fafc;font-size:14px;font-weight:800;line-height:1.35;}
     .drawer-trust-note{margin-top:4px;color:#a9bdd4;font-size:12px;line-height:1.45;}
     .drawer-action-list{display:grid;gap:10px;}
-    .drawer-action-card{display:grid;grid-template-columns:minmax(0,1.4fr) repeat(3,minmax(120px,.9fr)) auto;gap:10px;align-items:center;border:1px solid #27415a;border-radius:12px;background:#071523;padding:10px 12px;}
+    .drawer-action-card{display:grid;grid-template-columns:minmax(0,1.4fr) repeat(3,minmax(120px,.9fr)) auto;gap:10px;align-items:center;border:1px solid #475569;border-radius:12px;background:linear-gradient(180deg,#1b232d,#141a22);padding:10px 12px;}
     .drawer-action-head{display:block;min-width:0;}
     .drawer-action-title{font-size:13px;font-weight:800;color:#f8fafc;line-height:1.35;}
-    .drawer-action-kicker{font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:4px;}
+    .drawer-action-kicker{font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#cbd5e1;margin-bottom:4px;}
     .drawer-action-copy{color:#c8d6e5;font-size:12px;line-height:1.45;margin-top:4px;}
     .drawer-action-meta{display:contents;}
-    .drawer-action-meta-item{border:1px solid #1f3348;border-radius:10px;background:rgba(7,21,35,.88);padding:8px;min-width:0;}
+    .drawer-action-meta-item{border:1px solid #3f4b59;border-radius:10px;background:rgba(21,28,37,.92);padding:8px;min-width:0;}
     .drawer-action-meta-item strong{display:block;color:#dbeafe;font-size:10px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:4px;}
     .drawer-action-buttons{display:flex;flex-direction:column;gap:8px;align-items:stretch;}
     .drawer-action-buttons button,.drawer-action-buttons a{margin-top:0;width:auto;}
-    .drawer-inline-note{border:1px dashed #315a79;border-radius:12px;padding:10px 12px;background:rgba(8,23,37,.56);color:#b9cbe0;font-size:12px;line-height:1.5;}
+    .drawer-inline-note{border:1px dashed #64748b;border-radius:12px;padding:10px 12px;background:rgba(30,41,59,.32);color:#cbd5e1;font-size:12px;line-height:1.5;}
+    .drawer-inline-note.compact{padding:8px 10px;font-size:11px;}
     .drawer-entity-table{width:100%;border-collapse:separate;border-spacing:0 8px;}
     .drawer-entity-table th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#89a5c0;text-align:left;padding:0 10px 2px;}
-    .drawer-entity-table td{background:#071523;border-top:1px solid #27415a;border-bottom:1px solid #27415a;padding:9px 10px;color:#dbeafe;font-size:13px;vertical-align:top;}
+    .drawer-entity-table td{background:#161d26;border-top:1px solid #475569;border-bottom:1px solid #475569;padding:9px 10px;color:#dbeafe;font-size:13px;vertical-align:top;}
     .drawer-entity-table tr.drawer-row-link{cursor:pointer;}
-    .drawer-entity-table tr.drawer-row-link:hover td{background:#0b1d30;}
-    .drawer-entity-table td:first-child{border-left:1px solid #27415a;border-radius:10px 0 0 10px;}
-    .drawer-entity-table td:last-child{border-right:1px solid #27415a;border-radius:0 10px 10px 0;}
-    .drawer-value-tag{display:inline-flex;max-width:100%;padding:4px 8px;border-radius:999px;border:1px solid #315a79;font-size:12px;font-weight:700;line-height:1.35;overflow-wrap:anywhere;}
+    .drawer-entity-table tr.drawer-row-link:hover td{background:#1d2631;}
+    .drawer-entity-table td:first-child{border-left:1px solid #475569;border-radius:10px 0 0 10px;}
+    .drawer-entity-table td:last-child{border-right:1px solid #475569;border-radius:0 10px 10px 0;}
+    .drawer-value-tag{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:4px 8px;border-radius:999px;border:1px solid #315a79;font-size:12px;font-weight:700;line-height:1.35;overflow-wrap:anywhere;}
+    .drawer-value-tag.actionable{
+      cursor:pointer;
+      box-shadow:0 0 0 1px rgba(56,189,248,.12);
+      transition:transform .14s ease, border-color .14s ease, box-shadow .14s ease;
+    }
+    .drawer-value-tag.actionable:hover{
+      transform:translateY(-1px);
+      border-color:#7dd3fc !important;
+      box-shadow:0 0 0 1px rgba(56,189,248,.22), 0 8px 18px rgba(2,8,23,.24);
+    }
+    .drawer-value-tag-label{
+      display:inline-flex;
+      align-items:center;
+      min-width:0;
+      overflow-wrap:anywhere;
+    }
+    .drawer-value-tag-note{
+      color:rgba(219,234,254,.8);
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.06em;
+      text-transform:uppercase;
+      white-space:nowrap;
+    }
     .drawer-empty{color:#9fb4cc;font-size:13px;line-height:1.55;}
     .drawer-timeline-mini{display:grid;gap:10px;}
     .drawer-timeline-step{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:start;border:1px solid #27415a;border-radius:12px;background:#071523;padding:10px 12px;}
@@ -3802,6 +4719,28 @@ APP_HTML = """<!doctype html>
       font-weight:700;
       color:#dbeafe;
       outline:none;
+    }
+    .review-fold + .review-fold{margin-top:10px;}
+    .review-fold summary{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      font-size:13px;
+    }
+    .review-fold summary::after{
+      content:'Show';
+      color:#8fb6d9;
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .review-fold[open] summary::after{content:'Hide';}
+    .review-fold-body{
+      margin-top:10px;
+      display:grid;
+      gap:10px;
     }
     .flow-track {
       margin-top:10px;
@@ -3846,6 +4785,8 @@ APP_HTML = """<!doctype html>
     .flow-node.in_progress { border-color:#92400e; background:#3b1d08; }
     .flow-node.awaiting_human_approval { border-color:#7c3aed; background:#2a1148; }
     .flow-node.planned { border-color:#1d4ed8; background:#0f1f4a; }
+    .flow-node.no_evidence { border-color:#92400e; background:#2a1606; }
+    .flow-node.blocked { border-color:#7f1d1d; background:#2a0d0d; }
     .flow-node.not_enabled_yet { border-color:#475569; background:#0f172a; }
     .flow-meta { margin-top:8px; color:#9fb4cc; font-size:12px; }
     .continue-shell {
@@ -3983,15 +4924,19 @@ APP_HTML = """<!doctype html>
     }
     .followup-panel {
       margin-top:12px;
-      border:1px solid #2b4a66;
+      border:1px solid #374151;
       border-radius:12px;
-      background:linear-gradient(180deg,#0a1828,#08111d);
+      background:linear-gradient(180deg,#141b24,#0d141d);
       padding:12px;
-      box-shadow:0 12px 24px rgba(0,0,0,.24);
+      box-shadow:none;
+    }
+    .followup-panel.active-workspace {
+      border-color:#475569;
+      box-shadow:none;
     }
     .followup-panel.empty {
-      border-color:#22384f;
-      background:#091423;
+      border-color:#334155;
+      background:#111923;
     }
     .followup-head {
       display:flex;
@@ -4009,7 +4954,7 @@ APP_HTML = """<!doctype html>
     }
     .followup-meta {
       margin-top:8px;
-      color:#8fb6d9;
+      color:#a8b6c7;
       font-size:12px;
       line-height:1.45;
     }
@@ -4139,11 +5084,11 @@ APP_HTML = """<!doctype html>
       margin-bottom:12px;
     }
     .timeline-story-card{
-      border:1px solid #294560;
+      border:1px solid #4b5563;
       border-radius:14px;
-      background:linear-gradient(135deg,rgba(8,24,40,.98),rgba(9,32,24,.9));
+      background:linear-gradient(180deg,#20262e,#171c23);
       padding:14px 16px;
-      box-shadow:0 10px 30px rgba(0,0,0,.16);
+      box-shadow:0 10px 30px rgba(0,0,0,.18);
       display:grid;
       gap:12px;
     }
@@ -4169,7 +5114,7 @@ APP_HTML = """<!doctype html>
     .timeline-pattern-strip,.timeline-entity-strip{
       display:flex;
       flex-wrap:wrap;
-      gap:8px;
+      gap:6px;
       margin-top:10px;
     }
     .timeline-pattern-chip,.entity-pill{
@@ -4178,36 +5123,66 @@ APP_HTML = """<!doctype html>
       gap:6px;
       padding:6px 10px;
       border-radius:999px;
-      border:1px solid #264760;
-      background:#081826;
-      color:#dbeafe;
+      border:1px solid #5b6472;
+      background:#232a33;
+      color:#f3f4f6;
       font-size:11px;
       font-weight:700;
       line-height:1.2;
     }
     .timeline-pattern-chip strong,.entity-pill strong{
-      color:#7dd3fc;
+      color:#bfdbfe;
       font-size:10px;
       letter-spacing:.08em;
       text-transform:uppercase;
     }
     .entity-pill{
       cursor:pointer;
-      background:linear-gradient(180deg,#0a1a27,#091522);
-      transition:border-color .15s ease, transform .15s ease, opacity .15s ease;
+      background:linear-gradient(180deg,#262d36,#1d232b);
+      transition:border-color .15s ease, transform .15s ease, opacity .15s ease, box-shadow .15s ease;
+      justify-content:space-between;
+      text-align:left;
+      min-width:0;
     }
-    .entity-pill:hover{border-color:#4f7aa1;transform:translateY(-1px);}
-    .entity-pill.active{border-color:#22c55e;background:linear-gradient(180deg,#0d2017,#0b1a14);}
+    .entity-pill:hover{border-color:#93c5fd;transform:translateY(-1px);}
+    .entity-pill.active{border-color:#38bdf8;background:linear-gradient(180deg,#22313e,#1a222b);}
     .entity-pill .entity-count{color:#9fb4cc;font-size:10px;font-weight:800;}
-    .timeline-decision-block{
-      margin-top:10px;
-      border:1px solid #27415a;
-      border-radius:12px;
-      background:#071523;
-      padding:12px;
-      display:grid;
-      gap:8px;
+    .entity-pill.workspace-mode{
+      border-color:#7dd3fc;
+      background:linear-gradient(180deg,#2a3743,#1e252d);
+      box-shadow:0 0 0 1px rgba(125,211,252,.16);
     }
+    .entity-pill.workspace-mode:hover{
+      border-color:#bae6fd;
+      box-shadow:0 0 0 1px rgba(186,230,253,.24), 0 8px 18px rgba(2,8,23,.18);
+    }
+    .entity-pill.filter-mode{
+      border-style:dashed;
+    }
+    .entity-pill.filter-mode.active{
+      border-style:solid;
+    }
+    .entity-pill .entity-main{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      min-width:0;
+      flex-wrap:wrap;
+    }
+    .entity-pill .entity-action-note{
+      color:#8fb6d9;
+      font-size:9px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      white-space:nowrap;
+      margin-left:auto;
+    }
+    .timeline-decision-block{display:none;}
+    .timeline-decision-block.continue{border-color:#38bdf8;box-shadow:0 0 0 1px rgba(56,189,248,.14);}
+    .timeline-decision-block.validate{border-color:#f59e0b;box-shadow:0 0 0 1px rgba(245,158,11,.14);}
+    .timeline-decision-block.stop{border-color:#f97316;box-shadow:0 0 0 1px rgba(249,115,22,.14);}
+    .timeline-decision-block.wait{border-color:#64748b;}
     .timeline-decision-title{
       color:#f8fafc;
       font-size:12px;
@@ -4225,6 +5200,115 @@ APP_HTML = """<!doctype html>
       flex-wrap:wrap;
       gap:8px;
     }
+    .timeline-decision-hero{
+      --decision-accent:#38bdf8;
+      position:relative;
+      border:1px solid color-mix(in srgb, var(--decision-accent) 45%, #475569);
+      border-radius:16px;
+      background:linear-gradient(180deg,#20262f,#161b22);
+      padding:16px 18px 16px 22px;
+      display:grid;
+      gap:12px;
+      box-shadow:0 12px 28px rgba(0,0,0,.2);
+    }
+    .timeline-decision-hero::before{
+      content:'';
+      position:absolute;
+      left:0;
+      top:14px;
+      bottom:14px;
+      width:4px;
+      border-radius:999px;
+      background:var(--decision-accent);
+      box-shadow:0 0 18px color-mix(in srgb, var(--decision-accent) 42%, transparent);
+    }
+    .timeline-decision-hero.continue{--decision-accent:#38bdf8;}
+    .timeline-decision-hero.validate{--decision-accent:#f59e0b;}
+    .timeline-decision-hero.stop{--decision-accent:#f97316;}
+    .timeline-decision-hero.wait{--decision-accent:#94a3b8;}
+    .timeline-decision-hero-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+    }
+    .timeline-decision-flag{
+      display:inline-flex;
+      align-items:center;
+      padding:7px 12px;
+      border-radius:999px;
+      border:1px solid color-mix(in srgb, var(--decision-accent) 55%, #475569);
+      background:color-mix(in srgb, var(--decision-accent) 16%, #18202a);
+      color:#f8fafc;
+      font-size:11px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      white-space:nowrap;
+    }
+    .timeline-decision-hero-title{
+      color:#f8fafc;
+      font-size:18px;
+      font-weight:900;
+      line-height:1.3;
+      letter-spacing:.01em;
+    }
+    .timeline-decision-hero-copy{
+      color:#e2e8f0;
+      font-size:14px;
+      line-height:1.6;
+      max-width:980px;
+    }
+    .timeline-decision-chip-row{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+    }
+    .timeline-decision-chip{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:7px 10px;
+      border-radius:999px;
+      border:1px solid #5d6674;
+      background:#262d36;
+      color:#e5edf7;
+      font-size:11px;
+      font-weight:800;
+      line-height:1.25;
+    }
+    .timeline-decision-chip strong{
+      color:#cbd5e1;
+      font-size:10px;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .timeline-decision-grid{
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:10px;
+    }
+    .timeline-decision-pane{
+      border:1px solid #525b68;
+      border-radius:12px;
+      background:#1a2028;
+      padding:10px 12px;
+      min-width:0;
+    }
+    .timeline-decision-pane-title{
+      color:#cbd5e1;
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      margin-bottom:6px;
+    }
+    .timeline-decision-pane-copy{
+      color:#e2e8f0;
+      font-size:12px;
+      line-height:1.55;
+    }
     .timeline-filter-bar{
       display:flex;
       flex-wrap:wrap;
@@ -4232,22 +5316,22 @@ APP_HTML = """<!doctype html>
       margin-top:10px;
     }
     .timeline-filter-chip{
-      border:1px solid #294560;
+      border:1px solid #5b6472;
       border-radius:999px;
-      background:#071523;
-      color:#dbeafe;
+      background:#1f252d;
+      color:#f1f5f9;
       font-size:11px;
       font-weight:800;
       padding:6px 10px;
       cursor:pointer;
     }
-    .timeline-filter-chip.active{border-color:#22c55e;background:#0d2017;color:#effef5;}
+    .timeline-filter-chip.active{border-color:#38bdf8;background:#22313d;color:#eff6ff;}
     .timeline-active-filter{
       margin-top:10px;
-      border:1px solid #315a79;
+      border:1px solid #5d6674;
       border-radius:10px;
-      background:#08131f;
-      color:#dbeafe;
+      background:#1a2028;
+      color:#e2e8f0;
       padding:8px 10px;
       font-size:12px;
       line-height:1.45;
@@ -4269,19 +5353,19 @@ APP_HTML = """<!doctype html>
       top:8px;
       bottom:8px;
       width:2px;
-      background:linear-gradient(180deg,rgba(34,197,94,.2),rgba(56,189,248,.22),rgba(148,163,184,.14));
+      background:linear-gradient(180deg,rgba(148,163,184,.2),rgba(125,211,252,.26),rgba(148,163,184,.16));
       border-radius:999px;
       pointer-events:none;
     }
     .timeline-step-card{
       position:relative;
       margin-left:22px;
-      border:1px solid #28415b;
+      border:1px solid #525c69;
       border-radius:16px;
-      background:linear-gradient(180deg,#071523,#081727);
-      padding:14px 14px 12px;
+      background:linear-gradient(180deg,#20262e,#161b22);
+      padding:13px 13px 12px;
       display:grid;
-      gap:12px;
+      gap:10px;
       box-sizing:border-box;
       min-width:0;
       overflow:hidden;
@@ -4296,18 +5380,18 @@ APP_HTML = """<!doctype html>
       width:12px;
       height:12px;
       border-radius:999px;
-      border:2px solid #244762;
-      background:#061523;
-      box-shadow:0 0 0 3px rgba(6,21,35,.96);
+      border:2px solid #64748b;
+      background:#111923;
+      box-shadow:0 0 0 3px rgba(17,25,35,.96);
     }
-    .timeline-step-card[data-step-type=\"investigation\"]::before{border-color:#38bdf8;background:#0a2034;}
-    .timeline-step-card[data-step-type=\"pivot\"]::before{border-color:#22c55e;background:#0d2017;}
-    .timeline-step-card:hover{border-color:#4f7aa1;transform:translateY(-1px);}
-    .timeline-step-card.current{border-color:#22c55e;background:linear-gradient(180deg,#0d2017,#0a1724);}
+    .timeline-step-card[data-step-type=\"investigation\"]::before{border-color:#38bdf8;background:#1d2935;}
+    .timeline-step-card[data-step-type=\"pivot\"]::before{border-color:#f59e0b;background:#2a2115;}
+    .timeline-step-card:hover{border-color:#93c5fd;transform:translateY(-1px);}
+    .timeline-step-card.current{border-color:#7dd3fc;background:linear-gradient(180deg,#242c35,#191f27);box-shadow:0 0 0 1px rgba(125,211,252,.18), 0 12px 28px rgba(0,0,0,.2);}
     .timeline-step-card.restored{border-color:#38bdf8;}
-    .timeline-step-card.no-results{border-color:#7c4a17;background:linear-gradient(180deg,#16100a,#0b1521);}
+    .timeline-step-card.no-results{border-color:#f59e0b;background:linear-gradient(180deg,#2b241a,#181d24);}
     .timeline-step-card.dimmed{opacity:.36;}
-    .timeline-step-card.focused{box-shadow:0 0 0 1px rgba(34,197,94,.35), 0 12px 32px rgba(0,0,0,.18);}
+    .timeline-step-card.focused{box-shadow:0 0 0 1px rgba(125,211,252,.3), 0 12px 32px rgba(0,0,0,.18);}
     .timeline-step-header{
       display:flex;
       justify-content:space-between;
@@ -4338,18 +5422,18 @@ APP_HTML = """<!doctype html>
       align-items:center;
       padding:5px 9px;
       border-radius:999px;
-      border:1px solid #294560;
-      background:#081826;
-      color:#dbeafe;
+      border:1px solid #64748b;
+      background:#212a34;
+      color:#e5edf7;
       font-size:10px;
       font-weight:800;
       text-transform:uppercase;
       letter-spacing:.08em;
     }
-    .timeline-step-badge.status-current{border-color:#22c55e;background:#0d2017;color:#effef5;}
-    .timeline-step-badge.status-restored{border-color:#38bdf8;background:#0a2034;}
-    .timeline-step-badge.status-no-results{border-color:#d97706;background:#1b1408;color:#fde68a;}
-    .timeline-step-badge.status-superseded{border-color:#3c5267;background:#09131d;color:#b8c9db;}
+    .timeline-step-badge.status-current{border-color:#7dd3fc;background:#20303d;color:#f0f9ff;}
+    .timeline-step-badge.status-restored{border-color:#38bdf8;background:#1b2834;}
+    .timeline-step-badge.status-no-results{border-color:#f59e0b;background:#2a2115;color:#fde68a;}
+    .timeline-step-badge.status-superseded{border-color:#64748b;background:#1b2430;color:#cbd5e1;}
     .timeline-step-time{
       color:#8fb6d9;
       font-size:11px;
@@ -4359,7 +5443,7 @@ APP_HTML = """<!doctype html>
     }
     .timeline-step-question{
       color:#f8fbff;
-      font-size:15px;
+      font-size:14px;
       font-weight:900;
       line-height:1.4;
       letter-spacing:.01em;
@@ -4367,9 +5451,9 @@ APP_HTML = """<!doctype html>
       word-break:break-word;
     }
     .timeline-step-why{
-      border-left:3px solid rgba(125,211,252,.35);
+      border-left:3px solid rgba(125,211,252,.3);
       padding-left:10px;
-      color:#dbeafe;
+      color:#e2e8f0;
       font-size:12px;
       line-height:1.55;
     }
@@ -4397,8 +5481,8 @@ APP_HTML = """<!doctype html>
       align-items:center;
       gap:6px;
       border-radius:999px;
-      border:1px solid #24445e;
-      background:#08131f;
+      border:1px solid #475569;
+      background:#151b22;
       color:#d9ebfc;
       padding:6px 10px;
       font-size:11px;
@@ -4413,7 +5497,7 @@ APP_HTML = """<!doctype html>
     .timeline-confidence.up .timeline-meta-pill{border-color:#1f6f48;}
     .timeline-confidence.down .timeline-meta-pill{border-color:#7c4a17;}
     .timeline-step-summary{
-      color:#dbeafe;
+      color:#e5e7eb;
       font-size:13px;
       line-height:1.6;
     }
@@ -4422,10 +5506,13 @@ APP_HTML = """<!doctype html>
       grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
       gap:10px;
     }
+    .timeline-step-grid.primary{
+      grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    }
     .timeline-section-card{
-      border:1px solid #22384d;
+      border:1px solid #475569;
       border-radius:12px;
-      background:#08131f;
+      background:#151b22;
       padding:10px;
       display:grid;
       gap:8px;
@@ -4439,12 +5526,51 @@ APP_HTML = """<!doctype html>
       text-transform:uppercase;
     }
     .timeline-section-copy{
-      color:#dbeafe;
+      color:#e5e7eb;
       font-size:12px;
       line-height:1.55;
       overflow-wrap:anywhere;
     }
     .timeline-section-copy.muted{color:#9fb4cc;}
+    .timeline-step-detail-fold{
+      border:1px solid #495462;
+      border-radius:12px;
+      background:#12181f;
+      padding:8px 10px;
+    }
+    .timeline-step-detail-fold summary{
+      cursor:pointer;
+      list-style:none;
+      outline:none;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      color:#dbeafe;
+      font-size:12px;
+      font-weight:800;
+      letter-spacing:.03em;
+    }
+    .timeline-step-detail-fold summary::-webkit-details-marker{display:none;}
+    .timeline-step-detail-fold summary::after{
+      content:'Show detail';
+      color:#9fb4cc;
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .timeline-step-detail-fold[open] summary::after{content:'Hide detail';}
+    .timeline-step-detail-body{
+      margin-top:10px;
+      display:grid;
+      gap:10px;
+    }
+    .timeline-step-detail-grid{
+      display:grid;
+      grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+      gap:10px;
+    }
     .timeline-step-actions{
       display:flex;
       flex-wrap:wrap;
@@ -4456,9 +5582,9 @@ APP_HTML = """<!doctype html>
       font-size:11px;
     }
     .timeline-inline-spl{
-      border:1px solid #22384d;
+      border:1px solid #475569;
       border-radius:12px;
-      background:#06111a;
+      background:#141a21;
       overflow:hidden;
     }
     .timeline-inline-spl summary{
@@ -4732,9 +5858,58 @@ APP_HTML = """<!doctype html>
     }
     .workspace-grid{
       display:grid;
-      grid-template-columns:minmax(0,1.72fr) minmax(320px,.78fr);
-      gap:20px;
+      grid-template-columns:minmax(0,2.12fr) minmax(300px,.58fr);
+      gap:22px;
       align-items:start;
+    }
+    .execution-monitor-card{
+      border:1px solid rgba(36,67,96,.72);
+      border-radius:12px;
+      background:linear-gradient(180deg,rgba(9,20,35,.94),rgba(7,19,31,.90));
+      padding:14px;
+      min-width:0;
+    }
+    .execution-monitor-grid{
+      display:grid;
+      grid-template-columns:minmax(0,1.2fr) minmax(280px,.9fr);
+      gap:12px;
+      align-items:start;
+    }
+    .execution-monitor-main{
+      border:1px solid #22384f;
+      border-radius:12px;
+      background:#081729;
+      padding:12px 14px;
+    }
+    .execution-monitor-title{
+      color:#f8fafc;
+      font-size:16px;
+      font-weight:900;
+      line-height:1.3;
+      margin-bottom:6px;
+    }
+    .execution-monitor-copy{
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.55;
+    }
+    .execution-monitor-meta{
+      display:grid;
+      grid-template-columns:repeat(2,minmax(0,1fr));
+      gap:10px;
+    }
+    .execution-monitor-card[data-state="running"]{
+      border-color:#0ea5e9;
+      box-shadow:0 0 0 1px rgba(14,165,233,.16);
+    }
+    .execution-monitor-card[data-state="complete"]{
+      border-color:#166534;
+      box-shadow:0 0 0 1px rgba(34,197,94,.16);
+    }
+    .execution-monitor-card[data-state="blocked"],
+    .execution-monitor-card[data-state="no_hits"]{
+      border-color:#92400e;
+      box-shadow:0 0 0 1px rgba(245,158,11,.14);
     }
     .workspace-center,.workspace-main,.workspace-side{
       min-width:0;
@@ -4753,6 +5928,7 @@ APP_HTML = """<!doctype html>
     }
     .workspace-side{
       position:static;
+      gap:12px;
     }
     .support-card,.timeline-card,.coverage-card,.pivot-card-shell{
       border:1px solid rgba(36,67,96,.72);
@@ -4764,16 +5940,14 @@ APP_HTML = """<!doctype html>
     .workspace-utility{
       display:grid;
       gap:0;
-      position:sticky;
-      top:88px;
-      z-index:4;
-      min-height:42px;
-      padding:5px 10px;
-      border-bottom:1px solid rgba(49,90,121,.68);
-      background:linear-gradient(180deg,rgba(8,21,34,1),rgba(7,18,29,1));
+      position:static;
+      min-height:auto;
+      padding:8px 0 2px;
+      border-bottom:0;
+      background:transparent;
       box-shadow:none;
     }
-    .workspace-main{ padding-top:10px; }
+    .workspace-main{ padding-top:6px; }
     .utility-bar{
       display:flex;
       flex-wrap:wrap;
@@ -4807,6 +5981,413 @@ APP_HTML = """<!doctype html>
       background:#082515;
       color:#bbf7d0;
     }
+    .support-card-low{
+      border-color:#334155;
+      background:linear-gradient(180deg,rgba(22,28,36,.96),rgba(12,17,24,.96));
+      box-shadow:none;
+    }
+    .support-card-low .brief-kicker{
+      color:#94a3b8;
+    }
+    .support-card-low .support-item,
+    .support-card-low .mitre-card{
+      border-color:#374151;
+      background:rgba(16,22,30,.9);
+    }
+    .support-card-low .support-label,
+    .support-card-low .mitre-meta{
+      color:#94a3b8;
+    }
+    .support-card-low .support-value,
+    .support-card-low .mitre-title{
+      color:#e2e8f0;
+    }
+    .answer-card{
+      border-color:#4b5563;
+      background:linear-gradient(180deg,#171f29,#0f1721 78%);
+      box-shadow:0 0 0 1px rgba(100,116,139,.14);
+    }
+    .answer-card .brief-head{
+      margin-bottom:10px;
+    }
+    .answer-decision-pill{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-width:108px;
+      padding:5px 10px;
+      border-radius:999px;
+      border:1px solid #475569;
+      background:#1f2937;
+      color:#e2e8f0;
+      font-size:11px;
+      font-weight:800;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+    }
+    .answer-decision-pill.continue{
+      border-color:#16a34a;
+      background:#0f2517;
+      color:#bbf7d0;
+    }
+    .answer-decision-pill.validate{
+      border-color:#f59e0b;
+      background:#271705;
+      color:#fde68a;
+    }
+    .answer-decision-pill.stop,
+    .answer-decision-pill.blocked{
+      border-color:#dc2626;
+      background:#2b1114;
+      color:#fecaca;
+    }
+    .answer-decision-pill.wait{
+      border-color:#475569;
+      background:#1f2937;
+      color:#cbd5e1;
+    }
+    .answer-headline{
+      color:#f8fafc;
+      font-size:25px;
+      line-height:1.2;
+      font-weight:900;
+      letter-spacing:-.02em;
+      margin-bottom:10px;
+    }
+    .answer-copy{
+      color:#dbe4ee;
+      font-size:14px;
+      line-height:1.65;
+    }
+    .answer-copy-note{
+      margin-top:10px;
+      color:#a9b7c9;
+      font-size:12px;
+      line-height:1.55;
+    }
+    .confidence-card{
+      border-color:#3f4b59;
+      background:linear-gradient(180deg,#141b24,#0d141d 78%);
+    }
+    .confidence-grid{
+      display:grid;
+      grid-template-columns:minmax(220px,.42fr) minmax(0,1fr);
+      gap:14px;
+      align-items:start;
+    }
+    .confidence-score-card,
+    .confidence-why-card{
+      border:1px solid #374151;
+      border-radius:12px;
+      background:#111923;
+      padding:14px;
+      min-width:0;
+    }
+    .confidence-score-value{
+      color:#f8fafc;
+      font-size:32px;
+      line-height:1;
+      font-weight:900;
+      letter-spacing:-.03em;
+      margin-bottom:8px;
+    }
+    .confidence-score-label{
+      color:#e5eefc;
+      font-size:13px;
+      font-weight:800;
+      margin-bottom:6px;
+    }
+    .confidence-score-copy{
+      color:#b8c5d4;
+      font-size:12px;
+      line-height:1.55;
+    }
+    .reason-list{
+      display:grid;
+      gap:10px;
+      margin-top:8px;
+    }
+    .reason-item{
+      border:1px solid #334155;
+      border-radius:10px;
+      background:#0f1720;
+      padding:11px 12px;
+      color:#e5eefc;
+      font-size:13px;
+      line-height:1.55;
+    }
+    .reason-item strong{
+      display:block;
+      color:#93c5fd;
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      margin-bottom:5px;
+    }
+    .primary-action-shell{
+      border-color:#5b6470;
+      background:linear-gradient(180deg,#171f28,#101822 82%);
+      box-shadow:0 0 0 1px rgba(148,163,184,.12);
+    }
+    .primary-action-content{
+      display:grid;
+      gap:12px;
+    }
+    .primary-action-card{
+      border:1px solid #4b5563;
+      border-radius:14px;
+      background:linear-gradient(180deg,#1d252f,#121a23 82%);
+      padding:16px;
+      display:grid;
+      gap:12px;
+    }
+    .primary-action-topline{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+    }
+    .primary-action-title{
+      color:#f8fafc;
+      font-size:20px;
+      line-height:1.25;
+      font-weight:900;
+      margin-bottom:4px;
+    }
+    .primary-action-copy{
+      color:#dbe4ee;
+      font-size:14px;
+      line-height:1.6;
+    }
+    .primary-action-target{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:7px 10px;
+      border-radius:999px;
+      border:1px solid #33526a;
+      background:#10202d;
+      color:#dbeafe;
+      font-size:12px;
+      font-weight:700;
+      width:max-content;
+      max-width:100%;
+    }
+    .primary-action-note-grid{
+      display:grid;
+      grid-template-columns:repeat(2,minmax(0,1fr));
+      gap:10px;
+    }
+    .primary-action-note{
+      border:1px solid #374151;
+      border-radius:12px;
+      background:#111923;
+      padding:12px;
+    }
+    .primary-action-note strong{
+      display:block;
+      color:#93c5fd;
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      margin-bottom:6px;
+    }
+    .primary-action-note span{
+      display:block;
+      color:#e5eefc;
+      font-size:13px;
+      line-height:1.55;
+    }
+    .primary-action-buttons{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .primary-action-btn{
+      margin-top:0 !important;
+      width:auto !important;
+      min-width:250px;
+      padding:13px 18px;
+      border-radius:12px;
+      border:1px solid #22c55e;
+      background:linear-gradient(180deg,#22c55e,#16a34a);
+      color:#052814;
+      font-size:14px;
+      font-weight:900;
+      box-shadow:0 12px 24px rgba(22,163,74,.2);
+    }
+    .primary-action-btn:hover{
+      transform:translateY(-1px);
+      filter:brightness(1.04);
+    }
+    .primary-action-link{
+      margin-top:0 !important;
+      width:auto !important;
+    }
+    .primary-action-empty{
+      border:1px dashed #475569;
+      border-radius:12px;
+      padding:14px;
+      color:#cbd5e1;
+      font-size:13px;
+      line-height:1.55;
+      background:#111923;
+    }
+    .secondary-actions{
+      border-top:1px solid #374151;
+      padding-top:12px;
+    }
+    .secondary-actions summary{
+      cursor:pointer;
+      list-style:none;
+      color:#cbd5e1;
+      font-size:13px;
+      font-weight:800;
+      outline:none;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .secondary-actions summary::-webkit-details-marker{display:none;}
+    .secondary-actions summary::after{
+      content:"Show";
+      color:#93c5fd;
+      font-size:12px;
+      font-weight:800;
+    }
+    .secondary-actions[open] summary::after{content:"Hide";}
+    .secondary-actions .pivot-grid{
+      margin-top:10px;
+    }
+    .evidence-card{
+      border-color:#475569;
+      background:linear-gradient(180deg,#141b24,#0d141d 82%);
+    }
+    .evidence-stack{
+      display:grid;
+      gap:12px;
+    }
+    .evidence-note-grid{
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:10px;
+    }
+    .evidence-note-card{
+      border:1px solid #374151;
+      border-radius:12px;
+      background:#111923;
+      padding:12px;
+      min-width:0;
+    }
+    .evidence-note-card strong{
+      display:block;
+      color:#93c5fd;
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      margin-bottom:6px;
+    }
+    .evidence-note-card span{
+      display:block;
+      color:#e5eefc;
+      font-size:13px;
+      line-height:1.55;
+      overflow-wrap:anywhere;
+    }
+    .evidence-table-wrap{
+      border:1px solid #374151;
+      border-radius:12px;
+      background:#111923;
+      padding:12px;
+      overflow:auto;
+    }
+    .evidence-empty{
+      border:1px dashed #475569;
+      border-radius:12px;
+      background:#111923;
+      padding:14px;
+      color:#cbd5e1;
+      font-size:13px;
+      line-height:1.55;
+    }
+    .spl-inline-shell{
+      border:1px solid #374151;
+      border-radius:12px;
+      background:#111923;
+      overflow:hidden;
+    }
+    .spl-inline-shell summary{
+      list-style:none;
+      cursor:pointer;
+      padding:12px 14px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      color:#e5eefc;
+      font-size:13px;
+      font-weight:800;
+      outline:none;
+    }
+    .spl-inline-shell summary::-webkit-details-marker{display:none;}
+    .spl-inline-shell summary::after{
+      content:"Show";
+      color:#93c5fd;
+      font-size:12px;
+      font-weight:800;
+    }
+    .spl-inline-shell[open] summary::after{content:"Hide";}
+    .spl-inline-title{
+      color:#f8fafc;
+    }
+    .spl-inline-copy{
+      color:#94a3b8;
+      font-size:12px;
+      font-weight:600;
+      margin-left:auto;
+      text-align:right;
+    }
+    .spl-inline-body{
+      border-top:1px solid #374151;
+      padding:12px;
+      display:grid;
+      gap:12px;
+    }
+    .spl-inline-toolbar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .spl-inline-actions{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      align-items:center;
+    }
+    .spl-inline-actions button,
+    .spl-inline-actions a{
+      margin-top:0;
+      width:auto;
+    }
+    .workspace-side .execution-monitor-card{
+      border-color:#374151;
+      background:linear-gradient(180deg,#171e27,#0f151d);
+      box-shadow:none;
+    }
+    .workspace-side .execution-monitor-grid{
+      grid-template-columns:1fr;
+    }
+    .workspace-side .execution-monitor-main,
+    .workspace-side .support-item{
+      background:#111923;
+      border-color:#374151;
+    }
     .utility-actions{
       margin-left:auto;
       display:flex;
@@ -4835,6 +6416,25 @@ APP_HTML = """<!doctype html>
       color:#dbeafe;
       border-color:#325978;
     }
+    @media (min-width: 2200px){
+      .wrap{
+        max-width:2820px;
+      }
+      .invest-shell{
+        grid-template-columns:minmax(392px,448px) minmax(0,1fr);
+        gap:28px;
+      }
+      .workspace-grid{
+        grid-template-columns:minmax(0,2.28fr) minmax(340px,.54fr);
+        gap:26px;
+      }
+      .execution-monitor-grid{
+        grid-template-columns:minmax(0,1.42fr) minmax(360px,.92fr);
+      }
+      .workspace-side{
+        gap:18px;
+      }
+    }
     @media (max-width: 1280px){
       .advanced-shell summary{
         grid-template-columns:1fr;
@@ -4858,6 +6458,19 @@ APP_HTML = """<!doctype html>
       .drawer-jump-links{
         flex-wrap:wrap;
         overflow-x:visible;
+      }
+      .drawer-panel-shell,
+      .drawer-panel-shell-evidence,
+      .drawer-panel-shell-spl,
+      .drawer-panel-shell-timeline,
+      .drawer-panel-shell-context{
+        grid-template-columns:1fr;
+      }
+    }
+    @media (min-width: 1700px){
+      .drawer-narrative-shell{
+        grid-template-columns:minmax(0,1.35fr) minmax(460px,.95fr);
+        align-items:start;
       }
     }
     #assessment-section,#timeline-section,#spl-section,#coverage-section,#pivots-section,#mitre-section,#advanced-section{
@@ -4949,6 +6562,8 @@ APP_HTML = """<!doctype html>
     .timeline-phase.complete .timeline-phase-status{border-color:#166534;background:#052e16;color:#bbf7d0;}
     .timeline-phase.in_progress .timeline-phase-status{border-color:#92400e;background:#3b1d08;color:#fde68a;}
     .timeline-phase.planned .timeline-phase-status{border-color:#1d4ed8;background:#0f1f4a;color:#bfdbfe;}
+    .timeline-phase.no_evidence .timeline-phase-status{border-color:#92400e;background:#2a1606;color:#fde68a;}
+    .timeline-phase.blocked .timeline-phase-status{border-color:#7f1d1d;background:#2a0d0d;color:#fecaca;}
     .timeline-phase.awaiting_human_approval .timeline-phase-status{border-color:#7c3aed;background:#2a1148;color:#e9d5ff;}
     .timeline-phase-summary{
       color:#cbd5e1;
@@ -4990,6 +6605,32 @@ APP_HTML = """<!doctype html>
       font-size:12px;
       line-height:1.5;
       white-space:pre-wrap;
+    }
+    .timeline-chip-row{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+    }
+    .timeline-chip{
+      display:inline-flex;
+      align-items:center;
+      padding:5px 9px;
+      border-radius:999px;
+      border:1px solid #27415a;
+      background:#081729;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:700;
+      line-height:1.2;
+    }
+    .timeline-note{
+      border:1px solid #23384d;
+      border-radius:10px;
+      background:#081321;
+      color:#b9cbe0;
+      font-size:12px;
+      line-height:1.5;
+      padding:10px 12px;
     }
     .spl-toolbar{
       display:flex;
@@ -5157,7 +6798,10 @@ APP_HTML = """<!doctype html>
     @media (max-width: 1100px) { .ops-field.wide { grid-column: span 1; } }
     @media (max-width: 900px) { .row { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 1100px) { .brief-grid { grid-template-columns:1fr; } }
-    @media (max-width: 900px) { .timeline-detail-grid,.coverage-grid,.pivot-meta-grid,.brief-strip-metrics,.coverage-row { grid-template-columns:1fr; } }
+    @media (max-width: 900px) { .timeline-detail-grid,.coverage-grid,.pivot-meta-grid,.brief-strip-metrics,.coverage-row,.execution-monitor-grid,.execution-monitor-meta,.timeline-decision-grid { grid-template-columns:1fr; } }
+    @media (max-width: 900px) { .confidence-grid,.primary-action-note-grid,.evidence-note-grid { grid-template-columns:1fr; } }
+    @media (max-width: 900px) { .timeline-decision-hero-head { display:grid; grid-template-columns:1fr; } }
+    @media (max-width: 980px) { .nav-version-pill{display:none;} }
     @media (max-width: 700px) { .control-grid { grid-template-columns:1fr; } }
     @media (max-width: 560px) { .row, .row-ops { grid-template-columns: 1fr; } .wrap{padding:0 12px 24px;} }
   </style>
@@ -5181,6 +6825,7 @@ APP_HTML = """<!doctype html>
         </div>
       </div>
       <a class=\"nav-item\" href=\"/logout\"><span class=\"nav-kicker\">Session</span><span class=\"nav-label\">Logout</span></a>
+      <div class=\"nav-version-pill\"><span>Release</span><strong>__APP_VERSION_LABEL__</strong></div>
     </nav>
 
     <div class=\"invest-shell\" id=\"invest-layout\">
@@ -5200,20 +6845,20 @@ APP_HTML = """<!doctype html>
         </label>
         <textarea id=\"question\">Show failed login activity in the last 24 hours</textarea>
         <details class=\"domain-hints\">
-          <summary class=\"hint-title\">Likely Data Domains (pre-investigation hint)</summary>
+          <summary class=\"hint-title\">Likely Data Sources (planning hint)</summary>
           <div id=\"domain-hints\" class=\"domain-list\">
             <div class=\"muted\">Type a question to see likely index/sourcetype targets.</div>
           </div>
         </details>
-        <div id=\"selected-followup-panel\" class=\"followup-panel empty\">
-          <div class=\"followup-head\">
-            <div class=\"brief-kicker\">Follow-Up Drawer</div>
-            <span id=\"selected-followup-badge\" class=\"badge\">Nothing selected</span>
-          </div>
-          <div id=\"selected-followup-text\" class=\"followup-body muted\">Select a follow-up step from Recommended Next Steps in the main investigation column to open it here. This drawer is the single place to review and run a follow-up.</div>
+          <div id=\"selected-followup-panel\" class=\"followup-panel empty\">
+            <div class=\"followup-head\">
+              <div class=\"brief-kicker\">Next Action Workspace</div>
+              <span id=\"selected-followup-badge\" class=\"badge\">Nothing selected</span>
+            </div>
+          <div id=\"selected-followup-text\" class=\"followup-body muted\">Run an investigation to load the strongest next step here automatically. This panel mirrors the current staged follow-up while the center column remains the only place to continue the investigation.</div>
           <div id=\"selected-followup-meta\" class=\"followup-meta\" style=\"display:none;\"></div>
           <div class=\"followup-actions\">
-            <button id=\"selected-followup-run\" class=\"btn-followup\" type=\"button\" style=\"display:none;\">Run This Follow-Up</button>
+            <button id=\"selected-followup-run\" class=\"btn-followup\" type=\"button\" style=\"display:none;\">Run Staged Follow-Up</button>
             <button id=\"selected-followup-clear\" class=\"btn-secondary\" type=\"button\" style=\"display:none;\">Clear</button>
           </div>
         </div>
@@ -5265,6 +6910,20 @@ APP_HTML = """<!doctype html>
                   <option value=\"agentic\">Agentic Loop</option>
                 </select>
               </div>
+              <div>
+                <label class=\"label-row\">Execution Mode
+                  <span class=\"hint\" tabindex=\"0\">?
+                    <span class=\"hint-pop\">Live Mode uses the current environment. Demo Mode searches historical public BOTSv3 data only and widens the investigation time range to all time.</span>
+                  </span>
+                </label>
+                <div class=\"toggle-row\" title=\"Demo Mode searches BOTSv3 data only.\">
+                  <label class=\"switch\" aria-label=\"Demo Mode toggle\" title=\"Demo Mode searches BOTSv3 data only.\">
+                    <input id=\"invest-demo-mode\" type=\"checkbox\" />
+                    <span class=\"slider\"></span>
+                  </label>
+                  <span id=\"invest-demo-label\" class=\"toggle-copy\" title=\"Demo Mode searches BOTSv3 data only.\">Live Mode</span>
+                </div>
+              </div>
             </div>
             <p id=\"pipeline-help\" class=\"muted\"></p>
           </div>
@@ -5313,6 +6972,13 @@ APP_HTML = """<!doctype html>
               </div>
             </div>
           </div>
+          <div id=\"invest-mode-banner\" class=\"page-mode-banner live\">
+            <div class=\"page-mode-banner-head\">
+              <div class=\"page-mode-banner-kicker\">Execution Mode</div>
+              <span id=\"invest-mode-badge\" class=\"page-mode-badge\">Live Mode</span>
+            </div>
+            <div id=\"invest-mode-copy\" class=\"page-mode-banner-copy\">Using the discovered local environment and current investigation time windows.</div>
+          </div>
           <div class=\"workspace-grid\">
             <div class=\"workspace-center\">
               <div class=\"workspace-utility-row\">
@@ -5321,60 +6987,110 @@ APP_HTML = """<!doctype html>
                 </div>
               </div>
               <section class=\"workspace-main\">
-              <div class=\"brief-card\" id=\"assessment-section\">
-                <div class=\"brief-head\"><div class=\"brief-kicker\">Current Assessment</div></div>
-                <div id=\"summary\" class=\"summary-box\"></div>
-              </div>
-              <div class=\"timeline-card\" id=\"timeline-section\">
+              <div class=\"brief-card answer-card\" id=\"assessment-section\">
                 <div class=\"brief-head\">
-                  <div class=\"brief-kicker\">Splunk Investigation Timeline</div>
-                  <span class=\"badge\">Detect &rarr; Triage &rarr; Investigate &rarr; Respond &rarr; Recover</span>
+                  <div class=\"brief-kicker\">Answer Card</div>
+                  <span id=\"answer-decision-pill\" class=\"answer-decision-pill wait\">Awaiting result</span>
                 </div>
-                <div id=\"investigation-timeline\" class=\"timeline-list\"></div>
+                <div id=\"answer-headline\" class=\"answer-headline\">Run an investigation to see the current finding.</div>
+                <div id=\"summary\" class=\"answer-copy\">The page will turn the result into a plain-language answer, a confidence-backed recommendation, and a single best next action.</div>
               </div>
-              <div class=\"spl-card spl-section\" id=\"spl-section\">
-                <div class=\"spl-toolbar\">
-                  <div class=\"spl-title\">SPL Executed <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Keep Splunk visible. Review the analyst summary first, then inspect the exact SPL exactly as executed.</span></span></div>
-                  <div class=\"spl-toolbar-actions\">
-                    <button id=\"spl-visibility-toggle\" class=\"btn-secondary\" type=\"button\">Show SPL Executed</button>
-                    <button id=\"copy-spl\" class=\"btn-secondary\" type=\"button\" style=\"display:none;\">Copy SPL</button>
-                    <a id=\"spl-link\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; color:#93c5fd; text-decoration:none; font-size:13px;\">View in Splunk</a>
-                  </div>
+              <div class=\"brief-card confidence-card\" id=\"timeline-section\">
+                <div class=\"brief-head\">
+                  <div class=\"brief-kicker\">Confidence + Why</div>
                 </div>
-                <div id=\"spl-meta-strip\" class=\"brief-strip-metrics\"></div>
-                <div id=\"spl-summary-panel\" class=\"spl-summary-panel\">
-                  <div id=\"spl-analyst-summary\" class=\"brief-body muted\">Run an investigation to see the search strategy, data sources queried, and what the SPL was trying to prove or disprove.</div>
-                </div>
-                <div id=\"spl-raw-shell\" class=\"spl-raw-shell\">
-                  <div id=\"spl-raw-panel\" class=\"spl-summary-panel\">
-                    <pre id=\"spl-query\"></pre>
+                <div class=\"confidence-grid\">
+                  <div class=\"confidence-score-card\">
+                    <div id=\"confidence-score\" class=\"confidence-score-value\">n/a</div>
+                    <div id=\"confidence-label\" class=\"confidence-score-label\">Awaiting result</div>
+                    <div id=\"confidence-support\" class=\"confidence-score-copy\">The decision to continue or stop will appear here after evidence review completes.</div>
                   </div>
-                  <details class=\"spl-toggle\">
-                    <summary>SPL Results (sample)</summary>
-                    <div class=\"spl-toggle-body\">
-                      <pre id=\"spl-results\"></pre>
+                  <div class=\"confidence-why-card\">
+                    <div class=\"drawer-clone-title\">Why this conclusion</div>
+                    <div id=\"investigation-timeline\" class=\"reason-list\">
+                      <div class=\"reason-item muted\">Run an investigation to see the 2-3 reasons supporting the current conclusion.</div>
                     </div>
-                  </details>
+                  </div>
                 </div>
               </div>
-              <div class=\"coverage-card\" id=\"coverage-section\">
-                <div class=\"brief-head\"><div class=\"brief-kicker\">Splunk Coverage and Visibility</div></div>
-                <div id=\"coverage-visibility\" class=\"coverage-grid\"></div>
+              <div class=\"brief-card primary-action-shell\" id=\"pivots-section\">
+                <div class=\"brief-head\">
+                  <div class=\"brief-kicker\">Primary Next Action</div>
+                  <span id=\"primary-action-mode\" class=\"badge\">One best move</span>
+                </div>
+                <div id=\"primary-action-content\" class=\"primary-action-content\">
+                  <div class=\"primary-action-empty\">Run an investigation to surface the single best next action.</div>
+                </div>
+                <details id=\"other-actions-section\" class=\"secondary-actions\">
+                  <summary>Show alternatives</summary>
+                  <div id=\"pivot-cards\" class=\"pivot-grid\"></div>
+                </details>
               </div>
-              <div class=\"pivot-card-shell\" id=\"pivots-section\">
-                <div class=\"brief-head\"><div class=\"brief-kicker\">Recommended Next Steps</div></div>
-                <div id=\"pivot-cards\" class=\"pivot-grid\"></div>
+              <div class=\"brief-card evidence-card\" id=\"coverage-section\">
+                <div class=\"brief-head\">
+                  <div class=\"brief-kicker\">Evidence</div>
+                  <span id=\"evidence-support-pill\" class=\"badge\">Awaiting result</span>
+                </div>
+                <div id=\"coverage-visibility\" class=\"evidence-stack\"></div>
+                <details class=\"spl-inline-shell\" id=\"spl-section\">
+                  <summary>
+                    <span class=\"spl-inline-title\">SPL Used</span>
+                    <span class=\"spl-inline-copy\">Open when you want to validate why the system recommends this move.</span>
+                  </summary>
+                  <div class=\"spl-inline-body\">
+                    <div class=\"spl-inline-toolbar\">
+                      <div class=\"spl-inline-actions\">
+                        <button id=\"spl-visibility-toggle\" class=\"btn-secondary\" type=\"button\">Show SPL Executed</button>
+                        <button id=\"copy-spl\" class=\"btn-secondary\" type=\"button\" style=\"display:none;\">Copy SPL</button>
+                        <a id=\"spl-link\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; color:#93c5fd; text-decoration:none; font-size:13px;\">View in Splunk</a>
+                      </div>
+                    </div>
+                    <div id=\"spl-meta-strip\" class=\"brief-strip-metrics\"></div>
+                    <div id=\"spl-summary-panel\" class=\"spl-summary-panel\">
+                      <div id=\"spl-analyst-summary\" class=\"brief-body muted\">Run an investigation to see the search strategy, data sources queried, and what the SPL was trying to prove or disprove.</div>
+                    </div>
+                    <div id=\"spl-raw-shell\" class=\"spl-raw-shell\">
+                      <div id=\"spl-raw-panel\" class=\"spl-summary-panel\">
+                        <pre id=\"spl-query\"></pre>
+                      </div>
+                      <details class=\"spl-toggle\">
+                        <summary>SPL Results (sample)</summary>
+                        <div class=\"spl-toggle-body\">
+                          <pre id=\"spl-results\"></pre>
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                </details>
               </div>
               </section>
             </div>
             <aside class=\"workspace-side\">
-              <div class=\"support-card\" id=\"mitre-section\">
-                <div class=\"brief-head\"><div class=\"brief-kicker\">MITRE ATT&CK</div></div>
+              <div class=\"support-card support-card-low\" id=\"mitre-section\">
+                <div class=\"brief-head\"><div class=\"brief-kicker\">MITRE Mapping</div></div>
                 <div id=\"brief-mitre\" class=\"mitre-list\"><div class=\"brief-body muted\">No investigation mapping yet.</div></div>
               </div>
-              <div class=\"support-card\">
-                <div class=\"brief-head\"><div class=\"brief-kicker\">Decision Support</div></div>
+              <div class=\"support-card support-card-low\">
+                <div class=\"brief-head\"><div class=\"brief-kicker\">Metadata</div></div>
                 <div id=\"decision-support-summary\" class=\"decision-support-grid\"></div>
+              </div>
+              <div class=\"execution-monitor-card compact\" id=\"execution-monitor-section\" data-state=\"idle\">
+                <div class=\"brief-head\">
+                  <div class=\"brief-kicker\">Execution Monitor</div>
+                  <span id=\"exec-monitor-badge\" class=\"badge\">Idle</span>
+                </div>
+                <div class=\"execution-monitor-grid\">
+                  <div class=\"execution-monitor-main\">
+                    <div id=\"exec-monitor-stage\" class=\"execution-monitor-title\">Ready to run</div>
+                    <div id=\"exec-monitor-copy\" class=\"execution-monitor-copy\">Run an investigation to see the current stage, likely delay source, and the next analyst action.</div>
+                  </div>
+                  <div class=\"execution-monitor-meta\">
+                    <div class=\"support-item\"><div class=\"support-label\">Elapsed</div><div id=\"exec-monitor-elapsed\" class=\"support-value\">0s</div></div>
+                    <div class=\"support-item\"><div class=\"support-label\">Rows</div><div id=\"exec-monitor-rows\" class=\"support-value\">n/a</div></div>
+                    <div class=\"support-item\"><div class=\"support-label\">Run State</div><div id=\"exec-monitor-state\" class=\"support-value\">Idle</div></div>
+                    <div class=\"support-item\"><div class=\"support-label\">Next action</div><div id=\"exec-monitor-next\" class=\"support-value\">Enter a bounded question and run investigation.</div></div>
+                  </div>
+                </div>
               </div>
             </aside>
           </div>
@@ -5386,20 +7102,20 @@ APP_HTML = """<!doctype html>
                     <span>Investigation Drawer</span>
                     <span id=\"drawer-update-indicator\" class=\"drawer-update-indicator\"><span class=\"drawer-update-dot\"></span><span id=\"drawer-update-text\">New drawer content</span></span>
                   </div>
-                  <span class=\"advanced-drawer-copy\">Pivot back into Splunk, inspect supporting evidence, or reopen earlier steps in this investigation path.</span>
+                  <span class=\"advanced-drawer-copy\">Decision stays pinned above. Use the drawer buttons to inspect one investigation lane at a time.</span>
                 </div>
                 <div class=\"advanced-summary-controls\">
-                  <div class=\"drawer-jump-links\">
-                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"case\">Investigation Timeline</button>
-                    <button class=\"jump-link active\" type=\"button\" data-tray-tab=\"pivot\">Pivot</button>
-                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"evidence\">Evidence</button>
-                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"spl\">SPL</button>
-                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"timeline\">Process</button>
-                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"attack\">ATT&amp;CK</button>
-                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"review\">Decision Trace</button>
-                    <button class=\"jump-link\" type=\"button\" data-tray-tab=\"json\">JSON</button>
+                  <div class=\"drawer-jump-links\" role=\"tablist\" aria-label=\"Investigation drawer sections\">
+                    <button type=\"button\" class=\"jump-link active\" data-tray-tab=\"pivot\">Next Step</button>
+                    <button type=\"button\" class=\"jump-link\" data-tray-tab=\"evidence\">Evidence</button>
+                    <button type=\"button\" class=\"jump-link\" data-tray-tab=\"spl\">SPL</button>
+                    <button type=\"button\" class=\"jump-link\" data-tray-tab=\"timeline\">Timeline</button>
+                    <button type=\"button\" class=\"jump-link\" data-tray-tab=\"context\">Context</button>
                   </div>
-                  <a id=\"drawer-spl-link\" class=\"btn-splunk drawer-spl-toggle\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none;text-decoration:none;align-items:center;justify-content:center;\">Open In Splunk</a>
+                  <div class=\"advanced-drawer-state\">
+                    <span class=\"drawer-focus-note\">Decision stays above. Use one lane at a time.</span>
+                    <a id=\"drawer-spl-link\" class=\"btn-splunk drawer-spl-toggle\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none;text-decoration:none;align-items:center;justify-content:center;\">Open In Splunk</a>
+                  </div>
                 </div>
               </div>
               <div class=\"advanced-drawer-actions\">
@@ -5409,93 +7125,169 @@ APP_HTML = """<!doctype html>
             </summary>
             <div class=\"advanced-body\">
               <div id=\"drawer-investigation-narrative\" class=\"drawer-narrative-shell\"></div>
-              <div class=\"advanced-panel\" data-tray-panel=\"case\">
-                <div class=\"advanced-subhead\">Investigation Timeline</div>
-                <div class=\"drawer-clone-grid\">
-                  <div class=\"drawer-clone-card\">
-                    <div style=\"display:flex;align-items:center;justify-content:space-between;gap:10px;\">
-                      <div class=\"drawer-clone-title\">Current Investigation Timeline</div>
-                      <div style=\"display:flex;align-items:center;gap:8px;\">
-                        <a id=\"case-workspace-link\" class=\"btn-secondary\" href=\"/cases\" style=\"margin-top:0;padding:6px 10px;\">Open Cases</a>
-                        <button id=\"case-latest-btn\" class=\"btn-secondary\" type=\"button\" style=\"display:none;margin-top:0;padding:6px 10px;\">Return To Latest</button>
-                        <span id=\"case-badge\" class=\"badge\">New</span>
+              <div class=\"advanced-panel drawer-tab-panel active\" data-tray-panel=\"pivot\">
+                <div class=\"drawer-panel-topline\">
+                  <div>
+                    <div class=\"advanced-subhead\">Recommended Next Step</div>
+                    <div class=\"drawer-panel-copy\">Use this lane when deciding whether to continue, which saved pivot to run next, and when to stop the current branch.</div>
+                  </div>
+                </div>
+                <div class=\"drawer-panel-shell\">
+                  <div class=\"drawer-panel-main\">
+                    <div id=\"drawer-pivot-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">Recommended next steps will appear here after Splunk evidence is returned and reviewed.</div></div></div>
+                  </div>
+                  <aside class=\"drawer-panel-side\">
+                    <div class=\"drawer-clone-card\">
+                      <div class=\"drawer-clone-title\">Operator Call</div>
+                      <div id=\"drawer-pivot-decision-support\" class=\"drawer-clone-copy\">The current decision guidance will appear here after the investigation finishes.</div>
+                    </div>
+                    <div class=\"drawer-clone-card\">
+                      <div class=\"drawer-clone-title\">Current Path</div>
+                      <div id=\"drawer-pivot-path-brief\" class=\"drawer-clone-copy\">Saved path context will appear here once the investigation is stored.</div>
+                      <div id=\"drawer-pivot-entity-strip\" class=\"timeline-entity-strip\"></div>
+                    </div>
+                  </aside>
+                </div>
+              </div>
+              <div class=\"advanced-panel drawer-tab-panel\" data-tray-panel=\"evidence\">
+                <div class=\"drawer-panel-topline\">
+                  <div>
+                    <div class=\"advanced-subhead\">Evidence</div>
+                    <div class=\"drawer-panel-copy\">Use this lane to understand what the search returned, how strong the claim support is, and what coverage gaps remain.</div>
+                  </div>
+                </div>
+                <div class=\"drawer-panel-shell drawer-panel-shell-evidence\">
+                  <aside class=\"drawer-panel-side\">
+                    <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Current Assessment</div><div id=\"drawer-evidence-summary\" class=\"drawer-clone-copy\">Run an investigation to see the current assessment here.</div></div>
+                  </aside>
+                  <div class=\"drawer-panel-main\">
+                    <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Coverage And Visibility</div><div id=\"drawer-evidence-coverage\" class=\"drawer-clone-copy\">Coverage detail will appear here after Splunk evidence is returned.</div></div>
+                  </div>
+                </div>
+              </div>
+              <div class=\"advanced-panel drawer-tab-panel\" data-tray-panel=\"spl\">
+                <div class=\"drawer-panel-topline\">
+                  <div>
+                    <div class=\"advanced-subhead\">Exact SPL</div>
+                    <div class=\"drawer-panel-copy\">Use this lane to inspect the exact query, why it was chosen, and the sample rows that support the current assessment.</div>
+                  </div>
+                </div>
+                <div class=\"drawer-panel-shell drawer-panel-shell-spl\">
+                  <div class=\"drawer-panel-main\">
+                    <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Search Intent</div><div id=\"drawer-spl-summary\" class=\"drawer-clone-copy\">Run an investigation to see the search intent and evidence strategy.</div></div>
+                    <div class=\"drawer-clone-card\"><div style=\"display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;\"><div class=\"drawer-clone-title\" style=\"margin-bottom:0;\">Executed Query</div><a id=\"drawer-spl-inline-link\" class=\"btn-splunk drawer-spl-toggle\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none;text-decoration:none;align-items:center;justify-content:center;\">Open In Splunk</a></div><pre id=\"drawer-spl-query\" class=\"drawer-spl-pre\">(No Splunk query captured yet)</pre></div>
+                  </div>
+                  <aside class=\"drawer-panel-side\">
+                    <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Sample Results</div><pre id=\"drawer-spl-results\" class=\"drawer-spl-pre\">(No SPL result rows captured yet)</pre></div>
+                  </aside>
+                </div>
+              </div>
+              <div class=\"advanced-panel drawer-tab-panel\" data-tray-panel=\"timeline\">
+                <div class=\"drawer-panel-topline\">
+                  <div>
+                    <div class=\"advanced-subhead\">Saved Investigation Path</div>
+                    <div class=\"drawer-panel-copy\">Use this lane to reopen earlier steps, see what changed between pivots, and decide whether the branch is still worth continuing.</div>
+                  </div>
+                </div>
+                <div class=\"drawer-panel-shell drawer-panel-shell-timeline\">
+                  <aside class=\"drawer-panel-side\">
+                    <div class=\"drawer-clone-card\">
+                      <div class=\"drawer-tab-header-strip\">
+                        <div class=\"drawer-clone-title\" style=\"margin-bottom:0;\">Current Investigation Timeline</div>
+                        <div style=\"display:flex;align-items:center;gap:8px;\">
+                          <a id=\"case-workspace-link\" class=\"btn-secondary\" href=\"/cases\" style=\"margin-top:0;padding:6px 10px;\">Open Cases</a>
+                          <button id=\"case-latest-btn\" class=\"btn-secondary\" type=\"button\" style=\"display:none;margin-top:0;padding:6px 10px;\">Return To Latest</button>
+                          <span id=\"case-badge\" class=\"badge\">New</span>
+                        </div>
                       </div>
+                      <div id=\"case-summary\" class=\"drawer-clone-copy\" style=\"margin-top:8px;\">Start an investigation to create a saved investigation timeline. The original finding and each deeper pivot will be tracked here so you can reopen earlier steps without rerunning them.</div>
+                      <div id=\"case-pattern-strip\" class=\"timeline-pattern-strip\"></div>
+                      <div id=\"case-entity-strip\" class=\"timeline-entity-strip\"></div>
+                      <div id=\"case-decision-block\" class=\"timeline-decision-block\"></div>
+                      <div id=\"case-filter-bar\" class=\"timeline-filter-bar\">
+                        <button type=\"button\" class=\"timeline-filter-chip active\" data-case-filter=\"all\">All Steps</button>
+                        <button type=\"button\" class=\"timeline-filter-chip\" data-case-filter=\"pivots\">Pivots</button>
+                        <button type=\"button\" class=\"timeline-filter-chip\" data-case-filter=\"no_results\">No Results</button>
+                      </div>
+                      <div id=\"case-active-filter\" class=\"timeline-active-filter\" style=\"display:none;\"></div>
                     </div>
-                    <div id=\"case-summary\" class=\"drawer-clone-copy\" style=\"margin-top:8px;\">Start an investigation to create a saved investigation timeline. The original finding and each deeper pivot will be tracked here so you can reopen earlier steps without rerunning them.</div>
-                    <div id=\"case-pattern-strip\" class=\"timeline-pattern-strip\"></div>
-                    <div id=\"case-entity-strip\" class=\"timeline-entity-strip\"></div>
-                    <div id=\"case-decision-block\" class=\"timeline-decision-block\"></div>
-                    <div id=\"case-filter-bar\" class=\"timeline-filter-bar\">
-                      <button type=\"button\" class=\"timeline-filter-chip active\" data-case-filter=\"all\">All Steps</button>
-                      <button type=\"button\" class=\"timeline-filter-chip\" data-case-filter=\"pivots\">Pivots</button>
-                      <button type=\"button\" class=\"timeline-filter-chip\" data-case-filter=\"no_results\">No Results</button>
-                    </div>
-                    <div id=\"case-active-filter\" class=\"timeline-active-filter\" style=\"display:none;\"></div>
-                  </div>
-                  <div class=\"drawer-clone-card\">
-                    <div class=\"drawer-clone-title\">Timeline Steps</div>
-                    <div id=\"case-timeline-list\" class=\"case-timeline-list\"></div>
-                  </div>
-                </div>
-              </div>
-              <div class=\"advanced-panel active\" data-tray-panel=\"pivot\">
-                <div class=\"advanced-subhead\">Pivot | Recommended Next Steps</div>
-                <div id=\"drawer-pivot-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">Recommended next steps will appear here after Splunk evidence is returned and reviewed.</div></div></div>
-              </div>
-              <div class=\"advanced-panel\" data-tray-panel=\"evidence\">
-                <div class=\"advanced-subhead\">Evidence Review</div>
-                <div class=\"drawer-clone-grid\">
-                  <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Current Assessment</div><div id=\"drawer-evidence-summary\" class=\"drawer-clone-copy\">Run an investigation to see the current assessment here.</div></div>
-                  <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Coverage And Visibility</div><div id=\"drawer-evidence-coverage\" class=\"drawer-clone-copy\">Coverage detail will appear here after Splunk evidence is returned.</div></div>
-                </div>
-              </div>
-              <div class=\"advanced-panel\" data-tray-panel=\"spl\">
-                <div class=\"advanced-subhead\">Executed SPL</div>
-                <div class=\"drawer-clone-grid\">
-                  <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Search Intent</div><div id=\"drawer-spl-summary\" class=\"drawer-clone-copy\">Run an investigation to see the search intent and evidence strategy.</div></div>
-                  <div class=\"drawer-clone-card\"><div style=\"display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;\"><div class=\"drawer-clone-title\" style=\"margin-bottom:0;\">Executed Query</div><a id=\"drawer-spl-inline-link\" class=\"btn-splunk drawer-spl-toggle\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none;text-decoration:none;align-items:center;justify-content:center;\">Open In Splunk</a></div><pre id=\"drawer-spl-query\" class=\"drawer-spl-pre\">(No Splunk query captured yet)</pre></div>
-                  <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Sample Results</div><pre id=\"drawer-spl-results\" class=\"drawer-spl-pre\">(No SPL result rows captured yet)</pre></div>
-                </div>
-              </div>
-              <div class=\"advanced-panel\" data-tray-panel=\"timeline\">
-                <div class=\"advanced-subhead\">Investigation Process Flow</div>
-                <div id=\"drawer-timeline-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">Timeline detail will appear here after the investigation progresses.</div></div></div>
-                <div id=\"tdir-card\" class=\"tdir-card\" style=\"display:none;\">
-                  <div id=\"tdir-head\" class=\"tdir-head\"></div>
-                  <div id=\"tdir-meta\" class=\"tdir-meta\"></div>
-                </div>
-                <div id=\"tdir-case\" class=\"tdir-body\"></div>
-                <div id=\"workflow-track\" class=\"flow-track\"></div>
-                <div id=\"workflow-meta\" class=\"flow-meta\"></div>
-              </div>
-              <div class=\"advanced-panel\" data-tray-panel=\"attack\">
-                <div class=\"advanced-subhead\">MITRE ATT&amp;CK</div>
-                <div id=\"drawer-mitre-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">ATT&amp;CK context will appear after evidence review completes.</div></div></div>
-              </div>
-              <div class=\"advanced-panel\" data-tray-panel=\"review\">
-                <div class=\"advanced-subhead\">Decision Trace</div>
-                <div id=\"model-personas\" class=\"persona-grid\"></div>
-                <div class=\"advanced-panel\" style=\"margin-top:10px;\">
-                  <div class=\"advanced-subhead\">Execution Audit</div>
-                  <div id=\"model-decisions\" class=\"decision-log\"></div>
-                </div>
-                <div class=\"advanced-panel\" style=\"margin-top:10px;\">
-                  <div class=\"advanced-subhead\">Advanced Review Trace</div>
-                  <pre id=\"journey\"></pre>
-                  <div id=\"continue-shell\" class=\"continue-shell\" style=\"display:none;\">
-                    <div class=\"continue-title\">Deeper Investigation Control <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Shows the bounded continuation state: one automatic deeper-investigation round is allowed when justified, then further continuation requires analyst approval. Duplicate pivots and low-confidence follow-ups are blocked.</span></span></div>
-                    <div id=\"continue-copy\" class=\"continue-copy\"></div>
-                    <div class=\"continue-actions\">
-                      <span id=\"continue-pill\" class=\"continue-pill\"></span>
-                      <button id=\"continue-btn\" class=\"btn-secondary\" style=\"display:none; margin-top:0;\">Run Deeper Investigation</button>
+                  </aside>
+                  <div class=\"drawer-panel-main\">
+                    <div class=\"drawer-clone-card\">
+                      <div class=\"drawer-clone-title\">Timeline Steps</div>
+                      <div id=\"case-timeline-list\" class=\"case-timeline-list\"></div>
                     </div>
                   </div>
                 </div>
               </div>
-              <div class=\"advanced-panel\" data-tray-panel=\"json\">
-                <div class=\"advanced-subhead\">Raw Result JSON</div>
-                <div style=\"display:flex;justify-content:flex-end;margin-bottom:8px;\"><button id=\"drawer-json-toggle\" class=\"btn-secondary drawer-spl-toggle\" type=\"button\">Hide JSON</button></div>
-                <pre id=\"output\"></pre>
+              <div class=\"advanced-panel drawer-tab-panel\" data-tray-panel=\"context\">
+                <div class=\"drawer-panel-topline\">
+                  <div>
+                    <div class=\"advanced-subhead\">Context</div>
+                    <div class=\"drawer-panel-copy\">Use this lane for TDI phase detail, ATT&amp;CK context, execution path, and raw audit material when you need deeper review.</div>
+                  </div>
+                </div>
+                <div class=\"drawer-panel-shell drawer-panel-shell-context\">
+                  <div class=\"drawer-panel-main\">
+                    <div class=\"drawer-clone-card\">
+                      <div class=\"drawer-clone-title\">Process Timeline</div>
+                      <div id=\"drawer-timeline-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">Timeline detail will appear here after the investigation progresses.</div></div></div>
+                    </div>
+                    <div class=\"drawer-clone-card\">
+                      <div class=\"drawer-clone-title\">TDI And Workflow</div>
+                      <div id=\"tdir-card\" class=\"tdir-card\" style=\"display:none;\">
+                        <div id=\"tdir-head\" class=\"tdir-head\"></div>
+                        <div id=\"tdir-meta\" class=\"tdir-meta\"></div>
+                      </div>
+                      <div id=\"tdir-case\" class=\"tdir-body\"></div>
+                      <div id=\"workflow-track\" class=\"flow-track\"></div>
+                      <div id=\"workflow-meta\" class=\"flow-meta\"></div>
+                    </div>
+                  </div>
+                  <aside class=\"drawer-panel-side\">
+                    <div class=\"drawer-clone-card\">
+                      <div class=\"drawer-clone-title\">MITRE ATT&amp;CK</div>
+                      <div id=\"drawer-mitre-content\" class=\"drawer-clone-grid\"><div class=\"drawer-clone-card\"><div class=\"drawer-clone-copy\">ATT&amp;CK context will appear after evidence review completes.</div></div></div>
+                    </div>
+                    <details class=\"flow-shell drawer-detail-fold\">
+                      <summary>Audit trail and raw output</summary>
+                      <div class=\"drawer-detail-body\">
+                        <div class=\"drawer-inline-note\">Assessment, evidence, and next-step guidance stay above. Open this only when you need audit depth.</div>
+                        <details class=\"flow-shell review-fold\">
+                          <summary>Model Roles</summary>
+                          <div class=\"review-fold-body\">
+                            <div id=\"model-personas\" class=\"persona-grid\"></div>
+                          </div>
+                        </details>
+                        <details class=\"flow-shell review-fold\">
+                          <summary>Execution Audit</summary>
+                          <div class=\"review-fold-body\">
+                            <div id=\"model-decisions\" class=\"decision-log\"></div>
+                          </div>
+                        </details>
+                        <details class=\"flow-shell review-fold\">
+                          <summary>Advanced Review Trace</summary>
+                          <div class=\"review-fold-body\">
+                            <pre id=\"journey\"></pre>
+                            <div id=\"continue-shell\" class=\"continue-shell\" style=\"display:none;\">
+                              <div class=\"continue-title\">Deeper Investigation Control <span class=\"hint\" tabindex=\"0\">?<span class=\"hint-pop\">Shows the bounded continuation state: one automatic deeper-investigation round is allowed when justified, then further continuation requires analyst approval. Duplicate pivots and low-confidence follow-ups are blocked.</span></span></div>
+                              <div id=\"continue-copy\" class=\"continue-copy\"></div>
+                              <div class=\"continue-actions\">
+                                <span id=\"continue-pill\" class=\"continue-pill\"></span>
+                                <button id=\"continue-btn\" class=\"btn-secondary\" style=\"display:none; margin-top:0;\">Run Deeper Investigation</button>
+                              </div>
+                            </div>
+                          </div>
+                        </details>
+                        <div>
+                          <div class=\"advanced-subhead\">Raw Result JSON</div>
+                          <div style=\"display:flex;justify-content:flex-end;margin-bottom:8px;\"><button id=\"drawer-json-toggle\" class=\"btn-secondary drawer-spl-toggle\" type=\"button\">Hide JSON</button></div>
+                          <pre id=\"output\"></pre>
+                        </div>
+                      </div>
+                    </details>
+                  </aside>
+                </div>
               </div>
             </div>
           </details>
@@ -5641,6 +7433,76 @@ APP_HTML = """<!doctype html>
       $('artifact-label').textContent = $('artifact').checked ? 'On' : 'Off';
     }
 
+    function syncRunButtonPriority(mode = 'question') {
+      const button = $('run');
+      if (!button) return;
+      const isRerun = String(mode || 'question') === 'rerun';
+      button.classList.toggle('is-secondary-action', isRerun);
+      button.textContent = isRerun ? 'Rerun Question' : 'Run Investigation';
+      button.title = isRerun
+        ? 'Rerun the current question. Use this only if you need fresh evidence after reviewing the primary action.'
+        : 'Execute the current investigation question.';
+    }
+
+    function updateInvestigationDemoLabel() {
+      const demo = Boolean($('invest-demo-mode')?.checked);
+      const label = $('invest-demo-label');
+      if (!label) return;
+      label.textContent = demo ? 'Demo Mode (BOTSv3 only)' : 'Live Mode';
+      label.title = demo
+        ? 'Demo Mode searches BOTSv3 data only.'
+        : 'Live Mode uses the current environment.';
+      const banner = $('invest-mode-banner');
+      const badge = $('invest-mode-badge');
+      const copy = $('invest-mode-copy');
+      const layout = $('invest-layout');
+      if (banner) banner.className = `page-mode-banner ${demo ? 'demo' : 'live'}`;
+      if (badge) badge.textContent = demo ? 'Demo Mode' : 'Live Mode';
+      if (copy) {
+        copy.textContent = demo
+          ? 'Demo Mode is active. Investigation searches historical public BOTSv3 data only and widens the time range to all time.'
+          : 'Using the discovered local environment and current investigation time windows.';
+      }
+      if (layout) layout.setAttribute('data-mode', demo ? 'demo' : 'live');
+    }
+
+    function updateExecutionMonitor(model = {}) {
+      const card = $('execution-monitor-section');
+      const badge = $('exec-monitor-badge');
+      const stage = $('exec-monitor-stage');
+      const copy = $('exec-monitor-copy');
+      const elapsed = $('exec-monitor-elapsed');
+      const rows = $('exec-monitor-rows');
+      const state = $('exec-monitor-state');
+      const next = $('exec-monitor-next');
+      if (!card) return;
+      const status = String(model.status || 'idle');
+      card.setAttribute('data-state', status);
+      if (badge) badge.textContent = String(model.badge || 'Idle');
+      if (stage) stage.textContent = String(model.stage || 'Ready to run');
+      if (copy) copy.textContent = String(model.copy || 'Run an investigation to see the current stage, likely delay source, and the next analyst action.');
+      if (elapsed) elapsed.textContent = String(model.elapsed || '0s');
+      if (rows) rows.textContent = String(model.rows || 'n/a');
+      if (state) state.textContent = String(model.state || 'Idle');
+      if (next) next.textContent = String(model.next || 'Enter a bounded question and run investigation.');
+    }
+
+    function describeFollowupDelta(selection, metaView) {
+      if (!selection || !metaView) return 'Carries forward the saved Splunk follow-up path from the current evidence.';
+      const focusValue = String(selection.focusValue || '').trim();
+      const targetLabel = String(metaView.targetLabel || 'entity').trim() || 'entity';
+      const lowerLabel = targetLabel.toLowerCase();
+      const savedCount = Array.isArray(metaView.targetValues) ? metaView.targetValues.length : 0;
+      if (!focusValue) return `Moves from the broader prior result set into the saved ${lowerLabel} pivot.`;
+      if (selection.exactValueMatch && savedCount <= 1) {
+        return `Narrows from the broader prior result set to the selected ${lowerLabel} value ${focusValue}.`;
+      }
+      if (selection.exactValueMatch && savedCount > 1) {
+        return `Seeds the saved ${lowerLabel} pivot from ${focusValue}; the preserved query still carries ${savedCount} high-priority ${lowerLabel} value${savedCount === 1 ? '' : 's'} from that step.`;
+      }
+      return `Stages the closest saved ${lowerLabel} pivot for the selected IOC ${focusValue}. Review the preserved values before running because the saved query scope is broader than the single click.`;
+    }
+
     function renderSelectedFollowup() {
       const panel = $('selected-followup-panel');
       const badge = $('selected-followup-badge');
@@ -5650,9 +7512,10 @@ APP_HTML = """<!doctype html>
       const clearBtn = $('selected-followup-clear');
       if (!selectedFollowup || !String(selectedFollowup.text || '').trim()) {
         panel.classList.add('empty');
+        panel.classList.remove('active-workspace');
         badge.textContent = 'Nothing selected';
         text.className = 'followup-body muted';
-        text.textContent = 'Select a follow-up step from Recommended Next Steps in the main investigation column to open it here. This drawer is the single place to review and run a follow-up.';
+        text.textContent = 'Run an investigation to load the strongest next step here automatically. This panel mirrors the staged follow-up, but the center column owns the decision and the only primary continue action.';
         meta.style.display = 'none';
         meta.textContent = '';
         runBtn.style.display = 'none';
@@ -5660,13 +7523,15 @@ APP_HTML = """<!doctype html>
         return;
       }
       panel.classList.remove('empty');
+      panel.classList.add('active-workspace');
       const metaView = pivotPresentation(selectedFollowup.candidate || selectedFollowup);
-      badge.textContent = `Pivot ${selectedFollowup.index + 1}`;
+      const seededFrom = String(selectedFollowup.focusValue || '').trim();
+      badge.textContent = seededFrom ? 'Mirror: seeded pivot' : 'Mirror: primary action';
       text.className = 'followup-body';
       text.textContent = selectedFollowup.text;
       meta.style.display = 'block';
-      meta.innerHTML = `${selectedFollowup.origin ? `From ATT&CK: ${esc(selectedFollowup.origin)}` : 'Structured follow-up from the previous investigation'}<br><strong>Target:</strong> <code>${esc(metaView.targetDisplay)}</code>${metaView.provenanceText ? `<br><strong>Why this value:</strong> ${esc(metaView.provenanceText)}` : ''}`;
-      runBtn.style.display = 'inline-flex';
+      meta.innerHTML = `${selectedFollowup.origin ? `Source: ${esc(selectedFollowup.origin)}` : 'Structured follow-up from the current investigation'}${seededFrom ? `<br><strong>Seeded from selected IOC:</strong> <code>${esc(seededFrom)}</code>${selectedFollowup.valueSource ? ` <span class="muted">(${esc(selectedFollowup.valueSource)})</span>` : ''}` : ''}<br><strong>Pivot target:</strong> <code>${esc(metaView.targetDisplay)}</code><br><strong>Why this is staged:</strong> ${esc(metaView.why)}${metaView.provenanceText ? `<br><strong>Why this value:</strong> ${esc(metaView.provenanceText)}` : ''}<br><strong>What changes from previous step:</strong> ${esc(describeFollowupDelta(selectedFollowup, metaView))}`;
+      runBtn.style.display = 'none';
       clearBtn.style.display = 'inline-flex';
     }
 
@@ -5836,6 +7701,120 @@ APP_HTML = """<!doctype html>
       };
     }
 
+    function cloneJsonSafe(value, fallback = null) {
+      if (value === null || value === undefined) return fallback;
+      try {
+        return JSON.parse(JSON.stringify(value));
+      } catch (_err) {
+        return fallback;
+      }
+    }
+
+    function normalizePivotTargetType(value) {
+      const raw = String(value || '').trim().toLowerCase().replace(/[\\s/-]+/g, '_');
+      if (!raw) return '';
+      const aliases = {
+        ip: 'source_ip',
+        src: 'source_ip',
+        src_ip: 'source_ip',
+        clientip: 'source_ip',
+        client_ip: 'source_ip',
+        source_ip: 'source_ip',
+        sourceipaddress: 'source_ip',
+        source_network_address: 'source_ip',
+        user: 'username',
+        username: 'username',
+        user_name: 'username',
+        account: 'username',
+        account_name: 'username',
+        targetusername: 'username',
+        subjectusername: 'username',
+        host: 'host',
+        hostname: 'host',
+        computer: 'host',
+        computername: 'host',
+        dns: 'dns_query',
+        dns_query: 'dns_query',
+        queryname: 'dns_query',
+        domain: 'site',
+        site: 'site',
+        url: 'uri',
+        uri: 'uri',
+        uri_path: 'uri',
+        image: 'process_image',
+        process_image: 'process_image',
+        process: 'process_image',
+        service: 'service',
+        eventsource: 'service',
+        event_source: 'service',
+        principal: 'principal',
+        status: 'status',
+        method: 'http_method',
+        http_method: 'http_method',
+        sourcetype: 'sourcetype',
+        index: 'index',
+      };
+      if (aliases[raw]) return aliases[raw];
+      if (raw.includes('source_ip') || raw.includes('sourceip') || raw.includes('client_ip') || raw.includes('clientip')) return 'source_ip';
+      if (raw.includes('user')) return 'username';
+      if (raw.includes('host') || raw.includes('computer')) return 'host';
+      if (raw.includes('query')) return 'dns_query';
+      if (raw.includes('image') || raw.includes('process')) return 'process_image';
+      if (raw.includes('site') || raw.includes('domain')) return 'site';
+      return raw;
+    }
+
+    function inferPivotTypeHints(fieldOrLabel, value) {
+      const hints = [];
+      const normalized = normalizePivotTargetType(fieldOrLabel);
+      if (normalized) hints.push(normalized);
+      const rawValue = String(value || '').trim();
+      if (/^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(rawValue)) hints.push('source_ip');
+      if (/^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(rawValue)) hints.push('username');
+      if (/\\.exe$/i.test(rawValue)) hints.push('process_image');
+      return Array.from(new Set(hints.filter(Boolean)));
+    }
+
+    function findBestPivotCandidate(candidates, value, opts = {}) {
+      const items = Array.isArray(candidates) ? candidates.filter((item) => item && typeof item === 'object') : [];
+      const rawValue = String(value || '').trim();
+      const normalizedValue = rawValue.toLowerCase();
+      if (!items.length || !normalizedValue) return null;
+      const hints = inferPivotTypeHints(opts.targetTypeHint || opts.field || opts.label || '', rawValue);
+      const ranked = items.map((candidate, index) => {
+        const targetType = normalizePivotTargetType(candidate?.target_type || candidate?.target_label || '');
+        const targetValues = Array.isArray(candidate?.target_values)
+          ? candidate.target_values.map((item) => String(item || '').trim()).filter(Boolean)
+          : [];
+        const rankingValues = Array.isArray(candidate?.target_rankings)
+          ? candidate.target_rankings.map((item) => String(item?.value || '').trim()).filter(Boolean)
+          : [];
+        const candidateValues = Array.from(new Set(targetValues.concat(rankingValues)));
+        const exactValueMatch = candidateValues.some((item) => item.toLowerCase() === normalizedValue);
+        const partialValueMatch = !exactValueMatch && candidateValues.some((item) => {
+          const lower = item.toLowerCase();
+          return lower.includes(normalizedValue) || normalizedValue.includes(lower);
+        });
+        const typeMatch = hints.length ? hints.includes(targetType) : false;
+        let score = 0;
+        if (exactValueMatch) score += 10;
+        if (partialValueMatch) score += 4;
+        if (typeMatch) score += 3;
+        if (!candidateValues.length && typeMatch) score += 1;
+        return {
+          candidate,
+          index,
+          score,
+          exactValueMatch,
+          partialValueMatch,
+          typeMatch,
+          targetType,
+        };
+      }).sort((a, b) => b.score - a.score || (a.exactValueMatch === b.exactValueMatch ? 0 : (a.exactValueMatch ? -1 : 1)) || a.index - b.index);
+      if (!ranked.length || ranked[0].score <= 0) return null;
+      return ranked[0];
+    }
+
     function timelineCollectEntityRefs(node) {
       const entities = node?.evidence_entities && typeof node.evidence_entities === 'object' ? node.evidence_entities : {};
       const refs = [];
@@ -5861,9 +7840,16 @@ APP_HTML = """<!doctype html>
       return items.map((value) => {
         const raw = String(value || '').trim();
         const key = raw.toLowerCase();
-        const isActive = activeTimelineEntityFilter && key === activeTimelineEntityFilter;
+        const match = findBestPivotCandidate(opts.candidates, raw, { targetTypeHint: opts.targetTypeHint || opts.label || '' });
+        const action = String(opts.action || (match ? 'workspace' : 'filter'));
+        const isFilterAction = action !== 'workspace';
+        const isActive = isFilterAction && activeTimelineEntityFilter && key === activeTimelineEntityFilter;
         const count = counts instanceof Map ? Number(counts.get(key) || 0) : 0;
-        return `<button type="button" class="entity-pill ${isActive ? 'active' : ''}" data-entity-value="${esc(key)}" data-entity-label="${esc(raw)}"><strong>${esc(opts.label || 'Entity')}</strong><span>${esc(raw)}</span>${count > 0 ? `<span class="entity-count">${esc(String(count))} step${count === 1 ? '' : 's'}</span>` : ''}</button>`;
+        const actionNote = action === 'workspace' ? 'Stage pivot' : 'Filter';
+        const title = action === 'workspace'
+          ? `Stage the best saved pivot for ${raw}`
+          : `Highlight timeline steps that reference ${raw}`;
+        return `<button type="button" class="entity-pill ${esc(action)}-mode ${isActive ? 'active' : ''}" data-entity-action="${esc(action)}" data-entity-value="${esc(key)}" data-entity-label="${esc(raw)}"${opts.nodeId ? ` data-entity-node-id="${esc(String(opts.nodeId))}"` : ''}${opts.caseId ? ` data-case-id="${esc(String(opts.caseId))}"` : ''}${opts.targetTypeHint ? ` data-target-type="${esc(String(opts.targetTypeHint))}"` : ''} title="${esc(title)}"><span class="entity-main"><strong>${esc(opts.label || 'Entity')}</strong><span>${esc(raw)}</span>${count > 0 ? `<span class="entity-count">${esc(String(count))} step${count === 1 ? '' : 's'}</span>` : ''}</span><span class="entity-action-note">${esc(actionNote)}</span></button>`;
       }).join('');
     }
 
@@ -5910,6 +7896,58 @@ APP_HTML = """<!doctype html>
       if (Number(node?.row_count || 0) <= 0 && Number(node?.depth || 0) > 0) return 'The child pivot executed correctly, but the hypothesis was not supported by returned evidence.';
       if (Number(node?.row_count || 0) <= 0) return 'No evidence matched the initial search scope in this time range.';
       return timelineCleanSummary(node?.saved_summary || node?.summary || 'Evidence was returned for this step.');
+    }
+
+    function timelineChangeSummary(node, currentPrimary, newEntities, carriedForward, missingSummary) {
+      const rows = Number(node?.row_count || 0);
+      const depth = Number(node?.depth || 0);
+      if (node?.supported === false) {
+        return 'This step never became a valid guarded execution path, so it did not produce reliable evidence.';
+      }
+      if (depth <= 0) {
+        if (currentPrimary.length) {
+          return `The opening step returned ${rows} matching row(s) and surfaced ${currentPrimary.length} high-priority value${currentPrimary.length === 1 ? '' : 's'} worth following next.`;
+        }
+        return `The opening step returned ${rows} matching row(s) for analyst review.`;
+      }
+      if (rows <= 0) {
+        return missingSummary
+          ? `This pivot ran against the carried-forward scope, but it found no matching evidence for ${missingSummary}.`
+          : 'This pivot ran correctly, but it did not add supporting evidence.';
+      }
+      if (newEntities.length) {
+        return `This pivot added ${rows} matching row(s) and introduced ${newEntities.length} new high-priority value${newEntities.length === 1 ? '' : 's'}.`;
+      }
+      if (currentPrimary.length || carriedForward.length) {
+        const count = currentPrimary.length || carriedForward.length;
+        return `This pivot stayed focused on ${count} carried-forward value${count === 1 ? '' : 's'} and added ${rows} matching row(s).`;
+      }
+      return `This step added ${rows} matching row(s) to the saved investigation path.`;
+    }
+
+    function timelineNextMoveSummary(node, quickPivotTypes) {
+      const rows = Number(node?.row_count || 0);
+      const depth = Number(node?.depth || 0);
+      const pivots = Array.isArray(node?.pivot_candidates) ? node.pivot_candidates : [];
+      if (node?.supported === false) {
+        return 'Refine the question or tighten the data scope before continuing from this step.';
+      }
+      if (rows <= 0) {
+        return depth > 0
+          ? 'Default move: stop this branch unless you want to widen time or change telemetry.'
+          : 'Widen time or adjust the source coverage before continuing.';
+      }
+      if (quickPivotTypes.includes('source_ip')) {
+        return 'A saved source IP pivot is available. Click a focus value or load the next action into the workspace.';
+      }
+      if (quickPivotTypes.includes('username')) {
+        return 'A saved username pivot is available. Use it only if it tests a stronger hypothesis than the current branch.';
+      }
+      if (pivots.length) {
+        const labels = pivots.slice(0, 2).map((item) => String(item?.target_label || item?.title || 'Next step')).filter(Boolean);
+        return `Saved pivot${pivots.length === 1 ? '' : 's'} available: ${labels.join(' or ')}. Load the best one into the workspace if it sharpens the question.`;
+      }
+      return 'No stronger saved pivot is attached to this step. Validate the SPL in Splunk or stop here.';
     }
 
     function timelineNarrativeModel(timeline) {
@@ -5963,6 +8001,134 @@ APP_HTML = """<!doctype html>
       };
     }
 
+    function timelineDecisionModel(timeline) {
+      const root = Array.isArray(timeline) && timeline.length ? timeline[0] : null;
+      const latest = Array.isArray(timeline) && timeline.length ? timeline[timeline.length - 1] : null;
+      if (!root || !latest) {
+        return {
+          className: 'wait',
+          label: 'Not Started',
+          headline: 'Run the first bounded investigation step',
+          summary: 'There is no saved evidence path yet, so there is nothing meaningful to continue or stop.',
+          tdiStatus: 'No TDI evidence yet',
+          meaning: 'Not meaningful yet',
+          focus: 'Awaiting first step',
+          why: 'The drawer becomes useful only after a search completes and evidence or no-evidence context is saved.',
+          next: 'Run the initial investigation question first.',
+          stop: 'No decision is needed yet.',
+          support: 'The current state does not justify triage, investigation, or response.',
+          nextTitle: 'What to do next',
+        };
+      }
+      const rootIntent = String(root?.intent || '').trim();
+      const latestRows = Number(latest?.row_count || 0);
+      const latestDepth = Number(latest?.depth || 0);
+      const latestPivotCount = Array.isArray(latest?.pivot_candidates) ? latest.pivot_candidates.length : 0;
+      const latestHasEvidence = latestRows > 0;
+      const isBlocked = latest?.supported === false;
+      const failedLoginPath = rootIntent === 'failed_login_activity';
+      if (isBlocked) {
+        return {
+          className: 'stop',
+          label: 'Stop',
+          headline: 'Stop and rerun with a clearer scope',
+          summary: 'This run did not produce a reliable saved evidence path, so continuing from it is not meaningful.',
+          tdiStatus: 'No reliable TDI evidence yet',
+          meaning: 'Not meaningful to continue',
+          focus: latestDepth > 0 ? 'Unresolved pivot step' : 'Unresolved initial step',
+          why: 'The system did not complete a reliable bounded evidence check for this question. Any deeper pivot from this state would be weak or misleading.',
+          next: 'Refine the question, shorten the time window, or choose a clearer supported data source before rerunning.',
+          stop: 'Best default: stop this chain and rerun a cleaner bounded question.',
+          support: 'No triage or response conclusion should be drawn from this run.',
+          nextTitle: 'What to fix first',
+        };
+      }
+      if (!latestHasEvidence && latestDepth > 0) {
+        return {
+          className: 'stop',
+          label: 'Stop',
+          headline: 'Stop here unless you want to widen scope',
+          summary: 'The last pivot executed, but it did not return supporting evidence. That weakens the current follow-up hypothesis.',
+          tdiStatus: 'Still TDI, not response',
+          meaning: 'Meaningful TDI check completed',
+          focus: 'Unsupported child pivot',
+          why: 'This was a valid investigate step, but it did not strengthen the case. Continuing on the same branch risks churn without new signal.',
+          next: 'Only continue if you plan to widen time range, change the telemetry source, or test a different saved pivot.',
+          stop: 'Best default: stop this branch and record that the pivot did not confirm the concern.',
+          support: 'No response trigger is shown by the latest evidence.',
+          nextTitle: 'When to continue anyway',
+        };
+      }
+      if (!latestHasEvidence) {
+        return {
+          className: 'stop',
+          label: 'Stop',
+          headline: 'Stop and adjust the search scope',
+          summary: 'The initial search did not return evidence, so this run did not produce a meaningful investigation trail.',
+          tdiStatus: 'TDI did not establish evidence',
+          meaning: 'Not meaningful yet',
+          focus: 'No initial hits',
+          why: 'Without returned rows, there is nothing strong enough to justify deeper pivots from this branch.',
+          next: 'Only continue if you want to widen time range, change indexes, or test a different data source.',
+          stop: 'Best default: stop and restate the question more narrowly.',
+          support: 'No response action is indicated.',
+          nextTitle: 'What to change first',
+        };
+      }
+      if (latestDepth <= 0) {
+        return {
+          className: 'continue',
+          label: 'Continue',
+          headline: 'Continue with one targeted pivot',
+          summary: 'The first evidence-backed step completed successfully. You are now in a meaningful TDI state with guarded follow-up pivots available.',
+          tdiStatus: 'Triage moving into Investigate',
+          meaning: 'Meaningful TDI work',
+          focus: 'Original evidence-backed finding',
+          why: 'The root step returned evidence, but it is still broad. One targeted pivot is the right next move if you want to answer a stronger question.',
+          next: failedLoginPath
+            ? 'Use one saved pivot that tests a stronger question such as success after failure, privileged follow-on activity, or broader username targeting.'
+            : 'Use one saved pivot that narrows the entity, scope, or technique behind the current finding.',
+          stop: 'If the original question is already answered well enough for your use case, stop here and document the finding.',
+          support: 'This is still TDI. Nothing here justifies response by itself.',
+          nextTitle: 'Best next move',
+        };
+      }
+      if (latestPivotCount > 0) {
+        return {
+          className: 'validate',
+          label: 'Continue Once',
+          headline: 'Continue only if the next pivot tests a stronger hypothesis',
+          summary: 'The latest pivot still returned evidence, so the workflow is meaningful, but this is the point where novice analysts often over-pivot.',
+          tdiStatus: 'Investigate in progress, not Respond',
+          meaning: 'Meaningful TDI scope narrowing',
+          focus: 'Latest saved pivot with evidence',
+          why: failedLoginPath
+            ? 'You have evidence of failed authentication activity, but not proof of successful compromise. Another pivot only makes sense if it tests success, privilege use, or spread.'
+            : 'The latest pivot extended the evidence set, but another step should answer a sharper question rather than restating the same finding.',
+          next: failedLoginPath
+            ? 'Prefer a pivot that checks successful logons, privileged activity, or the same users and hosts across a wider slice of telemetry.'
+            : 'Prefer a pivot that changes dimension: success, privilege, spread, or a materially different entity class.',
+          stop: 'If the next step would only restate the same pattern, stop here and record the finding as investigated but unconfirmed for response.',
+          support: 'This is meaningful TDI work. Response is still not indicated by the saved evidence alone.',
+          nextTitle: 'Only continue if',
+        };
+      }
+      return {
+        className: 'validate',
+        label: 'Validate',
+        headline: 'Validate in Splunk or stop here',
+        summary: 'The current branch returned evidence, but there are no stronger saved pivots left on this step.',
+        tdiStatus: 'Investigate complete for this branch',
+        meaning: 'Meaningful TDI branch',
+        focus: latestDepth > 0 ? 'Latest pivot without new saved pivots' : 'Evidence-backed step',
+        why: 'The main investigative value now is analyst validation, note-taking, and deciding whether the current question has been answered.',
+        next: 'Open the exact SPL in Splunk if you want to verify timestamps, affected assets, or raw events before closing the branch.',
+        stop: 'Best default: stop here unless you have a brand-new bounded hypothesis to test.',
+        support: 'Still TDI, not response.',
+        nextTitle: 'Best final step',
+      };
+    }
+
     function timelineCardHtml(node, opts) {
       const currentNodeId = String(opts.currentNodeId || '');
       const latestNodeId = String(opts.latestNodeId || '');
@@ -5989,8 +8155,18 @@ APP_HTML = """<!doctype html>
       const query = String(node?.query || '').trim();
       const noResults = Number(node?.row_count || 0) <= 0;
       const classes = ['timeline-step-card', String(node?.node_id || '') === currentNodeId ? 'current' : '', status.label === 'Restored' ? 'restored' : '', noResults ? 'no-results' : ''].filter(Boolean).join(' ');
+      const changeSummary = timelineChangeSummary(node, currentPrimary, newEntities, carriedForward, missingSummary);
+      const nextMoveSummary = timelineNextMoveSummary(node, quickPivotTypes);
+      const focusValues = Array.isArray(node?.pivot_source?.target_values) && node.pivot_source.target_values.length ? node.pivot_source.target_values : (currentPrimary.length ? currentPrimary : carriedForward);
+      const focusTitle = String(node?.pivot_source?.target_label || (currentPrimary.length ? 'Focus Values' : 'Carried Forward Evidence'));
+      const pivotPreview = Array.isArray(node?.pivot_candidates) && node.pivot_candidates.length
+        ? `<div class="timeline-pattern-strip">${node.pivot_candidates.slice(0, 2).map((item) => `<span class="timeline-pattern-chip"><strong>Pivot</strong><span>${esc(String(item?.target_label || item?.title || 'Next Step'))}</span></span>`).join('')}</div>`
+        : '<div class="timeline-section-copy muted">No saved pivot candidates were captured on this step.</div>';
+      const attackPreview = Array.isArray(node?.mitre_preview) && node.mitre_preview.length
+        ? `<div class="timeline-pattern-strip">${node.mitre_preview.slice(0, 2).map((item) => `<span class="timeline-pattern-chip"><strong>ATT&CK</strong><span>${esc(item)}</span></span>`).join('')}</div>`
+        : '<div class="timeline-section-copy muted">No ATT&CK tags were saved for this step.</div>';
       return `
-        <article class="${classes}" data-node-id="${esc(String(node?.node_id || ''))}" data-case-id="${esc(caseId)}" data-step-kind="${esc(stepType.toLowerCase().replace(/\\s+/g, '_'))}" data-entity-refs="${esc(refs)}" data-depth="${esc(String(Number(node?.depth || 0)))}">
+        <article class="${classes}" data-node-id="${esc(String(node?.node_id || ''))}" data-case-id="${esc(caseId)}" data-step-kind="${esc(stepType.toLowerCase().replace(/\\s+/g, '_'))}" data-step-type="${esc(Number(node?.depth || 0) > 0 ? 'pivot' : 'investigation')}" data-entity-refs="${esc(refs)}" data-depth="${esc(String(Number(node?.depth || 0)))}">
           <div class="timeline-step-header">
             <div class="timeline-step-heading">
               <div class="timeline-step-labels">
@@ -6010,15 +8186,23 @@ APP_HTML = """<!doctype html>
             <span class="timeline-meta-pill"><strong>Confidence</strong><span>${esc(confidence.text)}</span></span>
           </div>
           <div class="timeline-step-summary">${esc(timelineCleanSummary(node?.saved_summary || node?.summary || previewTitle))}</div>
-          <div class="timeline-step-grid">
-            ${timelineSectionCard('Carried Forward Evidence', renderEntityPills((Array.isArray(node?.pivot_source?.target_values) && node.pivot_source.target_values.length ? node.pivot_source.target_values : carriedForward), counts, { label: String(node?.pivot_source?.target_label || 'Entity') }))}
-            ${timelineSectionCard('New In This Step', newEntities.length ? renderEntityPills(newEntities, counts, { label: 'New' }) : '<div class="timeline-section-copy muted">No new high-priority entities were added in this step.</div>')}
-            ${timelineSectionCard('Missing Or Not Found', missingSummary ? `<div class="timeline-section-copy">No matching evidence found for <code>${esc(missingSummary)}</code>.</div>` : '<div class="timeline-section-copy muted">No major evidence gaps were called out for this step.</div>')}
-            ${timelineSectionCard('Evidence Interpretation', `<div class="timeline-section-copy">${esc(timelineInterpretation(node))}</div>`)}
-            ${timelineSectionCard('Pivot Options', Array.isArray(node?.pivot_candidates) && node.pivot_candidates.length ? `<div class="timeline-section-copy">${esc(String(node.pivot_candidates.length))} saved pivot option(s) are available from this step.</div><div class="timeline-pattern-strip">${node.pivot_candidates.slice(0, 2).map((item) => `<span class="timeline-pattern-chip"><strong>Pivot</strong><span>${esc(String(item?.target_label || item?.title || 'Next Step'))}</span></span>`).join('')}</div>` : '<div class="timeline-section-copy muted">No saved pivot candidates were captured on this step.</div>')}
-            ${timelineSectionCard('Shared Investigation State', `<div class="timeline-section-copy">${esc(String(node?.search_strategy_summary || 'Saved state includes the executed query, entity extraction, pivot candidates, and result summary.'))}</div>${Array.isArray(node?.mitre_preview) && node.mitre_preview.length ? `<div class="timeline-pattern-strip">${node.mitre_preview.slice(0, 2).map((item) => `<span class="timeline-pattern-chip"><strong>ATT&CK</strong><span>${esc(item)}</span></span>`).join('')}</div>` : ''}`)}
+          <div class="timeline-step-grid primary">
+            ${timelineSectionCard(focusTitle, renderEntityPills(focusValues, counts, { label: focusTitle, candidates: Array.isArray(node?.pivot_candidates) ? node.pivot_candidates : [], nodeId: String(node?.node_id || ''), caseId, targetTypeHint: String(node?.pivot_source?.target_type || node?.pivot_source?.target_label || '') }))}
+            ${timelineSectionCard('What Changed', `<div class="timeline-section-copy">${esc(changeSummary)}</div>${newEntities.length ? `<div class="timeline-pattern-strip">${renderEntityPills(newEntities, counts, { label: 'New', candidates: Array.isArray(node?.pivot_candidates) ? node.pivot_candidates : [], nodeId: String(node?.node_id || ''), caseId })}</div>` : ''}`)}
+            ${timelineSectionCard('Best Next Move', `<div class="timeline-section-copy">${esc(nextMoveSummary)}</div>${pivotPreview}`)}
           </div>
-          ${query ? `<details class="timeline-inline-spl"><summary>Executed SPL</summary><pre>${esc(query)}</pre></details>` : ''}
+          <details class="timeline-step-detail-fold">
+            <summary>Step detail</summary>
+            <div class="timeline-step-detail-body">
+              <div class="timeline-step-detail-grid">
+                ${timelineSectionCard('Evidence Interpretation', `<div class="timeline-section-copy">${esc(timelineInterpretation(node))}</div>`)}
+                ${timelineSectionCard('Missing Or Not Found', missingSummary ? `<div class="timeline-section-copy">No matching evidence found for <code>${esc(missingSummary)}</code>.</div>` : '<div class="timeline-section-copy muted">No major evidence gaps were called out for this step.</div>')}
+                ${timelineSectionCard('Saved State', `<div class="timeline-section-copy">${esc(String(node?.search_strategy_summary || 'Saved state includes the executed query, entity extraction, pivot candidates, and result summary.'))}</div>`)}
+                ${timelineSectionCard('ATT&CK Context', attackPreview)}
+              </div>
+              ${query ? `<details class="timeline-inline-spl"><summary>Executed SPL</summary><pre>${esc(query)}</pre></details>` : ''}
+            </div>
+          </details>
           <div class="timeline-step-actions">
             <button type="button" class="btn-secondary" data-timeline-action="restore" data-case-id="${esc(caseId)}" data-node-id="${esc(String(node?.node_id || ''))}">Restore Step</button>
             <button type="button" class="btn-secondary" data-timeline-action="open" data-case-id="${esc(caseId)}" data-node-id="${esc(String(node?.node_id || ''))}">Open In Investigation</button>
@@ -6028,6 +8212,80 @@ APP_HTML = """<!doctype html>
           </div>
         </article>
       `;
+    }
+
+    function buildTimelinePivotContext(node, timeline, caseId) {
+      const items = Array.isArray(timeline) ? timeline : [];
+      const current = node && typeof node === 'object' ? node : {};
+      const baseQuery = String(current?.query || '').trim();
+      const timeRange = current?.time_range && typeof current.time_range === 'object' ? current.time_range : {};
+      return {
+        case_id: String(caseId || '').trim(),
+        current_node_id: String(current?.node_id || '').trim(),
+        parent_node_id: String(current?.parent_node_id || '').trim(),
+        root_question: String((items[0] && (items[0].question || items[0].title)) || current?.question || '').trim(),
+        base_intent: String(current?.intent || '').trim(),
+        base_query_args: {
+          query: baseQuery,
+          earliest_time: String(timeRange.earliest || '').trim(),
+          latest_time: String(timeRange.latest || '').trim(),
+          row_limit: 50,
+        },
+        base_query: baseQuery,
+        time_range: {
+          earliest: String(timeRange.earliest || '').trim(),
+          latest: String(timeRange.latest || '').trim(),
+        },
+        entities: current?.evidence_entities && typeof current.evidence_entities === 'object' ? current.evidence_entities : {},
+        ranked_entities: current?.ranked_entities && typeof current.ranked_entities === 'object' ? current.ranked_entities : {},
+        pivot_candidates: Array.isArray(current?.pivot_candidates) ? current.pivot_candidates : [],
+        graph_case_state: {
+          case_id: String(caseId || '').trim(),
+          current_node_id: String(current?.node_id || '').trim(),
+          parent_node_id: String(current?.parent_node_id || '').trim(),
+          root_question: String((items[0] && (items[0].question || items[0].title)) || current?.question || '').trim(),
+          current_question: String(current?.question || current?.title || '').trim(),
+          intent: String(current?.intent || '').trim(),
+          node_type: String(current?.node_type || '').trim(),
+          selected_tool: String(current?.selected_tool || '').trim(),
+          time_range: {
+            earliest: String(timeRange.earliest || '').trim(),
+            latest: String(timeRange.latest || '').trim(),
+          },
+          query_args: {
+            query: baseQuery,
+            earliest_time: String(timeRange.earliest || '').trim(),
+            latest_time: String(timeRange.latest || '').trim(),
+            row_limit: 50,
+          },
+          rows_returned: Number(current?.row_count || 0),
+          evidence_entities: current?.evidence_entities && typeof current.evidence_entities === 'object' ? current.evidence_entities : {},
+          ranked_entities: current?.ranked_entities && typeof current.ranked_entities === 'object' ? current.ranked_entities : {},
+          pivot_candidates: Array.isArray(current?.pivot_candidates) ? current.pivot_candidates : [],
+          summary: String(current?.saved_summary || current?.summary || '').trim(),
+        },
+      };
+    }
+
+    function stagePivotCandidateForValue(value, opts = {}) {
+      const rawValue = String(value || '').trim();
+      if (!rawValue) return null;
+      const candidates = Array.isArray(opts.candidates) ? opts.candidates : collectPivotCandidates(opts.source || lastAskResult || {});
+      const match = findBestPivotCandidate(candidates, rawValue, { targetTypeHint: opts.targetTypeHint || '' });
+      if (!match || !match.candidate) return null;
+      const stagedCandidate = cloneJsonSafe(match.candidate, match.candidate) || match.candidate;
+      if (opts.contextOverride && typeof opts.contextOverride === 'object') {
+        stagedCandidate.contextOverride = cloneJsonSafe(opts.contextOverride, opts.contextOverride) || opts.contextOverride;
+      }
+      selectFollowup(stagedCandidate, Number(match.candidate?.index ?? match.index ?? 0), String(opts.origin || '').trim(), {
+        contextOverride: opts.contextOverride,
+        caseId: opts.caseId,
+        parentNodeId: opts.parentNodeId,
+        focusValue: rawValue,
+        valueSource: opts.valueSource,
+        exactValueMatch: match.exactValueMatch,
+      });
+      return match;
     }
 
     async function runTimelineAction(action, nodeId, caseId) {
@@ -6049,57 +8307,11 @@ APP_HTML = """<!doctype html>
         const targetType = action === 'pivot-ip' ? 'source_ip' : 'username';
         const candidate = Array.isArray(node?.pivot_candidates) ? node.pivot_candidates.find((item) => String(item?.target_type || '') === targetType) : null;
         if (!candidate) return;
-        selectFollowup(candidate, Number(candidate?.index || 0), 'Investigation Timeline');
-        if (selectedFollowup) {
-          const baseQuery = String(node?.query || '').trim();
-          const timeRange = node?.time_range && typeof node.time_range === 'object' ? node.time_range : {};
-          selectedFollowup.contextOverride = {
-            case_id: String(caseId || '').trim(),
-            current_node_id: String(node?.node_id || '').trim(),
-            parent_node_id: String(node?.parent_node_id || '').trim(),
-            root_question: String((timeline[0] && (timeline[0].question || timeline[0].title)) || node?.question || '').trim(),
-            base_intent: String(node?.intent || '').trim(),
-            base_query_args: {
-              query: baseQuery,
-              earliest_time: String(timeRange.earliest || '').trim(),
-              latest_time: String(timeRange.latest || '').trim(),
-              row_limit: 50,
-            },
-            base_query: baseQuery,
-            time_range: {
-              earliest: String(timeRange.earliest || '').trim(),
-              latest: String(timeRange.latest || '').trim(),
-            },
-            entities: node?.evidence_entities && typeof node.evidence_entities === 'object' ? node.evidence_entities : {},
-            ranked_entities: node?.ranked_entities && typeof node.ranked_entities === 'object' ? node.ranked_entities : {},
-            pivot_candidates: Array.isArray(node?.pivot_candidates) ? node.pivot_candidates : [],
-            graph_case_state: {
-              case_id: String(caseId || '').trim(),
-              current_node_id: String(node?.node_id || '').trim(),
-              parent_node_id: String(node?.parent_node_id || '').trim(),
-              root_question: String((timeline[0] && (timeline[0].question || timeline[0].title)) || node?.question || '').trim(),
-              current_question: String(node?.question || node?.title || '').trim(),
-              intent: String(node?.intent || '').trim(),
-              node_type: String(node?.node_type || '').trim(),
-              selected_tool: String(node?.selected_tool || '').trim(),
-              time_range: {
-                earliest: String(timeRange.earliest || '').trim(),
-                latest: String(timeRange.latest || '').trim(),
-              },
-              query_args: {
-                query: baseQuery,
-                earliest_time: String(timeRange.earliest || '').trim(),
-                latest_time: String(timeRange.latest || '').trim(),
-                row_limit: 50,
-              },
-              rows_returned: Number(node?.row_count || 0),
-              evidence_entities: node?.evidence_entities && typeof node.evidence_entities === 'object' ? node.evidence_entities : {},
-              ranked_entities: node?.ranked_entities && typeof node.ranked_entities === 'object' ? node.ranked_entities : {},
-              pivot_candidates: Array.isArray(node?.pivot_candidates) ? node.pivot_candidates : [],
-              summary: String(node?.saved_summary || node?.summary || '').trim(),
-            },
-          };
-        }
+        selectFollowup(candidate, Number(candidate?.index || 0), 'Investigation Timeline', {
+          contextOverride: buildTimelinePivotContext(node, timeline, caseId),
+          caseId: String(caseId || '').trim(),
+          parentNodeId: String(node?.node_id || '').trim(),
+        });
         setActiveTrayTab('pivot', { openDrawer: true });
         return;
       }
@@ -6150,6 +8362,10 @@ APP_HTML = """<!doctype html>
       const patternStrip = $('case-pattern-strip');
       const entityStrip = $('case-entity-strip');
       const decisionBlock = $('case-decision-block');
+      const filterBar = $('case-filter-bar');
+      const pivotDecisionSupport = $('drawer-pivot-decision-support');
+      const pivotPathBrief = $('drawer-pivot-path-brief');
+      const pivotEntityStrip = $('drawer-pivot-entity-strip');
       const caseContext = result?.case_context && typeof result.case_context === 'object' ? result.case_context : null;
       const timeline = Array.isArray(caseContext?.timeline) ? caseContext.timeline : [];
       const currentNodeId = String(caseContext?.node_id || '').trim();
@@ -6160,9 +8376,25 @@ APP_HTML = """<!doctype html>
         summary.textContent = 'Run an investigation to create a durable analyst timeline. Original findings, deeper pivots, and restored steps will appear here without forcing you to rerun Splunk.';
         shell.innerHTML = '';
         if (narrativeShell) narrativeShell.innerHTML = '';
-        if (patternStrip) patternStrip.innerHTML = '';
-        if (entityStrip) entityStrip.innerHTML = '';
-        if (decisionBlock) decisionBlock.innerHTML = '';
+        if (patternStrip) {
+          patternStrip.innerHTML = '';
+          patternStrip.style.display = 'none';
+        }
+        if (entityStrip) {
+          entityStrip.innerHTML = '';
+          entityStrip.style.display = 'none';
+        }
+        if (decisionBlock) {
+          decisionBlock.innerHTML = '';
+          decisionBlock.style.display = 'none';
+        }
+        if (pivotDecisionSupport) pivotDecisionSupport.textContent = 'The current decision guidance will appear here after the investigation finishes.';
+        if (pivotPathBrief) pivotPathBrief.textContent = 'Saved path context will appear here once the investigation is stored.';
+        if (pivotEntityStrip) {
+          pivotEntityStrip.innerHTML = '';
+          pivotEntityStrip.style.display = 'none';
+        }
+        if (filterBar) filterBar.style.display = '';
         if (workspaceLink) workspaceLink.href = '/cases';
         if (latestBtn) latestBtn.style.display = 'none';
         return;
@@ -6174,9 +8406,10 @@ APP_HTML = """<!doctype html>
       const nodeIndexMap = new Map(timeline.map((node, index) => [String(node?.node_id || ''), index]));
       const rootCount = timeline.length ? 1 : 0;
       const story = timelineNarrativeModel(timeline);
+      const decision = timelineDecisionModel(timeline);
       badge.textContent = caseId;
       if (workspaceLink) workspaceLink.href = `/cases?case_id=${encodeURIComponent(caseId)}`;
-      summary.innerHTML = `This investigation timeline preserves <strong>${timeline.length}</strong> saved step(s): <strong>${rootCount}</strong> original finding and <strong>${pivotCount}</strong> deeper pivot step(s). Click any card to restore that exact state, inspect its evidence, and continue the investigation from there.`;
+      summary.innerHTML = `Saved path: <strong>${timeline.length}</strong> step(s), with <strong>${rootCount}</strong> original finding and <strong>${pivotCount}</strong> deeper pivot step(s). Reopen any step below without rerunning Splunk.`;
       if (latestBtn && latestCaseRef && latestCaseRef.case_id === caseId && latestCaseRef.node_id && latestCaseRef.node_id !== currentNodeId) {
         latestBtn.style.display = 'inline-flex';
       } else if (latestBtn) {
@@ -6184,6 +8417,35 @@ APP_HTML = """<!doctype html>
       }
       if (narrativeShell) {
         narrativeShell.innerHTML = `
+          <div class="timeline-decision-hero ${esc(decision.className)}">
+            <div class="timeline-decision-hero-head">
+              <div>
+                <div class="drawer-clone-title" style="margin-bottom:4px;">Decision Now</div>
+                <div class="timeline-decision-hero-title">${esc(decision.headline)}</div>
+              </div>
+              <span class="timeline-decision-flag">${esc(decision.label)}</span>
+            </div>
+            <div class="timeline-decision-hero-copy">${esc(decision.summary)}</div>
+            <div class="timeline-decision-chip-row">
+              <span class="timeline-decision-chip"><strong>TDI status</strong><span>${esc(decision.tdiStatus)}</span></span>
+              <span class="timeline-decision-chip"><strong>Meaning</strong><span>${esc(decision.meaning)}</span></span>
+              <span class="timeline-decision-chip"><strong>Current focus</strong><span>${esc(decision.focus)}</span></span>
+            </div>
+            <div class="timeline-decision-grid">
+              <div class="timeline-decision-pane">
+                <div class="timeline-decision-pane-title">Why this is the call</div>
+                <div class="timeline-decision-pane-copy">${esc(decision.why)}</div>
+              </div>
+              <div class="timeline-decision-pane">
+                <div class="timeline-decision-pane-title">${esc(decision.nextTitle || 'What to do next')}</div>
+                <div class="timeline-decision-pane-copy">${esc(decision.next)}</div>
+              </div>
+              <div class="timeline-decision-pane">
+                <div class="timeline-decision-pane-title">When to stop</div>
+                <div class="timeline-decision-pane-copy">${esc(decision.stop)}</div>
+              </div>
+            </div>
+          </div>
           <div class="timeline-story-card">
             <div class="timeline-story-head">
               <div>
@@ -6200,27 +8462,41 @@ APP_HTML = """<!doctype html>
         `;
       }
       if (patternStrip) {
-        patternStrip.innerHTML = `
-          <span class="timeline-pattern-chip"><strong>Investigation Type</strong><span>${esc(story.investigationType)}</span></span>
-          <span class="timeline-pattern-chip"><strong>Pattern</strong><span>${esc(story.pattern)}</span></span>
-          <span class="timeline-pattern-chip"><strong>Current Focus</strong><span>${esc(timelineOrdinalLabel(Number(nodeIndexMap.get(String(currentNode?.node_id || '')) || 0)))}</span></span>
-        `;
+        patternStrip.innerHTML = '';
+        patternStrip.style.display = 'none';
       }
       if (entityStrip) {
         const featured = [];
         timeline.forEach((node) => timelinePrimaryEntityValues(node).forEach((value) => { if (value && !featured.includes(value)) featured.push(value); }));
-        entityStrip.innerHTML = featured.length
-          ? renderEntityPills(featured.slice(0, 8), entityCounts, { label: 'Tracked' })
-          : '<div class="timeline-section-copy muted">Tracked entities will appear here once evidence is returned.</div>';
+        if (featured.length > 1) {
+          entityStrip.style.display = 'flex';
+          entityStrip.innerHTML = renderEntityPills(featured.slice(0, 6), entityCounts, { label: 'Tracked', action: 'filter' });
+          if (pivotEntityStrip) {
+            pivotEntityStrip.style.display = 'flex';
+            pivotEntityStrip.innerHTML = renderEntityPills(featured.slice(0, 4), entityCounts, { label: 'Tracked', action: 'filter' });
+          }
+        } else {
+          entityStrip.innerHTML = '';
+          entityStrip.style.display = 'none';
+          if (pivotEntityStrip) {
+            pivotEntityStrip.innerHTML = '';
+            pivotEntityStrip.style.display = 'none';
+          }
+        }
+      }
+      if (pivotDecisionSupport) {
+        pivotDecisionSupport.innerHTML = `<strong>${esc(decision.label)}:</strong> ${esc(decision.next)}<br><span class="muted">${esc(decision.stop)}</span>`;
+      }
+      if (pivotPathBrief) {
+        pivotPathBrief.innerHTML = `Current focus: <strong>${esc(decision.focus)}</strong><br>${summary.textContent || ''}`;
+      }
+      if (filterBar) {
+        const hasNoResults = timeline.some((node) => Number(node?.row_count || 0) <= 0);
+        filterBar.style.display = (timeline.length > 2 || hasNoResults) ? '' : 'none';
       }
       if (decisionBlock) {
-        decisionBlock.innerHTML = `
-          <div class="timeline-decision-title">Decision Moment</div>
-          <div class="timeline-decision-copy">${Number(latestNode?.row_count || 0) <= 0 && Number(latestNode?.depth || 0) > 0 ? 'No evidence of successful compromise has been observed in the latest pivot. The current chain still supports suspicion, but not confirmation.' : 'The latest step is ready for analyst follow-up, validation in Splunk, or a narrower continuation.'}</div>
-          <div class="timeline-decision-actions">
-            ${story.recommendations.map((item) => `<span class="timeline-pattern-chip"><strong>Next</strong><span>${esc(item)}</span></span>`).join('')}
-          </div>
-        `;
+        decisionBlock.innerHTML = '';
+        decisionBlock.style.display = 'none';
       }
       shell.innerHTML = timeline.map((node, index) => {
         const previousNode = index > 0 ? timeline[index - 1] : null;
@@ -6263,9 +8539,34 @@ APP_HTML = """<!doctype html>
       document.querySelectorAll('.entity-pill[data-entity-value]').forEach((pill) => {
         pill.onclick = (event) => {
           event.stopPropagation();
+          const action = String(pill.getAttribute('data-entity-action') || 'filter');
+          const rawValue = String(pill.getAttribute('data-entity-label') || '').trim();
+          if (action === 'workspace') {
+            const nodeId = String(pill.getAttribute('data-entity-node-id') || '').trim();
+            const targetTypeHint = String(pill.getAttribute('data-target-type') || '').trim();
+            const sourceNode = timeline.find((item) => String(item?.node_id || '') === nodeId);
+            if (!sourceNode) return;
+            const match = stagePivotCandidateForValue(rawValue, {
+              source: sourceNode,
+              candidates: Array.isArray(sourceNode?.pivot_candidates) ? sourceNode.pivot_candidates : [],
+              origin: 'Investigation Timeline',
+              targetTypeHint,
+              contextOverride: buildTimelinePivotContext(sourceNode, timeline, caseId),
+              caseId,
+              parentNodeId: String(sourceNode?.node_id || '').trim(),
+              valueSource: 'timeline step',
+            });
+            if (!match) {
+              $('status').textContent = `No saved pivot was captured for ${rawValue} on that step.`;
+              return;
+            }
+            setActiveTrayTab('pivot', { openDrawer: true });
+            $('status').textContent = `Staged the saved pivot for ${rawValue} as the current primary action.`;
+            return;
+          }
           const value = String(pill.getAttribute('data-entity-value') || '');
           activeTimelineEntityFilter = activeTimelineEntityFilter === value ? '' : value;
-          document.querySelectorAll('.entity-pill').forEach((node) => node.classList.toggle('active', activeTimelineEntityFilter && String(node.getAttribute('data-entity-value') || '') === activeTimelineEntityFilter));
+          document.querySelectorAll('.entity-pill.filter-mode').forEach((node) => node.classList.toggle('active', activeTimelineEntityFilter && String(node.getAttribute('data-entity-value') || '') === activeTimelineEntityFilter));
           applyTimelineVisualFilters();
         };
       });
@@ -6306,29 +8607,81 @@ APP_HTML = """<!doctype html>
 
     function drawerPreferredTab(result) {
       const supported = result?.supported !== false;
-      const hasPivots = /pivot-card|pivot-action|follow-up target/i.test(String($('pivot-cards')?.innerHTML || ''));
+      const hasPivots = /pivot-card|primary-action-card|pivot-action|follow-up target|Run .* pivot/i.test(
+        `${String($('primary-action-content')?.innerHTML || '')} ${String($('pivot-cards')?.innerHTML || '')}`
+      );
       const hasRows = hasEvidenceRows(result || {});
       const hasSpl = Boolean(String($('spl-query')?.textContent || '').trim());
-      if (!supported) return 'review';
+      if (!supported) return 'context';
       if (hasPivots) return 'pivot';
       if (hasRows) return 'evidence';
       if (hasSpl) return 'spl';
       return 'pivot';
     }
 
-    function selectFollowup(candidate, index, origin) {
+    function selectFollowup(candidate, index, origin, options = {}) {
       const nextQuestion = String(candidate?.next_question || candidate?.title || candidate?.text || '').trim();
+      const defaultPivotContext = lastAskResult?.pivot_context && typeof lastAskResult.pivot_context === 'object'
+        ? cloneJsonSafe(lastAskResult.pivot_context, null)
+        : null;
+      if (defaultPivotContext && lastAskResult?.case_context?.case_id) {
+        defaultPivotContext.case_id = String(lastAskResult.case_context.case_id || defaultPivotContext.case_id || '').trim();
+        defaultPivotContext.current_node_id = String(lastAskResult.case_context.node_id || defaultPivotContext.current_node_id || '').trim();
+      }
+      const explicitContext = options?.contextOverride && typeof options.contextOverride === 'object'
+        ? cloneJsonSafe(options.contextOverride, options.contextOverride) || options.contextOverride
+        : (
+          candidate?.contextOverride && typeof candidate.contextOverride === 'object'
+            ? cloneJsonSafe(candidate.contextOverride, candidate.contextOverride) || candidate.contextOverride
+            : defaultPivotContext
+        );
       selectedFollowup = {
         text: nextQuestion,
         index: Number(index || 0),
         origin: String(origin || '').trim(),
         candidate: candidate && typeof candidate === 'object' ? candidate : null,
+        contextOverride: explicitContext,
+        caseId: String(options.caseId || lastAskResult?.case_context?.case_id || '').trim(),
+        parentNodeId: String(options.parentNodeId || lastAskResult?.case_context?.node_id || '').trim(),
+        focusValue: String(options.focusValue || '').trim(),
+        valueSource: String(options.valueSource || '').trim(),
+        exactValueMatch: Boolean(options.exactValueMatch),
       };
       if (!selectedFollowup.text) {
         selectedFollowup = null;
         return;
       }
       renderSelectedFollowup();
+    }
+
+    function focusQuestionInput() {
+      const question = $('question');
+      if (!question) return;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      question.focus();
+      question.select();
+    }
+
+    function openInlineSplSection() {
+      const splSection = $('spl-section');
+      if (!splSection) return;
+      splSection.open = true;
+      setSplVisibility(true);
+      splSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    async function runSelectedFollowupInvestigation(selection = selectedFollowup) {
+      if (!selection || !String(selection.text || '').trim()) return;
+      $('question').value = selection.text;
+      $('status').textContent = 'Running selected follow-up investigation...';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      await executeInvestigation({
+        question: selection.text,
+        pivot_context: selection.contextOverride || lastAskResult?.pivot_context || null,
+        pivot_candidate: selection.candidate || null,
+        case_id: selection.caseId || latestCaseRef?.case_id || '',
+        parent_node_id: selection.parentNodeId || latestCaseRef?.node_id || '',
+      });
     }
 
     function extractExecutedSPL(result) {
@@ -6537,9 +8890,11 @@ APP_HTML = """<!doctype html>
     function compactEvidenceTable(rows, result, coverage) {
       if (!rows.length) return '<div class="drawer-empty">No sample entities or row highlights are available yet.</div>';
       const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row || {})))).slice(0, 4);
+      const pivotCandidates = collectPivotCandidates(result);
       const colorForValue = (column, value) => {
         const text = String(value || '').trim();
         if (!text || text === '—' || text === '-') return esc(text || '—');
+        const match = findBestPivotCandidate(pivotCandidates, text, { targetTypeHint: column });
         let hash = 0;
         const source = `${String(column || '')}:${text.toLowerCase()}`;
         for (let i = 0; i < source.length; i += 1) hash = ((hash << 5) - hash) + source.charCodeAt(i);
@@ -6547,7 +8902,8 @@ APP_HTML = """<!doctype html>
         const bg = `hsla(${hue}, 64%, 16%, 0.92)`;
         const border = `hsla(${hue}, 72%, 42%, 0.82)`;
         const fg = `hsla(${hue}, 85%, 86%, 1)`;
-        return `<span class="drawer-value-tag" style="background:${bg};border-color:${border};color:${fg};">${esc(text)}</span>`;
+        if (!match) return `<span class="drawer-value-tag" style="background:${bg};border-color:${border};color:${fg};">${esc(text)}</span>`;
+        return `<button type="button" class="drawer-value-tag actionable" data-ioc-field="${esc(String(column || ''))}" data-ioc-value="${esc(text)}" data-ioc-target="${esc(String(match.targetType || ''))}" title="${esc(`Stage the saved pivot for ${text}`)}" style="background:${bg};border-color:${border};color:${fg};"><span class="drawer-value-tag-label">${esc(text)}</span><span class="drawer-value-tag-note">Stage</span></button>`;
       };
       const head = columns.map((col) => `<th>${esc(col)}</th>`).join('');
       const body = rows.map((row) => {
@@ -6569,9 +8925,10 @@ APP_HTML = """<!doctype html>
       }
       const pivotCandidates = collectPivotCandidates(result);
       if (!pivotCandidates.length) {
-        return '<div class="drawer-inline-note">No next-step pivots are available yet. When evidence review completes, this tab will highlight the best follow-up move back into Splunk.</div>';
+        return '<div class="drawer-inline-note">No next-step pivots are available yet. When evidence review completes, this drawer will highlight the best follow-up move back into Splunk.</div>';
       }
-      return `<div class="drawer-action-list">${pivotCandidates.slice(0, 3).map((candidate, index) => {
+      const additional = Math.max(0, pivotCandidates.length - 1);
+      return `${additional ? `<div class="drawer-inline-note">The strongest saved next step is shown first. ${esc(String(additional))} other saved pivot option${additional === 1 ? '' : 's'} remain lower priority for this branch.</div>` : ''}<div class="drawer-action-list">${pivotCandidates.slice(0, 1).map((candidate, index) => {
         const meta = pivotPresentation(candidate);
         return `
           <div class="drawer-action-card">
@@ -6587,8 +8944,7 @@ APP_HTML = """<!doctype html>
             ${meta.provenanceText ? `<div class="drawer-action-meta-item"><strong>Why this value</strong>${esc(meta.provenanceText)}</div>` : ''}
             <div class="drawer-action-meta-item"><strong>Expected value</strong>${esc(meta.expected)}</div>
             <div class="drawer-action-buttons">
-              <button type="button" class="btn-secondary drawer-pivot-open" data-drawer-pivot-index="${index}">Load Into Follow-Up Drawer</button>
-              <button type="button" class="btn-followup drawer-pivot-run" data-drawer-pivot-index="${index}">Run This Pivot</button>
+              <button type="button" class="btn-secondary drawer-pivot-open" data-drawer-pivot-index="${index}">Stage As Primary Action</button>
             </div>
           </div>
         `;
@@ -6723,14 +9079,17 @@ APP_HTML = """<!doctype html>
     }
 
     function renderCaseHeader(result, coverage, latestRun) {
-      const confidence = result?.final_confidence || result?.selected_confidence || 'n/a';
-      $('case-header-chips').innerHTML = `
-        <div class="utility-pill readonly"><span>Read-Only</span><strong>Splunk investigation mode</strong></div>
-        <div class="utility-pill"><span>Case type</span><strong>${esc(result?.intent || 'unknown')}</strong></div>
-        <div class="utility-pill"><span>Confidence</span><strong>${esc(String(confidence))}</strong></div>
-        <div class="utility-pill"><span>Coverage</span><strong>${esc(coverage.coverageStatus || 'Unknown')}</strong></div>
-        <div class="utility-pill"><span>Rows</span><strong>${esc(String(result?.rows_returned ?? latestRun?.rows_returned ?? 'n/a'))}</strong></div>
-      `;
+      const chips = [
+        '<div class="utility-pill readonly"><span>Read-Only</span><strong>Splunk investigation mode</strong></div>',
+        `<div class="utility-pill"><span>Case type</span><strong>${esc(result?.intent || 'unknown')}</strong></div>`,
+      ];
+      if (result?.case_context?.case_id) {
+        chips.push(`<div class="utility-pill"><span>Case</span><strong>${esc(String(result.case_context.case_id))}</strong></div>`);
+      }
+      if (Number(result?.rows_returned ?? latestRun?.rows_returned ?? 0) > 0) {
+        chips.push(`<div class="utility-pill"><span>Rows</span><strong>${esc(String(result?.rows_returned ?? latestRun?.rows_returned ?? 'n/a'))}</strong></div>`);
+      }
+      $('case-header-chips').innerHTML = chips.join('');
       syncUtilityBarVisibility();
       bindSplToggleButtons();
     }
@@ -6750,43 +9109,38 @@ APP_HTML = """<!doctype html>
         : {};
       const spl = extractExecutedSPL(result || {});
       const coverage = extractCoverage(result || {}, spl);
+      selectedFollowup = null;
+      renderSelectedFollowup();
       renderCaseHeader(result || {}, coverage, latestRun);
       renderSplEvidence(result || {}, coverage, spl, latestRun);
       renderCoverageVisibility(result || {}, coverage);
+      updateExecutionMonitor({
+        status: 'blocked',
+        badge: 'Blocked',
+        stage: 'Investigation blocked before execution',
+        copy: String(result?.guardrail_reason || result?.final_adjudication?.validation_reason || 'The final query did not pass deterministic validation.'),
+        elapsed: 'n/a',
+        rows: '0',
+        state: 'Blocked',
+        next: 'Refine the question, narrow the scope, or choose a more specific pivot before retrying.',
+      });
       $('decision-support-summary').innerHTML = `
         <div class="support-item"><div class="support-label">Policy outcome</div><div class="support-value">Blocked</div></div>
         <div class="support-item"><div class="support-label">Why</div><div class="support-value">${esc(String(result?.guardrail_reason || result?.final_adjudication?.validation_reason || 'Request failed deterministic validation.'))}</div></div>
       `;
       renderPhaseStrip({ detect: 'blocked', triage: 'planned', investigate: 'planned' });
-      $('investigation-timeline').innerHTML = `
-        <details class="timeline-phase" open>
-          <summary>
-            <div class="timeline-phase-main">
-              <div class="timeline-phase-name">Detect</div>
-              <div class="timeline-phase-summary">The request was accepted, classified, and then stopped by policy.</div>
-            </div>
-            <div class="timeline-phase-status">blocked</div>
-          </summary>
-          <div class="timeline-phase-body">
-            <div class="timeline-detail-grid">
-              <div class="timeline-detail"><div class="timeline-detail-title">Why it stopped</div><div class="timeline-detail-copy">${esc(String(result?.guardrail_reason || result?.final_adjudication?.validation_reason || 'The final query did not pass deterministic validation.'))}</div></div>
-              <div class="timeline-detail"><div class="timeline-detail-title">What ran</div><div class="timeline-detail-copy">Planning and review completed, but the bounded execution plan was not allowed to proceed.</div></div>
-              <div class="timeline-detail"><div class="timeline-detail-title">What to do next</div><div class="timeline-detail-copy">Refine the question, verify the expected source/index assumptions, or use a narrower environment-supported pivot.</div></div>
-            </div>
-          </div>
-        </details>
-      `;
-      $('pivot-cards').innerHTML = '<div class="brief-body muted">No follow-up pivots are shown because the request was blocked before a valid investigation path could be approved.</div>';
+      renderSplunkTimeline(result || {}, coverage, result?.summary || '');
+      renderPivotCards(result || {});
       $('brief-mitre').innerHTML = '<div class="brief-body muted">ATT&CK framing is hidden for blocked requests. Start with the policy reason and refine the question into an allowed investigation path.</div>';
-      $('summary').innerHTML = '<div class="brief-body"><strong>The request was blocked before execution.</strong><br>' + esc(String(result?.guardrail_reason || result?.final_adjudication?.validation_reason || 'The final query did not pass deterministic validation.')) + '<br><br><strong>Suggested next step:</strong> tighten the question around supported indexes, sources, or sourcetypes and run it again.</div>';
       $('tdir-card').style.display = 'none';
       $('tdir-case').textContent = '';
       $('journey').textContent = 'This request did not become an investigation because policy blocked the final execution path.';
       setSplVisibility(false);
+      syncRunButtonPriority('rerun');
       syncDrawerMirrors();
       const preferredTab = drawerPreferredTab(result);
       setActiveTrayTab(preferredTab, { openDrawer: false });
-      markDrawerUpdate(preferredTab, preferredTab === 'review' ? 'New blocked-case trace is ready' : 'New drawer details are ready');
+      markDrawerUpdate(preferredTab, preferredTab === 'context' ? 'New blocked-case trace is ready' : 'New drawer details are ready');
     }
 
     function mitreTone(tactic){
@@ -6806,30 +9160,32 @@ APP_HTML = """<!doctype html>
       const progression = Array.isArray(bundle?.possible_progression) ? bundle.possible_progression : [];
       const validation = (bundle?.validation && typeof bundle.validation === 'object') ? bundle.validation : {};
       const frame = String(bundle?.frame || '').trim();
-      $('brief-mitre').innerHTML = items.length
-        ? `
-          ${frame ? `<div class="mitre-card"><div class="mitre-copy">${esc(frame)}</div></div>` : ''}
-          ${items.map((item) => `
-            <div class="mitre-card ${mitreTone(item.tactic)}">
-              <div class="mitre-head">
-                <div class="mitre-title">${esc(item.technique || 'Technique')}</div>
-                <div class="mitre-tip" tabindex="0">?
-                  <div class="mitre-tip-panel">
-                    <div class="mitre-tip-line"><strong>${esc(item.technique || 'Technique')}</strong> (${esc(item.technique_id || '')})</div>
-                    <div class="mitre-tip-line"><strong>Tactic:</strong> ${esc(item.tactic || 'Unknown')}</div>
-                    <div class="mitre-tip-line"><strong>Definition:</strong> ${esc(item.definition || 'No definition available yet.')}</div>
-                    <div class="mitre-tip-line"><strong>Why mapped here:</strong> ${esc(item.rationale || 'No rationale available yet.')}</div>
-                  </div>
-                </div>
+      if (!items.length) {
+        $('brief-mitre').innerHTML = '<div class="brief-body muted">No ATT&CK mapping was derived for this investigation yet.</div>';
+        return;
+      }
+      const primary = items[0] || {};
+      const additional = items.slice(1);
+      $('brief-mitre').innerHTML = `
+        ${frame ? `<div class="mitre-card"><div class="mitre-copy">${esc(frame)}</div></div>` : ''}
+        <div class="mitre-card ${mitreTone(primary.tactic)}">
+          <div class="mitre-title">${esc(primary.technique || 'Technique')}</div>
+          <div class="mitre-meta">${esc(primary.technique_id || '')} • ${esc(primary.tactic || 'Tactic')} • ${esc(primary.confidence || 'medium')} confidence</div>
+          <div class="mitre-copy">${esc(primary.rationale || primary.definition || 'No ATT&CK rationale was recorded for this step.')}</div>
+        </div>
+        ${(additional.length || progression.length || validation.status === 'ok')
+          ? `
+            <details class="spl-toggle">
+              <summary>More mapping detail</summary>
+              <div class="spl-toggle-body">
+                ${additional.length ? `<div class="mitre-card"><div class="mitre-title">Additional techniques</div><div class="mitre-copy">${additional.map((item) => `• ${esc(item.technique_id || '')} ${esc(item.technique || '')}: ${esc(item.rationale || '')}`).join('<br/>')}</div></div>` : ''}
+                ${validation.status === 'ok' ? `<div class="mitre-card"><div class="mitre-title">Validation</div><div class="mitre-copy">${esc(validation.rationale || 'The ATT&CK mapping was reviewed and judged directionally sound.')}</div>${validation.kill_chain_context ? `<div class="mitre-copy" style="margin-top:8px;"><strong>Kill-chain context:</strong> ${esc(validation.kill_chain_context)}</div>` : ''}</div>` : ''}
+                ${progression.length ? `<div class="mitre-card"><div class="mitre-title">Likely follow-on</div><div class="mitre-copy">${progression.slice(0, 3).map((item) => `• ${esc(item.technique_id || '')} ${esc(item.technique || '')}: ${esc(item.why || '')}`).join('<br/>')}</div></div>` : ''}
               </div>
-              <div class="mitre-meta">${esc(item.technique_id || '')} • ${esc(item.tactic || 'Tactic')} • ${esc(item.confidence || 'medium')} confidence</div>
-              <div class="mitre-copy">${esc(item.rationale || '')}</div>
-            </div>
-          `).join('')}
-          ${validation.status === 'ok' ? `<div class="mitre-card"><div class="mitre-title">ATT&CK Validation</div><div class="mitre-meta">${esc(validation.agreement || 'partial')} • ${esc(validation.confidence || 'medium')} confidence • ${esc(validation.model || '')}</div><div class="mitre-copy">${esc(validation.rationale || 'The security reasoning model reviewed the ATT&CK mapping and found it directionally sound.')}</div>${validation.kill_chain_context ? `<div class="mitre-copy" style="margin-top:8px;"><strong>Kill-chain context:</strong> ${esc(validation.kill_chain_context)}</div>` : ''}${Array.isArray(validation.alternate_techniques) && validation.alternate_techniques.length ? `<div class="mitre-copy" style="margin-top:8px;"><strong>Alternates considered:</strong><br/>${validation.alternate_techniques.map((item) => `• ${esc(item.technique_id || '')} ${esc(item.technique || '')}: ${esc(item.why || '')}`).join('<br/>')}</div>` : ''}</div>` : ''}
-          ${progression.length ? `<div class="mitre-card"><div class="mitre-title">Likely Follow-On Techniques</div><div class="mitre-copy">${progression.map((item) => `• ${esc(item.technique_id || '')} ${esc(item.technique || '')}: ${esc(item.why || '')}`).join('<br/>')}</div></div>` : ''}
-        `
-        : '<div class="brief-body muted">No ATT&CK mapping was derived for this investigation yet.</div>';
+            </details>
+          `
+          : ''}
+      `;
     }
 
     window.__splAssetManifest = window.__splAssetManifest || [];
@@ -6872,15 +9228,18 @@ APP_HTML = """<!doctype html>
 
     function renderDecisionSupportSummary(result) {
       const reviewer = result?.security_reviewer_output || result?.security_reviewer?.output || {};
-      const evidenceReviewer = result?.evidence_reviewer_output || result?.evidence_reviewer?.output || {};
-      const continuationReviewer = result?.continuation_reviewer_output || result?.continuation_reviewer?.output || {};
       const adjudication = result?.final_adjudication || {};
+      const support = reviewClaimSupport(result);
+      const decision = decisionGuidanceForResult(result);
+      const coverage = extractCoverage(result || {}, extractExecutedSPL(result || {}));
+      const windowLabel = `${String(result?.query_args?.earliest_time || result?.final_adjudication?.selected_args?.earliest_time || '-24h')} -> ${String(result?.query_args?.latest_time || result?.final_adjudication?.selected_args?.latest_time || 'now')}`;
       const items = [
-        ['Plan confidence', result?.final_confidence || result?.selected_confidence || reviewer.confidence || 'n/a'],
-        ['Query safety', reviewer.approved === false ? 'Needs review' : 'Approved'],
-        ['Evidence quality', evidenceReviewer.evidence_quality || evidenceReviewer.confidence || 'n/a'],
-        ['Final adjudication', adjudication.validation_ok === false ? 'Blocked' : (adjudication.selected_tool || result?.selected_tool || 'Complete')],
-        ['Continuation', continuationReviewer.should_continue === true ? 'Recommended' : 'Not recommended'],
+        ['Decision', decision.label || 'n/a'],
+        ['Confidence', confidenceDisplayValue(result, coverage)],
+        ['Claim support', support.value],
+        ['Rows returned', String(result?.rows_returned ?? '0')],
+        ['Tool path', adjudication.validation_ok === false ? 'Blocked' : (adjudication.selected_tool || result?.selected_tool || 'Complete')],
+        ['Time window', windowLabel],
       ];
       const matchingAssets = matchingActiveAssetsForResult(result);
       if (matchingAssets.length) {
@@ -6897,36 +9256,29 @@ APP_HTML = """<!doctype html>
     }
 
     function renderSplunkTimeline(result, coverage, analystSummary) {
-      const tdir = result?.tdir_case || {};
-      const phase = tdir.phase_status || {};
-      const rows = Number(result?.rows_returned || 0);
-      const intent = result?.intent || 'unknown';
-      const tool = result?.selected_tool || result?.final_adjudication?.selected_tool || 'unknown';
-      const phases = [
-        ['Detect', result?.supported === false ? 'blocked' : 'complete', `Question classified as ${intent}.`, 'Accepted the analyst question and selected a bounded Splunk investigation path.', result?.supported === false ? 'The request was blocked by policy or guardrails.' : 'The case was accepted for investigation.'],
-        ['Triage', phase.triage || 'complete', `Splunk search path selected with ${coverage.indexes.length || 0} index target(s) and ${coverage.sourcetypes.length || 0} sourcetype hint(s).`, `Executed ${tool} to gather initial evidence.`, rows > 0 ? `${rows} row(s) of evidence were returned for first-pass triage.` : 'No matching evidence was returned for initial triage.'],
-        ['Investigate', rows > 0 ? (phase.investigate || 'complete') : 'no_evidence', analystSummary || 'No analyst summary available yet.', `Reviewed the SPL logic and evidence coverage across ${coverage.platforms.join(', ') || 'the targeted sources'}.`, rows > 0 ? 'Evidence was reviewed and follow-on pivots were generated.' : 'The investigation completed without matching evidence, so no deeper case narrative was produced.'],
-        ['Respond', phase.respond || 'planned', 'Read-only phase. No containment or response action is executed by default.', 'Surface analyst follow-up pivots only.', 'Response remains planned unless explicitly enabled later.'],
-        ['Recover', phase.recover || 'planned', 'Recovery automation is not active in this phase.', 'Preserve investigation context and recommended next moves.', 'Recovery remains future-state for this bounded investigation mode.'],
-      ];
-      $('investigation-timeline').innerHTML = phases.map((item, idx) => `
-        <details class="timeline-phase"${idx < 3 ? ' open' : ''}>
-          <summary>
-            <div class="timeline-phase-main">
-              <div class="timeline-phase-name">${esc(item[0])}</div>
-              <div class="timeline-phase-summary">${esc(item[4])}</div>
-            </div>
-            <div class="timeline-phase-status">${esc(String(item[1]).replaceAll('_', ' '))}</div>
-          </summary>
-          <div class="timeline-phase-body">
-            <div class="timeline-detail-grid">
-              <div class="timeline-detail"><div class="timeline-detail-title">Key Evidence</div><div class="timeline-detail-copy">${esc(item[2])}</div></div>
-              <div class="timeline-detail"><div class="timeline-detail-title">Relevant Splunk Action</div><div class="timeline-detail-copy">${esc(item[3])}</div></div>
-              <div class="timeline-detail"><div class="timeline-detail-title">Analyst-Facing Conclusion</div><div class="timeline-detail-copy">${esc(item[4])}</div></div>
-            </div>
+      const parsed = parseSummarySections(analystSummary || result?.summary || '');
+      const decision = decisionGuidanceForResult(result);
+      const entities = resultEntitySnapshot(result);
+      const answer = deriveAnswerCopy(result, coverage, parsed.sections, entities);
+      const reasons = deriveReasonBullets(result, coverage, parsed.sections, decision, entities);
+      const confidence = confidenceDisplayValue(result, coverage);
+      setAnswerDecisionPill(decision);
+      $('answer-headline').textContent = deriveAnswerHeadline(result, coverage, parsed.sections, decision, entities);
+      $('summary').innerHTML = `
+        <div class="answer-copy">${esc(answer.main || 'Run an investigation to see the current finding.')}</div>
+        ${answer.note ? `<div class="answer-copy-note">${esc(answer.note)}</div>` : ''}
+      `;
+      $('confidence-score').textContent = confidence;
+      $('confidence-label').textContent = `${String(decision.label || 'Awaiting result')} recommendation`;
+      $('confidence-support').textContent = String(decision.summary || 'The decision to continue or stop will appear here after evidence review completes.');
+      $('investigation-timeline').innerHTML = reasons.length
+        ? reasons.map((item) => `
+          <div class="reason-item">
+            <strong>${esc(String(item.label || 'Reason'))}</strong>
+            ${esc(String(item.copy || ''))}
           </div>
-        </details>
-      `).join('');
+        `).join('')
+        : '<div class="reason-item muted">Run an investigation to see the reasons supporting the current conclusion.</div>';
     }
 
     function summarizeSplIntent(result, coverage) {
@@ -7005,21 +9357,50 @@ APP_HTML = """<!doctype html>
     }
 
     function renderCoverageVisibility(result, coverage) {
-      const rows = Number(result?.rows_returned || 0);
-      const noGapText = 'No explicit telemetry gap was called out in the returned result.';
-      const mismatchNote = investigationOutcomeNote(result);
-      const items = [
-        ['Platforms and indexes searched', `${coverage.platforms.length ? coverage.platforms.join(', ') : 'Not derived'} | ${coverage.indexes.length ? coverage.indexes.join(', ') : 'No explicit index extracted'}`],
-        ['Sourcetypes and source paths', `${coverage.sourcetypes.length ? coverage.sourcetypes.join(', ') : 'Not derived'} | ${coverage.rawSources.length ? coverage.rawSources.join(', ') : 'No explicit source path extracted'}`],
-        ['Evidence return and coverage status', `${rows > 0 ? 'Evidence rows were returned.' : 'No rows were returned for the expected sources in this window.'} ${coverage.coverageStatus || 'Unknown'}${mismatchNote ? ` ${mismatchNote}` : ''}`],
-        ['Visibility gaps and follow-up checks', coverage.gaps.length ? coverage.gaps.join(' ') : noGapText],
-      ];
-      $('coverage-visibility').innerHTML = items.map(([label, value]) => `
-        <div class="coverage-row${label === 'Visibility gaps and follow-up checks' && String(value) !== noGapText ? ' gap' : ''}">
-          <div class="coverage-row-title">${esc(label)}</div>
-          <div class="coverage-row-copy">${esc(String(value))}</div>
+      const rows = collectEvidenceRows(result);
+      const support = reviewClaimSupport(result);
+      const entities = resultEntitySnapshot(result);
+      const totalRows = Number(result?.rows_returned || 0);
+      const focusSummary = entities.sourceIps.length
+        ? `Source IPs: ${entities.sourceIps.slice(0, 3).join(', ')}${entities.sourceIps.length > 3 ? ` +${entities.sourceIps.length - 3} more` : ''}`
+        : entities.users.length
+          ? `Users: ${entities.users.slice(0, 3).join(', ')}${entities.users.length > 3 ? ` +${entities.users.length - 3} more` : ''}`
+          : entities.hosts.length
+            ? `Hosts: ${entities.hosts.slice(0, 3).join(', ')}${entities.hosts.length > 3 ? ` +${entities.hosts.length - 3} more` : ''}`
+            : 'No named IOC was elevated from the current sample rows.';
+      const coverageSummary = coverage.gaps.length
+        ? coverage.gaps[0]
+        : `${coverage.coverageStatus || 'Unknown'}${coverage.crossPlatform && coverage.platforms.length ? ` across ${coverage.platforms.join(', ')}` : ''}.`;
+      const snapshotSummary = rows.length
+        ? `Showing ${rows.length} representative row(s) inline from ${totalRows || rows.length} returned row(s).`
+        : (totalRows > 0
+            ? `The search returned ${totalRows} row(s), but no representative sample rows were captured for inline display.`
+            : 'No representative evidence rows are available because the search returned no matching results.');
+      const tableMarkup = rows.length
+        ? `<div class="evidence-table-wrap">${compactEvidenceTable(rows, result, coverage)}</div>`
+        : `<div class="evidence-empty">${esc(snapshotSummary)}</div>`;
+      $('evidence-support-pill').textContent = support.value;
+      $('coverage-visibility').innerHTML = `
+        <div class="evidence-note-grid">
+          <div class="evidence-note-card">
+            <strong>Claim support</strong>
+            <span>${esc(String(support.note || 'Run an investigation to see claim support.'))}</span>
+          </div>
+          <div class="evidence-note-card">
+            <strong>Key focus</strong>
+            <span>${esc(focusSummary)}</span>
+          </div>
+          <div class="evidence-note-card">
+            <strong>Coverage</strong>
+            <span>${esc(coverageSummary)}</span>
+          </div>
         </div>
-      `).join('');
+        <div class="evidence-note-card">
+          <strong>Evidence snapshot</strong>
+          <span>${esc(snapshotSummary)}</span>
+        </div>
+        ${tableMarkup}
+      `;
     }
 
     function classifyPivot(pivotText) {
@@ -7073,68 +9454,184 @@ APP_HTML = """<!doctype html>
     }
 
     function renderPivotCards(result) {
-      if (result?.supported === false) {
-        $('pivot-cards').innerHTML = '<div class="brief-body muted">Follow-up pivots are hidden because the request did not pass the guarded execution checks.</div>';
-        return [];
-      }
-      const pivotCandidates = collectPivotCandidates(result);
+      const primaryShell = $('primary-action-content');
+      const primaryMode = $('primary-action-mode');
+      const alternativesShell = $('other-actions-section');
+      const pivotGrid = $('pivot-cards');
+      const decision = decisionGuidanceForResult(result);
+      const rows = Number(result?.rows_returned || 0);
       const primaryTechnique = Array.isArray(result?.mitre_attack?.techniques) && result.mitre_attack.techniques.length
         ? `${result.mitre_attack.techniques[0].technique || 'Technique'} (${result.mitre_attack.techniques[0].technique_id || ''})`.trim()
         : 'Splunk investigation follow-up';
-      $('pivot-cards').innerHTML = pivotCandidates.length
-        ? pivotCandidates.map((candidate, index) => {
-            const meta = pivotPresentation(candidate);
-            return `
-              <div class="pivot-card">
-                <div class="pivot-card-head">
-                  <div>
-                    <div class="pivot-card-kicker">Pivot ${String(index + 1)}</div>
-                    <div class="pivot-card-title">${esc(meta.title)}</div>
-                  </div>
-                </div>
-                <div class="pivot-card-copy">${esc(String(candidate?.title || ''))}</div>
-                <div class="pivot-meta-grid">
-                  <div class="pivot-meta"><strong>Why this step matters</strong><span>${esc(meta.why)}</span></div>
-                  <div class="pivot-meta"><strong>Follow-up target</strong><span><code>${esc(meta.targetDisplay)}</code></span></div>
-                  ${meta.provenanceText ? `<div class="pivot-meta"><strong>Why this value</strong><span>${esc(meta.provenanceText)}</span></div>` : ''}
-                  <div class="pivot-meta"><strong>Expected value</strong><span>${esc(meta.expected)}</span></div>
-                  <div class="pivot-meta"><strong>Estimated scope</strong><span>${esc(meta.scope)}</span></div>
-                </div>
-                <div class="pivot-actions">
-                  <button type="button" class="btn-secondary pivot-open-btn" data-pivot-index="${String(index)}">Open In Drawer</button>
-                  <button type="button" class="btn-followup pivot-run-btn" data-pivot-index="${String(index)}">Run Pivot Now</button>
-                </div>
+      const splLinkVisible = Boolean(String($('spl-link')?.href || '').trim()) && $('spl-link')?.style.display !== 'none';
+      if (primaryMode) primaryMode.textContent = decision.label || 'One best move';
+      if (result?.supported === false) {
+        if (primaryShell) {
+          primaryShell.innerHTML = `
+            <div class="primary-action-card">
+              <div class="primary-action-title">Refine the question and rerun</div>
+              <div class="primary-action-copy">The current run did not become a trustworthy evidence path, so the next useful step is to tighten the question rather than continue deeper.</div>
+              <div class="primary-action-note-grid">
+                <div class="primary-action-note"><strong>Why this is the best move</strong><span>${esc(decision.next)}</span></div>
+                <div class="primary-action-note"><strong>When not to choose this</strong><span>Do not continue from a blocked path. Fix the scope first.</span></div>
               </div>
-            `;
-          }).join('')
-        : '<div class="brief-body muted">No additional Splunk-grounded follow-up steps were derived for this investigation yet.</div>';
-      document.querySelectorAll('.pivot-open-btn').forEach((btn) => {
-        btn.onclick = () => {
-          const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
-          const candidate = pivotCandidates[idx] || null;
-          if (!candidate) return;
-          selectFollowup(candidate, idx, primaryTechnique);
-          $('status').textContent = 'Follow-up step opened in the left drawer. Review it there, then run when ready.';
-          window.scrollTo({ top: 0, behavior: 'smooth' });
+              <div class="primary-action-buttons">
+                <button id="primary-action-btn" type="button" class="primary-action-btn" data-primary-action="focus-question">Edit question</button>
+              </div>
+            </div>
+          `;
+        }
+        if (alternativesShell) {
+          alternativesShell.open = false;
+          alternativesShell.style.display = 'none';
+        }
+        if (pivotGrid) pivotGrid.innerHTML = '';
+        const focusBtn = $('primary-action-btn');
+        if (focusBtn) focusBtn.onclick = () => focusQuestionInput();
+        return [];
+      }
+      const pivotCandidates = collectPivotCandidates(result);
+      let primaryIndex = -1;
+      if (selectedFollowup?.candidate && pivotCandidates.length) {
+        primaryIndex = pivotCandidates.findIndex((candidate, index) => {
+          if (String(candidate?.id || '') && String(selectedFollowup?.candidate?.id || '')) {
+            return String(candidate.id) === String(selectedFollowup.candidate.id);
+          }
+          return index === Number(selectedFollowup?.index || 0);
+        });
+      }
+      if (primaryIndex < 0) primaryIndex = 0;
+      if (pivotCandidates.length) {
+        const primaryCandidate = pivotCandidates[primaryIndex] || pivotCandidates[0];
+        if (!selectedFollowup || Number(selectedFollowup.index || 0) !== primaryIndex || String(selectedFollowup.text || '').trim() !== String(primaryCandidate?.next_question || primaryCandidate?.title || primaryCandidate?.text || '').trim()) {
+          selectFollowup(primaryCandidate, primaryIndex, primaryTechnique);
+        }
+        const meta = pivotPresentation(primaryCandidate);
+        const changeSummary = describeFollowupDelta(selectedFollowup, meta);
+        const holdOffText = decision.className === 'continue'
+          ? (
+              String(result?.intent || '') === 'failed_login_activity'
+                ? 'Do not choose this if the next question only restates failed-login noise instead of testing success, privilege use, or spread.'
+                : decision.stop
+            )
+          : decision.stop;
+        if (primaryShell) {
+          primaryShell.innerHTML = `
+            <div class="primary-action-card">
+              <div class="primary-action-topline">
+                <div>
+                  <div class="primary-action-title">${esc(meta.title || 'Run the strongest saved pivot')}</div>
+                  <div class="primary-action-copy">${esc(changeSummary)}</div>
+                </div>
+                <span class="badge">${esc(decision.nextTitle || 'Best next move')}</span>
+              </div>
+              <div class="primary-action-target">${esc(meta.targetDisplay || meta.targetLabel || 'Saved pivot target')}</div>
+              <div class="primary-action-note-grid">
+                <div class="primary-action-note"><strong>Why this is the best move</strong><span>${esc(meta.provenanceText || decision.next || meta.why)}</span></div>
+                <div class="primary-action-note"><strong>When not to choose this</strong><span>${esc(holdOffText)}</span></div>
+              </div>
+              <div class="primary-action-buttons">
+                <button id="primary-action-btn" type="button" class="primary-action-btn" data-primary-action="run-pivot">Run ${esc(String(meta.targetLabel || 'next action').toLowerCase())} pivot</button>
+                <button id="primary-action-spl" type="button" class="btn-secondary primary-action-link" data-primary-action="toggle-spl">Open SPL Used</button>
+                ${splLinkVisible ? '<a id="primary-action-splunk" class="btn-secondary primary-action-link" href="#" target="_blank" rel="noopener noreferrer">View In Splunk</a>' : ''}
+              </div>
+            </div>
+          `;
+        }
+        const alternatives = pivotCandidates.filter((_, index) => index !== primaryIndex);
+        if (alternativesShell) {
+          alternativesShell.open = false;
+          alternativesShell.style.display = alternatives.length ? '' : 'none';
+        }
+        if (pivotGrid) {
+          pivotGrid.innerHTML = alternatives.length
+            ? alternatives.map((candidate) => {
+                const index = pivotCandidates.indexOf(candidate);
+                const meta = pivotPresentation(candidate);
+                return `
+                  <div class="pivot-card">
+                    <div class="pivot-card-head">
+                      <div>
+                        <div class="pivot-card-kicker">Alternative</div>
+                        <div class="pivot-card-title">${esc(meta.title)}</div>
+                      </div>
+                    </div>
+                    <div class="pivot-card-copy">${esc(meta.why)}</div>
+                    <div class="pivot-meta-grid">
+                      <div class="pivot-meta"><strong>Target</strong><span><code>${esc(meta.targetDisplay)}</code></span></div>
+                      <div class="pivot-meta"><strong>Expected value</strong><span>${esc(meta.expected)}</span></div>
+                      <div class="pivot-meta"><strong>Scope</strong><span>${esc(meta.scope)}</span></div>
+                    </div>
+                    <div class="pivot-actions">
+                      <button type="button" class="btn-secondary pivot-open-btn" data-pivot-index="${String(index)}">Use this instead</button>
+                    </div>
+                  </div>
+                `;
+              }).join('')
+            : '<div class="brief-body muted">No lower-priority alternatives were attached to this investigation step.</div>';
+        }
+        const primaryBtn = $('primary-action-btn');
+        if (primaryBtn) {
+          primaryBtn.onclick = async () => {
+            await runSelectedFollowupInvestigation(selectedFollowup);
+          };
+        }
+        const primarySplBtn = $('primary-action-spl');
+        if (primarySplBtn) {
+          primarySplBtn.onclick = () => openInlineSplSection();
+        }
+        const splunkBtn = $('primary-action-splunk');
+        if (splunkBtn && $('spl-link')) {
+          splunkBtn.href = $('spl-link').href;
+        }
+        document.querySelectorAll('.pivot-open-btn').forEach((btn) => {
+          btn.onclick = () => {
+            const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
+            const candidate = pivotCandidates[idx] || null;
+            if (!candidate) return;
+            selectFollowup(candidate, idx, primaryTechnique);
+            renderPivotCards(result);
+            $('status').textContent = 'Alternative follow-up staged. Review the primary action card, then continue if it is still the strongest move.';
+          };
+        });
+        return pivotCandidates;
+      }
+      if (primaryShell) {
+        const title = rows > 0 ? 'Validate this result in Splunk or stop here' : 'Adjust scope before continuing';
+        const bestMove = rows > 0
+          ? 'There is evidence to review, but no stronger saved pivot was attached to this step.'
+          : 'No evidence was returned, so the next useful step is to change scope rather than pivot deeper.';
+        const actionLabel = rows > 0 ? (splLinkVisible ? 'View in Splunk' : 'Open SPL Used') : 'Adjust question';
+        const actionType = rows > 0 ? (splLinkVisible ? 'open-splunk' : 'toggle-spl') : 'focus-question';
+        primaryShell.innerHTML = `
+          <div class="primary-action-card">
+            <div class="primary-action-title">${esc(title)}</div>
+            <div class="primary-action-copy">${esc(bestMove)}</div>
+            <div class="primary-action-note-grid">
+              <div class="primary-action-note"><strong>Why this is the best move</strong><span>${esc(decision.next)}</span></div>
+              <div class="primary-action-note"><strong>When not to choose this</strong><span>${esc(decision.stop)}</span></div>
+            </div>
+            <div class="primary-action-buttons">
+              <button id="primary-action-btn" type="button" class="primary-action-btn" data-primary-action="${esc(actionType)}">${esc(actionLabel)}</button>
+            </div>
+          </div>
+        `;
+      }
+      if (alternativesShell) {
+        alternativesShell.open = false;
+        alternativesShell.style.display = 'none';
+      }
+      if (pivotGrid) pivotGrid.innerHTML = '';
+      const fallbackBtn = $('primary-action-btn');
+      if (fallbackBtn) {
+        fallbackBtn.onclick = () => {
+          const action = String(fallbackBtn.getAttribute('data-primary-action') || '');
+          if (action === 'focus-question') focusQuestionInput();
+          else if (action === 'open-splunk' && $('spl-link') && $('spl-link').href && $('spl-link').href !== '#') window.open($('spl-link').href, '_blank', 'noopener');
+          else openInlineSplSection();
         };
-      });
-      document.querySelectorAll('.pivot-run-btn').forEach((btn) => {
-        btn.onclick = async () => {
-          const idx = Number(btn.getAttribute('data-pivot-index') || '-1');
-          const candidate = pivotCandidates[idx] || null;
-          if (!candidate) return;
-          selectFollowup(candidate, idx, primaryTechnique);
-          $('question').value = String(candidate?.next_question || candidate?.title || '');
-          $('status').textContent = 'Running selected follow-up investigation...';
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-          await executeInvestigation({
-            question: String(candidate?.next_question || candidate?.title || ''),
-            pivot_context: result?.pivot_context || null,
-            pivot_candidate: candidate,
-          });
-        };
-      });
-      return pivotCandidates;
+      }
+      return [];
     }
 
     function hasEvidenceRows(result) {
@@ -7154,19 +9651,25 @@ APP_HTML = """<!doctype html>
         : {};
       const spl = extractExecutedSPL(result || {});
       const coverage = extractCoverage(result || {}, spl);
+      selectedFollowup = null;
+      renderSelectedFollowup();
       renderCaseHeader(result || {}, coverage, latestRun);
       renderSplEvidence(result || {}, coverage, spl, latestRun);
       renderCoverageVisibility(result || {}, coverage);
+      updateExecutionMonitor({
+        status: 'no_hits',
+        badge: 'No Hits',
+        stage: 'Investigation completed without matching evidence',
+        copy: 'Splunk completed the query, but no rows matched the selected time range and filters.',
+        elapsed: 'complete',
+        rows: String(Number(result?.rows_returned || 0)),
+        state: 'Complete',
+        next: 'Widen the time range, validate the expected data source, or ask a narrower follow-up question.',
+      });
       renderDecisionSupportSummary(result || {});
       renderSplunkTimeline(result || {}, coverage, 'Splunk completed the query, but no rows matched the current time window and filters.');
-      $('pivot-cards').innerHTML = '<div class="brief-body muted">No follow-up steps were generated because the completed Splunk search returned no matching evidence. Validate coverage, widen the time range, or refine the search scope.</div>';
+      renderPivotCards(result || {});
       setSplVisibility(false);
-      $('summary').innerHTML =
-        '<div class="brief-body">' +
-        '<strong>No matching evidence was returned.</strong><br>' +
-        'Splunk completed the query, but no rows matched the selected time range and filters for this investigation.' +
-        '<br><br><strong>Suggested next check:</strong> Widen the time window, verify the expected index/source assumptions, or try a narrower follow-up question.' +
-        '</div>';
       $('brief-mitre').innerHTML =
         '<div class="brief-body muted">No ATT&CK mapping was produced because no evidence was returned for this completed investigation.</div>';
       $('tdir-card').style.display = 'none';
@@ -7178,6 +9681,7 @@ APP_HTML = """<!doctype html>
         investigate: 'no_evidence',
       });
       renderCaseTimeline(result || {});
+      syncRunButtonPriority('rerun');
       syncDrawerMirrors();
       {
         const preferredTab = drawerPreferredTab(result);
@@ -7206,8 +9710,19 @@ APP_HTML = """<!doctype html>
         $('coverage-visibility').innerHTML = '';
         $('pivot-cards').innerHTML = '';
         $('decision-support-summary').innerHTML = '';
-        $('investigation-timeline').innerHTML = '';
+        renderDecisionPlaceholder({});
+        updateExecutionMonitor({
+          status: 'idle',
+          badge: 'Idle',
+          stage: 'Ready to run',
+          copy: 'Run an investigation to see the current stage, likely delay source, and the next analyst action.',
+          elapsed: '0s',
+          rows: 'n/a',
+          state: 'Idle',
+          next: 'Enter a bounded question and run investigation.',
+        });
         renderCaseTimeline(null);
+        syncRunButtonPriority('question');
         syncUtilityBarVisibility();
         return;
       }
@@ -7230,7 +9745,11 @@ APP_HTML = """<!doctype html>
       renderDecisionSupportSummary(result);
       renderSplEvidence(result, coverage, spl, latestRun);
       renderCoverageVisibility(result, coverage);
-      renderPivotCards(result);
+      const pivotCandidates = renderPivotCards(result);
+      if (!pivotCandidates.length) {
+        selectedFollowup = null;
+        renderSelectedFollowup();
+      }
       renderSplunkTimeline(result, coverage, String(result?.summary || '').trim());
       renderCaseTimeline(result);
       renderPhaseStrip({
@@ -7238,7 +9757,22 @@ APP_HTML = """<!doctype html>
         triage: String(result?.tdir_case?.phase_status?.triage || 'complete'),
         investigate: String(result?.tdir_case?.phase_status?.investigate || (hasEvidenceRows(result) ? 'complete' : 'no_evidence')),
       });
+      updateExecutionMonitor({
+        status: 'complete',
+        badge: Number(result?.rows_returned || 0) > 0 ? 'Complete' : 'No Hits',
+        stage: Number(result?.rows_returned || 0) > 0 ? 'Evidence reviewed and ready for action' : 'Investigation completed without matching evidence',
+        copy: Number(result?.rows_returned || 0) > 0
+          ? 'The analyst summary, evidence rows, and next actions are ready below.'
+          : 'The investigation finished, but the selected time range and filters did not return matching rows.',
+        elapsed: latestRun?.execution_ms ? fmtMs(latestRun.execution_ms) : 'complete',
+        rows: String(result?.rows_returned ?? latestRun?.rows_returned ?? '0'),
+        state: Number(result?.rows_returned || 0) > 0 ? 'Complete' : 'Complete',
+        next: pivotCandidates.length
+          ? 'Review the primary next action in the center column, then continue only if it still answers a stronger question.'
+          : 'Widen the time range, refine the question, or validate source coverage before retrying.',
+      });
       setSplVisibility(false);
+      syncRunButtonPriority('rerun');
       const outcomeNote = investigationOutcomeNote(result);
       if (outcomeNote) {
         $('summary').innerHTML =
@@ -7613,8 +10147,22 @@ APP_HTML = """<!doctype html>
     function renderSummaryText(text) {
       let raw = String(text || '').trim();
       if (!raw.trim()) return '';
+      raw = raw.replace(/<think>[\\s\\S]*?<\\/think>/gi, '').replace(/<\\/?think>/gi, '').trim();
+      const summaryMarkers = [
+        "Here's a concise summary",
+        "Here is a concise summary",
+        "Based on the query result",
+        "Summary of the query results"
+      ];
+      for (const marker of summaryMarkers) {
+        const idx = raw.toLowerCase().indexOf(marker.toLowerCase());
+        if (idx > 0) {
+          raw = raw.slice(idx).trim();
+          break;
+        }
+      }
       raw = raw.replace(/^Here's a concise summary of the query results in plain English:\\s*/i, '');
-      raw = raw.replace(/^Based on the query result:\\s*/i, '');
+      raw = raw.replace(/^Based on the query results?:\\s*/i, '');
       raw = raw.replace(/^\\*\\s*What was queried:/i, 'What was queried:');
       let html = esc(raw);
       html = html.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
@@ -7624,6 +10172,334 @@ APP_HTML = """<!doctype html>
         '<span class="summary-lead">$1</span>'
       );
       return html.replace(/\\n/g, '<br>');
+    }
+
+    function normalizeSummarySource(text) {
+      let raw = String(text || '').replace(/<think>[\\s\\S]*?<\\/think>/gi, '').replace(/<\\/?think>/gi, '').trim();
+      raw = raw.replace(/^Here's a concise summary of the query results in plain English:\\s*/i, '');
+      raw = raw.replace(/^Here is a concise summary of the query results in plain English:\\s*/i, '');
+      raw = raw.replace(/^Based on the query results?:\\s*/i, '');
+      return raw.replace(/\\r/g, '').trim();
+    }
+
+    function parseSummarySections(text) {
+      const raw = normalizeSummarySource(text);
+      const matches = [];
+      const pattern = /(?:^|\\n)\\s*(?:[-*]\\s*)?(?:\\*\\*)?(What was queried|Top findings(?: from the query results)?|Confidence rationale|Concrete next check|Suggested next check)(?:\\*\\*)?\\s*:\\s*/gim;
+      let match;
+      while ((match = pattern.exec(raw))) {
+        matches.push({
+          label: String(match[1] || '').trim().toLowerCase(),
+          index: match.index,
+          start: pattern.lastIndex,
+        });
+      }
+      const sections = {};
+      const keyFor = (label) => {
+        if (label.startsWith('what was queried')) return 'what';
+        if (label.startsWith('top findings')) return 'findings';
+        if (label.startsWith('confidence rationale')) return 'confidence';
+        if (label.startsWith('concrete next check')) return 'next';
+        if (label.startsWith('suggested next check')) return 'next';
+        return label;
+      };
+      matches.forEach((item, index) => {
+        const end = index + 1 < matches.length ? matches[index + 1].index : raw.length;
+        sections[keyFor(item.label)] = raw.slice(item.start, end).trim();
+      });
+      return { raw, sections };
+    }
+
+    function cleanSummaryFragment(text) {
+      return String(text || '')
+        .replace(/\\*\\*/g, '')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/^[-*•]\\s+/gm, '')
+        .replace(/\\s+/g, ' ')
+        .trim();
+    }
+
+    function summarizeFragment(text, maxChars = 220) {
+      const clean = cleanSummaryFragment(text);
+      if (!clean) return '';
+      if (clean.length <= maxChars) return clean;
+      return `${clean.slice(0, Math.max(0, maxChars - 1)).trim()}...`;
+    }
+
+    function uniqueOrderedValues(values) {
+      const seen = new Set();
+      return (Array.isArray(values) ? values : []).filter((value) => {
+        const text = String(value || '').trim();
+        const key = text.toLowerCase();
+        if (!text || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).map((value) => String(value || '').trim());
+    }
+
+    function resultEntitySnapshot(result) {
+      const ranked = result?.ranked_entities && typeof result.ranked_entities === 'object' ? result.ranked_entities : {};
+      const rows = collectEvidenceRows(result);
+      const fromRanked = (key) => Array.isArray(ranked[key]) ? ranked[key].map((item) => String(item?.value || '').trim()) : [];
+      const fromRows = (fields) => rows.flatMap((row) => (Array.isArray(fields) ? fields : []).map((field) => String(row?.[field] || '').trim()));
+      const sourceIps = uniqueOrderedValues(
+        fromRows(['src_ip', 'clientip', 'Source_Network_Address', 'src', 'ip']).concat(fromRanked('source_ips')).concat(fromRanked('client_ips'))
+      );
+      const hosts = uniqueOrderedValues(
+        fromRows(['host', 'ComputerName', 'dest', 'dvc']).concat(fromRanked('hosts'))
+      );
+      const users = uniqueOrderedValues(
+        fromRows(['user_name', 'user', 'TargetUserName', 'Account_Name', 'dest_user']).concat(fromRanked('users'))
+      ).filter((value) => !['unknown', 'n/a', '-', 'local'].includes(String(value || '').trim().toLowerCase()));
+      return { sourceIps, hosts, users };
+    }
+
+    function formatConfidenceValue(value) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        return numeric <= 1
+          ? numeric.toFixed(3).replace(/0+$/, '').replace(/\\.$/, '')
+          : String(Math.round(numeric * 100) / 100);
+      }
+      const text = String(value || '').trim();
+      return text || 'n/a';
+    }
+
+    function derivedConfidenceScore(result, coverage) {
+      const directValue = result?.final_confidence ?? result?.selected_confidence ?? result?.security_reviewer_output?.confidence ?? result?.security_reviewer?.output?.confidence;
+      const numeric = Number(directValue);
+      if (Number.isFinite(numeric)) return numeric;
+      if (result?.supported === false) return 0.24;
+      const rows = Number(result?.rows_returned || 0);
+      const support = reviewClaimSupport(result);
+      let score = rows > 0 ? 0.56 : 0.22;
+      if (support.value === 'Directly supported') score += 0.14;
+      if (support.value === 'Partial / indirect') score -= 0.05;
+      if (collectPivotCandidates(result).length > 0) score += 0.04;
+      if (Array.isArray(coverage?.gaps) && coverage.gaps.length) score -= 0.07;
+      if (coverage?.crossPlatform) score -= 0.02;
+      if (rows >= 8) score += 0.03;
+      return Math.min(0.92, Math.max(0.18, Math.round(score * 100) / 100));
+    }
+
+    function confidenceDisplayValue(result, coverage) {
+      const directValue = result?.final_confidence ?? result?.selected_confidence ?? result?.security_reviewer_output?.confidence ?? result?.security_reviewer?.output?.confidence;
+      if (directValue !== undefined && directValue !== null && String(directValue).trim() !== '') {
+        return formatConfidenceValue(directValue);
+      }
+      return formatConfidenceValue(derivedConfidenceScore(result, coverage));
+    }
+
+    function decisionGuidanceForResult(result) {
+      const timeline = Array.isArray(result?.case_context?.timeline) ? result.case_context.timeline : [];
+      if (timeline.length) return timelineDecisionModel(timeline);
+      const rows = Number(result?.rows_returned || 0);
+      const pivots = collectPivotCandidates(result);
+      if (result?.supported === false) {
+        return {
+          className: 'stop',
+          label: 'Stop',
+          headline: 'Stop and rerun with a clearer scope',
+          summary: 'The run did not become a trustworthy evidence path, so continuing from it is not meaningful.',
+          tdiStatus: 'No reliable TDI evidence yet',
+          meaning: 'Not meaningful to continue',
+          focus: 'Blocked investigation path',
+          why: 'Guardrails or deterministic validation blocked the execution path before a reliable evidence check could complete.',
+          next: 'Refine the question, shorten the scope, or target a clearer supported data source before rerunning.',
+          stop: 'Do not continue from a blocked path.',
+          support: 'No response or escalation decision should be made from this state.',
+          nextTitle: 'What to fix first',
+        };
+      }
+      if (rows <= 0) {
+        return {
+          className: 'stop',
+          label: 'Stop',
+          headline: 'Stop and adjust the search scope',
+          summary: 'No evidence came back in the current time window, so deeper pivots would be weak.',
+          tdiStatus: 'TDI did not establish evidence',
+          meaning: 'Not meaningful yet',
+          focus: 'No evidence returned',
+          why: 'Without matching rows, the system cannot justify a stronger follow-up claim from this branch.',
+          next: 'Widen time, adjust telemetry scope, or rewrite the question before continuing.',
+          stop: 'Do not keep pivoting on an empty result.',
+          support: 'No response action is indicated.',
+          nextTitle: 'What to change first',
+        };
+      }
+      if (pivots.length) {
+        return {
+          className: 'continue',
+          label: 'Continue',
+          headline: 'Continue with one targeted pivot',
+          summary: 'Evidence was returned and one bounded follow-up can answer a stronger question.',
+          tdiStatus: 'Meaningful TDI work',
+          meaning: 'Evidence-backed scope narrowing',
+          focus: 'Current evidence-backed finding',
+          why: 'The first result is broad enough that one focused follow-up adds more value than stopping immediately.',
+          next: 'Use the top saved pivot to test the strongest next hypothesis without inventing a new search path.',
+          stop: 'Stop if the current question is already answered well enough to document.',
+          support: 'This remains TDI, not response.',
+          nextTitle: 'Best next move',
+        };
+      }
+      return {
+        className: 'validate',
+        label: 'Validate',
+        headline: 'Validate in Splunk or stop here',
+        summary: 'Evidence was returned, but no stronger saved pivot is attached to this step.',
+        tdiStatus: 'Investigate complete for this branch',
+        meaning: 'Meaningful TDI branch',
+        focus: 'Evidence-backed result without stronger pivots',
+        why: 'The next value is analyst validation and documentation, not another automatic pivot.',
+        next: 'Use the exact SPL and evidence rows to validate timestamps, assets, and affected identities before you stop.',
+        stop: 'Stop here unless you have a brand-new bounded hypothesis.',
+        support: 'Still TDI, not response.',
+        nextTitle: 'Best final step',
+      };
+    }
+
+    function deriveAnswerHeadline(result, coverage, sections, decision, entities) {
+      const rows = Number(result?.rows_returned || 0);
+      const intent = String(result?.intent || '').trim();
+      if (result?.supported === false) return 'Investigation blocked before evidence collection.';
+      if (rows <= 0) return 'No matching evidence was found in the current time window.';
+      if (intent === 'failed_login_activity') {
+        if (entities.sourceIps.length > 1 && entities.hosts.length === 1) {
+          return `Repeated failed logins from ${entities.sourceIps.length} source IPs targeted ${entities.hosts[0]}.`;
+        }
+        if (entities.sourceIps.length === 1 && entities.hosts.length === 1) {
+          return `Repeated failed logins from ${entities.sourceIps[0]} targeted ${entities.hosts[0]}.`;
+        }
+        if (entities.hosts.length === 1) {
+          return `Failed login activity was concentrated on ${entities.hosts[0]}.`;
+        }
+        if (entities.sourceIps.length > 1) {
+          return 'Repeated failed logins were returned from multiple source IPs.';
+        }
+      }
+      const findings = summarizeFragment(sections.findings || '', 165);
+      if (findings) return findings;
+      const coverageText = Array.isArray(coverage?.platforms) && coverage.platforms.length ? coverage.platforms.join(', ') : timelineHumanIntent(intent);
+      return `${timelineHumanIntent(intent || 'investigation')} returned ${rows} matching row(s) across ${coverageText}.`;
+    }
+
+    function deriveAnswerCopy(result, coverage, sections, entities) {
+      const rows = Number(result?.rows_returned || 0);
+      if (result?.supported === false) {
+        return {
+          main: String(result?.guardrail_reason || result?.final_adjudication?.validation_reason || 'The request did not pass deterministic execution checks.'),
+          note: 'Refine the question or narrow the scope before running it again.',
+        };
+      }
+      if (rows <= 0) {
+        return {
+          main: 'The search completed, but no rows matched the current filters and time range.',
+          note: coverage.gaps.length ? coverage.gaps[0] : 'The best next move is to widen time, verify telemetry coverage, or restate the question.',
+        };
+      }
+      const findings = summarizeFragment(sections.findings || '', 260);
+      const what = summarizeFragment(sections.what || '', 210);
+      let main = findings;
+      if (!main && entities.users.length && entities.sourceIps.length) {
+        main = `Returned evidence highlights ${entities.sourceIps.length} source IP value(s) and ${entities.users.length} named account value(s) worth deeper review.`;
+      }
+      if (!main) {
+        main = `Returned evidence supports the current ${timelineHumanIntent(result?.intent || 'investigation')} question.`;
+      }
+      const noteParts = [];
+      if (what) noteParts.push(`Question asked: ${what}`);
+      if (coverage.gaps.length) noteParts.push(`Coverage note: ${coverage.gaps[0]}`);
+      return {
+        main,
+        note: noteParts.join(' '),
+      };
+    }
+
+    function deriveReasonBullets(result, coverage, sections, decision, entities) {
+      const rows = Number(result?.rows_returned || 0);
+      const support = reviewClaimSupport(result);
+      const pivots = collectPivotCandidates(result);
+      const bullets = [];
+      bullets.push({
+        label: 'Claim support',
+        copy: support.note,
+      });
+      if (rows > 0) {
+        if (String(result?.intent || '') === 'failed_login_activity' && entities.sourceIps.length) {
+          const hostLine = entities.hosts.length ? ` against ${entities.hosts[0]}` : '';
+          bullets.push({
+            label: 'Observed pattern',
+            copy: `The current result returned ${rows} matching row(s) and surfaced ${entities.sourceIps.length} source IP value(s)${hostLine}.`,
+          });
+        } else {
+          bullets.push({
+            label: 'Evidence returned',
+            copy: `The bounded query returned ${rows} matching row(s) for analyst review.`,
+          });
+        }
+      } else {
+        bullets.push({
+          label: 'Returned evidence',
+          copy: 'No rows matched the current filters, so the system cannot justify a deeper pivot from this branch.',
+        });
+      }
+      if (coverage.gaps.length) {
+        bullets.push({
+          label: 'Coverage note',
+          copy: coverage.gaps[0],
+        });
+      } else if (pivots.length && rows > 0) {
+        bullets.push({
+          label: 'Why continue',
+          copy: decision.next,
+        });
+      } else {
+        bullets.push({
+          label: 'Operator call',
+          copy: decision.stop,
+        });
+      }
+      return bullets.slice(0, 3);
+    }
+
+    function setAnswerDecisionPill(decision) {
+      const pill = $('answer-decision-pill');
+      if (!pill) return;
+      const className = String(decision?.className || 'wait');
+      pill.className = `answer-decision-pill ${esc(className)}`;
+      pill.textContent = String(decision?.label || 'Awaiting result');
+    }
+
+    function renderDecisionPlaceholder(model = {}) {
+      setAnswerDecisionPill({
+        className: String(model.className || 'wait'),
+        label: String(model.label || 'Awaiting result'),
+      });
+      $('answer-headline').textContent = String(model.headline || 'Run an investigation to see the current finding.');
+      $('summary').innerHTML = `
+        <div class="answer-copy">${esc(String(model.summary || 'The page will turn the result into a plain-language answer, a confidence-backed recommendation, and a single best next action.'))}</div>
+        ${model.note ? `<div class="answer-copy-note">${esc(String(model.note))}</div>` : ''}
+      `;
+      $('confidence-score').textContent = String(model.score || 'n/a');
+      $('confidence-label').textContent = String(model.confidenceLabel || 'Awaiting result');
+      $('confidence-support').textContent = String(model.confidenceCopy || 'The decision to continue or stop will appear here after evidence review completes.');
+      const reasons = Array.isArray(model.reasons) ? model.reasons : [];
+      $('investigation-timeline').innerHTML = reasons.length
+        ? reasons.map((item) => `<div class="reason-item"><strong>${esc(String(item.label || 'Reason'))}</strong>${esc(String(item.copy || ''))}</div>`).join('')
+        : '<div class="reason-item muted">Run an investigation to see the 2-3 reasons supporting the current conclusion.</div>';
+      $('primary-action-mode').textContent = String(model.primaryBadge || 'One best move');
+      $('primary-action-content').innerHTML = model.primaryHtml || `<div class="primary-action-empty">${esc(String(model.primaryCopy || 'Run an investigation to surface the single best next action.'))}</div>`;
+      $('evidence-support-pill').textContent = String(model.evidenceBadge || 'Awaiting result');
+      if (Object.prototype.hasOwnProperty.call(model, 'evidenceHtml')) {
+        $('coverage-visibility').innerHTML = String(model.evidenceHtml || '');
+      }
+      const alternatives = $('other-actions-section');
+      if (alternatives) {
+        alternatives.open = false;
+        alternatives.style.display = model.showAlternatives ? '' : 'none';
+      }
+      $('pivot-cards').innerHTML = String(model.alternativesHtml || '');
     }
 
     function renderWorkflowTimeline(result) {
@@ -7637,13 +10513,20 @@ APP_HTML = """<!doctype html>
       const tdir = result?.tdir_case || {};
       const phase = tdir?.phase_status || {};
       const timings = result?.stage_timings_ms || {};
-      const nodes = [
-        { key: 'detect', label: 'Detect' },
-        { key: 'triage', label: 'Triage' },
-        { key: 'investigate', label: 'Investigate' },
-        { key: 'respond', label: 'Respond' },
-        { key: 'recover', label: 'Recover' },
-      ];
+      const pivotCandidate = result?.pivot_source?.candidate && typeof result.pivot_source.candidate === 'object'
+        ? result.pivot_source.candidate
+        : null;
+      const nodes = pivotCandidate
+        ? [
+            { key: 'detect', label: 'Case loaded' },
+            { key: 'triage', label: 'Pivot executed' },
+            { key: 'investigate', label: 'Findings ready' },
+          ]
+        : [
+            { key: 'detect', label: 'Question accepted' },
+            { key: 'triage', label: 'Splunk ran' },
+            { key: 'investigate', label: 'Findings ready' },
+          ];
 
       const html = [];
       nodes.forEach((node, idx) => {
@@ -7681,7 +10564,7 @@ APP_HTML = """<!doctype html>
         })
         .join(' | ');
       meta.textContent = roleJourney
-        ? `pipeline=${pipeline} total=${total}\nroles: ${roleJourney}`
+        ? `pipeline=${pipeline} total=${total}\nrole timings: ${roleJourney}`
         : `pipeline=${pipeline} total=${total}`;
     }
 
@@ -7847,26 +10730,27 @@ APP_HTML = """<!doctype html>
           const pivotCandidates = collectPivotCandidates(result || {});
           const candidate = pivotCandidates[idx] || null;
           if (!candidate) return;
-          selectFollowup(candidate, idx, 'Pivot');
-          $('status').textContent = 'Follow-up step loaded into the left drawer for review.';
+          selectFollowup(candidate, idx, 'Next Action Review');
+          $('status').textContent = 'Follow-up staged. Review the primary action card above before continuing.';
         };
       });
-      document.querySelectorAll('.drawer-pivot-run').forEach((btn) => {
-        btn.onclick = async () => {
-          const idx = Number(btn.getAttribute('data-drawer-pivot-index') || '-1');
-          const pivotCandidates = collectPivotCandidates(result || {});
-          const candidate = pivotCandidates[idx] || null;
-          if (!candidate) return;
-          selectFollowup(candidate, idx, 'Pivot');
-          const nextQuestion = String(candidate?.next_question || candidate?.title || '');
-          $('question').value = nextQuestion;
-          $('status').textContent = 'Running selected pivot from the investigation drawer...';
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-          await executeInvestigation({
-            question: nextQuestion,
-            pivot_context: result?.pivot_context || null,
-            pivot_candidate: candidate,
+      document.querySelectorAll('.drawer-value-tag.actionable[data-ioc-value]').forEach((pill) => {
+        pill.onclick = (event) => {
+          event.stopPropagation();
+          const rawValue = String(pill.getAttribute('data-ioc-value') || '').trim();
+          const targetTypeHint = String(pill.getAttribute('data-ioc-field') || '').trim();
+          const match = stagePivotCandidateForValue(rawValue, {
+            source: result || {},
+            origin: 'Evidence Review',
+            targetTypeHint,
+            valueSource: 'evidence table',
           });
+          if (!match) {
+            $('status').textContent = `No saved pivot was captured for ${rawValue} in this evidence set.`;
+            return;
+          }
+          setActiveTrayTab('pivot', { openDrawer: true });
+          $('status').textContent = `Staged the saved pivot for ${rawValue} as the current primary action.`;
         };
       });
       document.querySelectorAll('.drawer-row-link').forEach((row) => {
@@ -8036,15 +10920,43 @@ APP_HTML = """<!doctype html>
       const elapsedMs = runStartAt ? (Date.now() - runStartAt) : 0;
       const elapsedSec = Math.max(0, Math.round(elapsedMs / 1000));
       const stage = currentRunStage(runProgressValue, elapsedMs);
+      updateExecutionMonitor({
+        status: 'running',
+        badge: 'Running',
+        stage: stage.title,
+        copy: stage.note,
+        elapsed: `${elapsedSec}s`,
+        rows: 'pending',
+        state: 'Running',
+        next: elapsedMs > 45000
+          ? 'If this delay keeps growing, retry a narrower question or a shorter time window.'
+          : 'Wait for completion or cancel in the browser if the run is no longer useful.',
+      });
       if ($('run-progress-stage')) $('run-progress-stage').textContent = `Stage: ${stage.title}`;
       if ($('run-progress-elapsed')) $('run-progress-elapsed').textContent = `Elapsed: ${elapsedSec}s`;
       if ($('run-progress-note')) $('run-progress-note').textContent = stage.note;
       $('status').textContent = stage.status;
       $('spl-analyst-summary').innerHTML = `<div class="brief-body muted">${esc(stage.status)}</div>`;
-      $('coverage-visibility').innerHTML = `<div class="coverage-row"><div class="coverage-row-title">Coverage</div><div class="coverage-row-copy">${esc(stage.timeline)}</div></div>`;
+      renderDecisionPlaceholder({
+        className: 'wait',
+        label: 'Running',
+        headline: 'Investigation in progress',
+        summary: stage.status,
+        note: stage.note,
+        score: 'n/a',
+        confidenceLabel: stage.title,
+        confidenceCopy: stage.note,
+        reasons: [
+          { label: 'Current stage', copy: stage.timeline },
+          { label: 'Elapsed', copy: `${elapsedSec} second(s)` },
+          { label: 'What to do now', copy: elapsedMs > 45000 ? 'This run is taking longer than usual. Wait if it is still useful, or cancel in the browser and retry a narrower question.' : 'Wait for evidence review to finish. The page will surface one best next action when the result is ready.' },
+        ],
+        primaryBadge: 'Waiting for evidence',
+        primaryCopy: 'The single best next action appears only after the evidence and reasoning are ready.',
+        evidenceBadge: 'Pending',
+        evidenceHtml: `<div class="evidence-empty">${esc(stage.timeline)}</div>`,
+      });
       $('decision-support-summary').innerHTML = `<div class="support-item"><div class="support-label">Current stage</div><div class="support-value">${esc(stage.title)}</div></div><div class="support-item"><div class="support-label">Delay source</div><div class="support-value">${esc(stage.note)}</div></div>`;
-      $('investigation-timeline').innerHTML = `<details class="timeline-phase" open><summary><div class="timeline-phase-main"><div class="timeline-phase-name">Current Stage</div><div class="timeline-phase-summary">${esc(stage.status)}</div></div><div class="timeline-phase-status">running</div></summary><div class="timeline-phase-body"><div class="timeline-detail-grid"><div class="timeline-detail"><div class="timeline-detail-title">What is happening now</div><div class="timeline-detail-copy">${esc(stage.timeline)}</div></div><div class="timeline-detail"><div class="timeline-detail-title">Elapsed time</div><div class="timeline-detail-copy">${esc(String(elapsedSec))} second(s)</div></div><div class="timeline-detail"><div class="timeline-detail-title">What you can do</div><div class="timeline-detail-copy">${esc(elapsedMs > 45000 ? 'This run is taking longer than usual. You can keep waiting, or cancel in the browser and retry a narrower question or shorter time window.' : 'Wait for completion. If this keeps growing, the delay is likely model-side rather than Splunk-side.')}</div></div></div></div></details>`;
-      $('summary').innerHTML = `<div class="brief-body muted">${esc(stage.status)} ${esc(stage.note)}</div>`;
       const phaseState = runProgressValue < 18
         ? { detect: 'in_progress', triage: 'planned', investigate: 'planned' }
         : runProgressValue < 48
@@ -8125,9 +11037,20 @@ APP_HTML = """<!doctype html>
       }
 
       runBtn.disabled = true;
+      syncRunButtonPriority('question');
       lastAskResult = null;
       $('status').textContent = 'Starting investigation...';
       startRunProgress();
+      updateExecutionMonitor({
+        status: 'running',
+        badge: 'Running',
+        stage: 'Question intake and guardrails',
+        copy: 'The controller is checking scope, choosing the bounded path, and preparing the first execution plan.',
+        elapsed: '0s',
+        rows: 'pending',
+        state: 'Running',
+        next: 'Wait for the initial plan unless you need to cancel in the browser.',
+      });
       $('case-header-chips').innerHTML = `
         <div class="utility-pill readonly"><span>Read-Only</span><strong>Splunk investigation mode</strong></div>
         <div class="utility-pill"><span>Status</span><strong>Running</strong></div>
@@ -8141,19 +11064,34 @@ APP_HTML = """<!doctype html>
       $('copy-spl').style.display = 'none';
       $('spl-query').textContent = '';
       $('spl-results').textContent = '';
-      $('coverage-visibility').innerHTML = '<div class="coverage-row"><div class="coverage-row-title">Coverage</div><div class="coverage-row-copy">The page will show whether the delay is in planning, Splunk retrieval, or evidence review.</div></div>';
-      $('pivot-cards').innerHTML = '<div class="brief-body muted">Recommended next steps will appear after Splunk evidence is returned and reviewed.</div>';
+      renderDecisionPlaceholder({
+        className: 'wait',
+        label: 'Running',
+        headline: 'Investigation in progress',
+        summary: 'The system is checking scope, building the bounded SPL path, and preparing the first evidence pass.',
+        note: 'The center column will stay focused on one answer, one confidence call, and one primary next action when the run finishes.',
+        score: 'n/a',
+        confidenceLabel: 'Question intake and guardrails',
+        confidenceCopy: 'The system is validating scope before any model or Splunk call runs.',
+        reasons: [
+          { label: 'Current stage', copy: 'Guardrails are validating the question and choosing the allowed path.' },
+          { label: 'What happens next', copy: 'The planner and writer will build a bounded SPL path, then Splunk evidence will be reviewed.' },
+          { label: 'What to do now', copy: 'Wait for completion. If the run becomes too slow, cancel in the browser and retry a narrower question.' },
+        ],
+        primaryBadge: 'Waiting for evidence',
+        primaryCopy: 'The single best next action appears only after evidence review completes.',
+        evidenceBadge: 'Pending',
+        evidenceHtml: '<div class="evidence-empty">The page will show key evidence rows here as soon as Splunk returns them.</div>',
+      });
       $('decision-support-summary').innerHTML = '<div class="support-item"><div class="support-label">Current stage</div><div class="support-value">Question intake and guardrails</div></div><div class="support-item"><div class="support-label">Delay source</div><div class="support-value">The system is validating scope before any model or Splunk call runs.</div></div>';
       $('model-decisions').innerHTML = '';
       $('workflow-track').innerHTML = '';
       $('workflow-meta').textContent = '';
-      $('investigation-timeline').innerHTML = '<details class="timeline-phase" open><summary><div class="timeline-phase-main"><div class="timeline-phase-name">Current Stage</div><div class="timeline-phase-summary">Checking request scope and selecting the investigation path.</div></div><div class="timeline-phase-status">running</div></summary><div class="timeline-phase-body"><div class="timeline-detail-grid"><div class="timeline-detail"><div class="timeline-detail-title">What is happening now</div><div class="timeline-detail-copy">Guardrails are validating the question and choosing the allowed path.</div></div><div class="timeline-detail"><div class="timeline-detail-title">Elapsed time</div><div class="timeline-detail-copy">0 second(s)</div></div><div class="timeline-detail"><div class="timeline-detail-title">What you can do</div><div class="timeline-detail-copy">Wait for completion. The page will explain whether any delay is coming from planning, Splunk retrieval, or evidence review.</div></div></div></div></details>';
       $('tdir-card').style.display = 'none';
       $('tdir-case').textContent = '';
       $('journey').textContent = '';
       $('output').textContent = '';
       $('brief-mitre').innerHTML = '<div class="brief-body muted">ATT&CK context will appear after evidence review completes.</div>';
-      $('summary').innerHTML = '<div class="brief-body muted">The system is checking scope, building the bounded SPL path, and then retrieving evidence.</div>';
       $('brief-supported').textContent = 'Running';
       setSplVisibility(false);
       syncDrawerMirrors();
@@ -8163,9 +11101,12 @@ APP_HTML = """<!doctype html>
         const payload = {
           question: options.question || $('question').value,
           session_id: $('session').value,
+          case_id: String(options.case_id || '').trim(),
+          parent_node_id: String(options.parent_node_id || '').trim(),
           max_steps: Number($('maxsteps').value || 3),
           write_artifact: Boolean($('artifact').checked),
           pipeline: $('pipeline').value,
+          mode: $('invest-demo-mode')?.checked ? 'demo' : 'live',
           approved_deeper_investigation: Boolean(options.approved_deeper_investigation),
           continuation_state: options.continuation_state || null,
           pivot_context: options.pivot_context || null,
@@ -8231,13 +11172,69 @@ APP_HTML = """<!doctype html>
         if (aborted) {
           $('status').textContent = 'Cancelled in browser. The server may still finish the current request.';
           $('brief-supported').textContent = 'Cancelled';
-          $('summary').innerHTML = '<div class="brief-body muted">The browser stopped waiting for this run. Retry a narrower question, shorten the time window, or target a more specific platform or data source.</div>';
+          renderDecisionPlaceholder({
+            className: 'stop',
+            label: 'Cancelled',
+            headline: 'The browser stopped waiting for this run.',
+            summary: 'The server may still finish in the background, but this page is no longer waiting for the result.',
+            note: 'Retry a narrower question, shorten the time window, or target a more specific platform or data source.',
+            confidenceLabel: 'Request cancelled',
+            confidenceCopy: 'No final evidence review was completed in this browser session.',
+            reasons: [
+              { label: 'What happened', copy: 'The browser cancelled the request before a final result could be rendered.' },
+              { label: 'What this means', copy: 'You should not treat the current page state as a completed investigation result.' },
+              { label: 'Best next move', copy: 'Retry a narrower question or shorter time window if the run is still useful.' },
+            ],
+            primaryBadge: 'No primary action',
+            primaryCopy: 'Rerun the investigation if you still need an answer.',
+            evidenceBadge: 'No final result',
+            evidenceHtml: '<div class="evidence-empty">No final evidence snapshot is available because the browser cancelled the wait for this run.</div>',
+          });
+          updateExecutionMonitor({
+            status: 'blocked',
+            badge: 'Cancelled',
+            stage: 'Browser cancelled the wait for this run',
+            copy: 'The server may still finish in the background, but this browser session stopped waiting for the result.',
+            elapsed: 'cancelled',
+            rows: 'unknown',
+            state: 'Cancelled',
+            next: 'Retry a narrower question, shorten the time window, or target a more specific platform or data source.',
+          });
+          syncRunButtonPriority('question');
           stopRunProgress(false, true);
         } else {
           $('status').innerHTML = '<span class="warn">Request failed</span>';
-          $('summary').innerHTML = '<div class="brief-body muted">The run stopped before a final investigation view could be completed. Retry a narrower question, shorten the time window, or target a more specific platform or data source.</div>';
+          renderDecisionPlaceholder({
+            className: 'stop',
+            label: 'Failed',
+            headline: 'The investigation stopped before a final result was ready.',
+            summary: 'The page could not build a trustworthy evidence-backed answer from this run.',
+            note: 'Retry a narrower question, shorten the time window, or target a more specific platform or data source.',
+            confidenceLabel: 'Request failed',
+            confidenceCopy: 'No final evidence review was completed.',
+            reasons: [
+              { label: 'What happened', copy: 'The request failed before the final investigation view could be rendered.' },
+              { label: 'What this means', copy: 'You should not continue or escalate from this incomplete result.' },
+              { label: 'Best next move', copy: 'Retry with a narrower question or a shorter time range.' },
+            ],
+            primaryBadge: 'No primary action',
+            primaryCopy: 'Fix the question or scope, then rerun.',
+            evidenceBadge: 'No final result',
+            evidenceHtml: '<div class="evidence-empty">No final evidence snapshot is available because the request failed before completion.</div>',
+          });
           $('journey').textContent = 'Unable to build investigation journey because the request failed before a structured result was returned.';
           $('output').textContent = String(e);
+          updateExecutionMonitor({
+            status: 'blocked',
+            badge: 'Failed',
+            stage: 'Investigation stopped before a final result',
+            copy: 'The request failed before the final investigation view could be rendered.',
+            elapsed: 'failed',
+            rows: 'unknown',
+            state: 'Failed',
+            next: 'Retry a narrower question, shorten the time window, or target a more specific platform or data source.',
+          });
+          syncRunButtonPriority('question');
           stopRunProgress(false);
         }
       } finally {
@@ -8260,15 +11257,7 @@ APP_HTML = """<!doctype html>
       });
     };
     $('selected-followup-run').onclick = async () => {
-      if (!selectedFollowup || !selectedFollowup.text) return;
-      $('question').value = selectedFollowup.text;
-      $('status').textContent = 'Running selected follow-up investigation...';
-      window.scrollTo({top: 0, behavior: 'smooth'});
-      await executeInvestigation({
-        question: selectedFollowup.text,
-        pivot_context: selectedFollowup.contextOverride || lastAskResult?.pivot_context || null,
-        pivot_candidate: selectedFollowup.candidate || null,
-      });
+      await runSelectedFollowupInvestigation(selectedFollowup);
     };
     $('selected-followup-clear').onclick = () => {
       selectedFollowup = null;
@@ -8277,6 +11266,7 @@ APP_HTML = """<!doctype html>
     };
     $('pipeline').addEventListener('change', updatePipelineHelp);
     $('artifact').addEventListener('change', updateArtifactLabel);
+    $('invest-demo-mode')?.addEventListener('change', updateInvestigationDemoLabel);
     $('copy-spl').onclick = async () => {
       const text = $('spl-query').textContent || '';
       if (!text) return;
@@ -8288,9 +11278,12 @@ APP_HTML = """<!doctype html>
       }
     };
     $('control-details').open = false;
+    syncRunButtonPriority('question');
     updatePipelineHelp();
     $('artifact').checked = false;
     updateArtifactLabel();
+    $('invest-demo-mode').checked = false;
+    updateInvestigationDemoLabel();
     bindSplToggleButtons();
     bindAdvancedSummaryControls();
     bindAdvancedDrawerMode();
@@ -8385,6 +11378,9 @@ DOCS_SHELL_HTML = """<!doctype html>
       box-shadow:0 18px 34px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.03);
       backdrop-filter:blur(16px);
     }}
+    .nav-version-pill{{ flex:0 0 auto; align-self:center; display:inline-flex; align-items:center; gap:8px; margin-left:8px; padding:8px 14px; border:1px solid #315a79; border-radius:999px; background:linear-gradient(180deg,#16324a,#102435); color:#dbeafe; box-shadow:0 10px 20px rgba(8,23,37,.26), inset 0 1px 0 rgba(255,255,255,.05); white-space:nowrap; }}
+    .nav-version-pill span{{ font-size:10px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; color:#8fd3ff; }}
+    .nav-version-pill strong{{ font-size:12px; font-weight:900; color:#f8fafc; letter-spacing:.02em; }}
     .nav-item {{
       position:relative;
       display:flex;
@@ -8469,6 +11465,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       line-height:1.4;
       color:#9fb4cc;
     }}
+    @media (max-width: 980px) {{ .nav-version-pill{{display:none;}} }}
     .layout {{ display:grid; grid-template-columns: 320px minmax(0, 1fr); gap:0; align-items:start; }}
     .card {{
       background: linear-gradient(180deg, rgba(17,24,39,.96), rgba(13,20,34,.96));
@@ -9965,6 +12962,7 @@ def _docs_index_body() -> str:
         <h2>Start Here</h2>
         <p>If you are new to A.G.E.N.T. Smith, begin with the business overview and then move into the technical architecture only if you need deeper detail.</p>
         <p><a href=\"/docs\">Open the business overview</a></p>
+        <p><a href=\"/docs/view?path=project/v1_4_0_delta.md\">Open the v1.4.0 release highlights</a></p>
       </div>
       <div class=\"card\">
         <h2>How To Use This Section</h2>
@@ -9977,6 +12975,7 @@ def _docs_index_body() -> str:
         <h2>What Is This?</h2>
         <p>Use these if you want the business story, problem statement, current value, and roadmap direction.</p>
         <div class=\"guide-links\">
+          <a class=\"guide-link\" href=\"/docs/view?path=project/v1_4_0_delta.md\"><strong>v1.4.0 Release Highlights</strong><span>Short operator-facing summary of what changed in the v1.4.0 release.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=whitepapers/project_one_page_white_paper.md\"><strong>What A.G.E.N.T. Smith Is</strong><span>Fastest explanation for non-technical readers.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=runbooks/initial_setup.md\"><strong>Initial Setup Guide</strong><span>Step-by-step install and configuration for a new machine.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=whitepapers/executive_white_paper.md\"><strong>Executive Summary</strong><span>Value, controls, and readiness framing for leadership.</span></a>
@@ -11351,7 +14350,7 @@ def _configure_page_body() -> str:
   <div class="cfg-hero">
     <div class="cfg-hero-card">
       <div class="statline" style="margin:0 0 10px;">
-        <span class="badge">Release {html.escape(APP_VERSION_LABEL)}</span>
+        <span class="badge">Release __APP_VERSION_LABEL__</span>
         <span class="badge">Stable branch</span>
       </div>
       <h2 class="cfg-hero-title">AGENT Smith runtime control center</h2>
@@ -12416,7 +15415,9 @@ def _configure_page_body() -> str:
   });
   cfgLoad();
 </script>
-""".replace("{html.escape(APP_VERSION_LABEL)}", html.escape(APP_VERSION_LABEL))
+"""
+
+APP_HTML = APP_HTML.replace("__APP_VERSION_LABEL__", html.escape(APP_VERSION_LABEL))
 
 
 def _users_page_body() -> str:
@@ -13679,7 +16680,84 @@ def _mcp_page_body() -> str:
     return """
 <div class=\"card\">
   <style>
-    .mcp-shell { display:grid; grid-template-columns: 1.05fr .95fr; gap:12px; }
+    .mcp-shell { display:grid; grid-template-columns: 1.02fr .98fr; gap:12px; }
+    .page-mode-banner {
+      display:grid;
+      gap:8px;
+      padding:14px 16px;
+      margin-bottom:12px;
+      border:1px solid #27415a;
+      border-radius:14px;
+      background:linear-gradient(180deg,#081729,#07111f);
+      box-shadow:0 12px 26px rgba(0,0,0,.18);
+    }
+    .page-mode-banner.live { border-color:#315a79; }
+    .page-mode-banner.demo {
+      border-color:#b45309;
+      background:linear-gradient(180deg,#2b1606,#160d04);
+      box-shadow:0 0 0 1px rgba(245,158,11,.16), 0 14px 32px rgba(18,8,0,.28);
+    }
+    .page-mode-banner-head {
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .page-mode-banner-state {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+    .page-mode-banner-kicker {
+      color:#8fb6d9;
+      font-size:11px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .page-mode-banner-copy {
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.55;
+    }
+    .page-mode-banner.demo .page-mode-banner-kicker,
+    .page-mode-banner.demo .page-mode-banner-copy {
+      color:#fef3c7;
+    }
+    .page-mode-badge {
+      display:inline-flex;
+      align-items:center;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid #315a79;
+      background:#0a2034;
+      color:#dbeafe;
+      font-size:12px;
+      font-weight:800;
+    }
+    .page-mode-badge.pipeline-assisted {
+      border-color:#0f766e;
+      background:#072b2c;
+      color:#ccfbf1;
+    }
+    .page-mode-badge.pipeline-deterministic {
+      border-color:#475569;
+      background:#111827;
+      color:#e2e8f0;
+    }
+    .page-mode-badge.mode-live {
+      border-color:#166534;
+      background:#052e16;
+      color:#bbf7d0;
+    }
+    .page-mode-badge.mode-demo,
+    .page-mode-banner.demo .page-mode-badge.mode-demo {
+      border-color:#f59e0b;
+      background:#422006;
+      color:#fef3c7;
+    }
     .mcp-pane {
       background: linear-gradient(170deg,#081a2c,#071321);
       border:1px solid #294560;
@@ -13704,6 +16782,174 @@ def _mcp_page_body() -> str:
       font-family:"Trebuchet MS","Segoe UI","Helvetica Neue",Helvetica,sans-serif;
     }
     .mcp-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+    .mcp-control-grid {
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0, 1fr));
+      gap:10px;
+      margin-top:10px;
+    }
+    .mcp-segment-shell {
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+    }
+    .mcp-segment-label {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+    }
+    .mcp-segment-tip {
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      width:18px;
+      height:18px;
+      border-radius:999px;
+      border:1px solid #35546f;
+      background:#0a1624;
+      color:#dbeafe;
+      font-size:11px;
+      font-weight:900;
+      cursor:help;
+      user-select:none;
+    }
+    .mcp-segment {
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0, 1fr));
+      gap:6px;
+      padding:5px;
+      border:1px solid #27415a;
+      border-radius:999px;
+      background:linear-gradient(180deg,#071321,#091827);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    }
+    .mcp-segment-btn {
+      appearance:none;
+      position:relative;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:8px;
+      min-height:38px;
+      border:1px solid transparent;
+      border-radius:999px;
+      padding:8px 14px;
+      background:transparent;
+      color:#a7bdd4;
+      text-align:center;
+      cursor:pointer;
+      font-size:13px;
+      font-weight:800;
+      letter-spacing:.01em;
+      transition:transform .14s ease, border-color .14s ease, background .14s ease, color .14s ease, box-shadow .14s ease;
+    }
+    .mcp-segment-btn::before {
+      content:"";
+      width:11px;
+      height:11px;
+      border-radius:999px;
+      border:2px solid currentColor;
+      background:transparent;
+      opacity:.72;
+      transition:transform .14s ease, background .14s ease, border-color .14s ease, opacity .14s ease;
+    }
+    .mcp-segment-btn:hover {
+      transform:translateY(-1px);
+      border-color:#365674;
+      background:rgba(12,25,41,0.78);
+      color:#eef6ff;
+    }
+    .mcp-segment-btn:focus-visible {
+      outline:none;
+      border-color:#93c5fd;
+      box-shadow:0 0 0 2px rgba(147,197,253,0.28);
+    }
+    .mcp-segment-btn.active {
+      box-shadow:0 0 0 1px rgba(255,255,255,0.05) inset, 0 10px 20px rgba(0,0,0,.2);
+    }
+    .mcp-segment-btn.active::before {
+      opacity:1;
+      transform:scale(1.02);
+    }
+    .mcp-segment-btn-title {
+      display:inline-flex;
+      align-items:center;
+      font-size:13px;
+      font-weight:900;
+      line-height:1.1;
+    }
+    .mcp-segment-btn[data-tone="assisted"].active {
+      border-color:#14b8a6;
+      background:linear-gradient(180deg,#0d2d30,#081a22);
+      color:#dafeff;
+    }
+    .mcp-segment-btn[data-tone="assisted"].active::before {
+      border-color:#5eead4;
+      background:#5eead4;
+    }
+    .mcp-segment-btn[data-tone="deterministic"].active {
+      border-color:#64748b;
+      background:linear-gradient(180deg,#1f2937,#111827);
+      color:#f8fafc;
+    }
+    .mcp-segment-btn[data-tone="deterministic"].active::before {
+      border-color:#cbd5e1;
+      background:#cbd5e1;
+    }
+    .mcp-segment-btn[data-tone="live"].active {
+      border-color:#22c55e;
+      background:linear-gradient(180deg,#0a3519,#072813);
+      color:#dcfce7;
+    }
+    .mcp-segment-btn[data-tone="live"].active::before {
+      border-color:#86efac;
+      background:#86efac;
+    }
+    .mcp-segment-btn[data-tone="demo"].active {
+      border-color:#f59e0b;
+      background:linear-gradient(180deg,#4a2404,#2d1503);
+      color:#fef3c7;
+    }
+    .mcp-segment-btn[data-tone="demo"].active::before {
+      border-color:#fcd34d;
+      background:#fcd34d;
+    }
+    .mcp-mode-badge {
+      display:inline-flex;
+      align-items:center;
+      padding:4px 10px;
+      border-radius:999px;
+      border:1px solid #425a73;
+      background:#0c1726;
+      color:#dce9f7;
+      font-size:12px;
+      font-weight:800;
+    }
+    .mcp-mode-badge.assisted {
+      border-color:#0f766e;
+      background:#072b2c;
+      color:#ccfbf1;
+    }
+    .mcp-mode-badge.deterministic {
+      border-color:#64748b;
+      background:#111827;
+      color:#e2e8f0;
+    }
+    .mcp-mode-badge.live {
+      border-color:#166534;
+      background:#052e16;
+      color:#bbf7d0;
+    }
+    .mcp-mode-badge.demo {
+      border-color:#92400e;
+      background:#2a1606;
+      color:#fde68a;
+    }
     .mcp-send {
       margin-top:0;
       background:#22c55e;
@@ -13747,7 +16993,7 @@ def _mcp_page_body() -> str:
       transition:width .2s ease;
     }
     .mcp-chat {
-      height: 410px;
+      max-height: 360px;
       overflow:auto;
       white-space: pre-wrap;
       border-radius:10px;
@@ -13758,7 +17004,28 @@ def _mcp_page_body() -> str:
       font-size:12.5px;
       line-height:1.45;
     }
-    .mcp-metrics { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+    .mcp-summary-card {
+      border:1px solid #27415a;
+      border-radius:12px;
+      background:#07111f;
+      padding:12px;
+    }
+    .mcp-summary-title {
+      color:#f8fafc;
+      font-size:16px;
+      font-weight:900;
+      line-height:1.3;
+      margin-bottom:6px;
+    }
+    .mcp-summary-copy {
+      color:#dbeafe;
+      font-size:13px;
+      line-height:1.55;
+      white-space:pre-wrap;
+    }
+    .mcp-trust-strip,
+    .mcp-metrics { display:flex; gap:8px; flex-wrap:wrap; }
+    .mcp-trust-strip { margin-top:10px; }
     .mcp-metric {
       border:1px solid #28445f;
       background:#071628;
@@ -13789,6 +17056,57 @@ def _mcp_page_body() -> str:
       font-family:"Consolas","SFMono-Regular",Menlo,monospace;
     }
     .mcp-spl-row { margin-top:8px; display:flex; justify-content:flex-end; }
+    .mcp-evidence-grid {
+      margin-top:12px;
+      display:grid;
+      grid-template-columns:1.08fr .92fr;
+      gap:12px;
+      align-items:start;
+    }
+    .mcp-evidence-card {
+      border:1px solid #294560;
+      border-radius:14px;
+      background:linear-gradient(170deg,#081a2c,#071321);
+      padding:12px;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    }
+    .mcp-evidence-head {
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:8px;
+      flex-wrap:wrap;
+    }
+    .mcp-transcript-shell,
+    .mcp-diagnostics {
+      margin-top:12px;
+      border:1px solid #27415a;
+      border-radius:12px;
+      background:#071628;
+      padding:10px 12px;
+    }
+    .mcp-transcript-shell summary,
+    .mcp-diagnostics summary {
+      cursor:pointer;
+      color:#dbeafe;
+      font-size:13px;
+      font-weight:800;
+      list-style:none;
+      outline:none;
+    }
+    .mcp-transcript-shell summary::-webkit-details-marker,
+    .mcp-diagnostics summary::-webkit-details-marker { display:none; }
+    .mcp-transcript-shell summary::after,
+    .mcp-diagnostics summary::after {
+      content:"Show";
+      float:right;
+      color:#9fb4cc;
+      font-size:12px;
+      font-weight:800;
+    }
+    .mcp-transcript-shell[open] summary::after,
+    .mcp-diagnostics[open] summary::after { content:"Hide"; }
     .mcp-results-shell {
       border:1px solid #26435c;
       border-radius:10px;
@@ -13826,15 +17144,51 @@ def _mcp_page_body() -> str:
       overflow:hidden;
       text-overflow:ellipsis;
     }
-    @media (max-width: 1080px) { .mcp-shell { grid-template-columns: 1fr; } }
+    @media (max-width: 1080px) {
+      .mcp-shell,.mcp-evidence-grid,.mcp-control-grid { grid-template-columns: 1fr; }
+    }
   </style>
   <h1>Splunk MCP Chat</h1>
   <p class=\"muted\">Ask a natural-language security question. The backend uses the same guarded multi-model + RAG + Data Domain context used by Investigation UI.</p>
+  <div id=\"mcp-mode-banner\" class=\"page-mode-banner live\">
+    <div class=\"page-mode-banner-head\">
+      <div class=\"page-mode-banner-kicker\">Execution Mode</div>
+      <div class=\"page-mode-banner-state\">
+        <span id=\"mcp-pipeline-banner-badge\" class=\"page-mode-badge pipeline-assisted\">LLM-Assisted MCP</span>
+        <span id=\"mcp-mode-banner-badge\" class=\"page-mode-badge mode-live\">Live Mode</span>
+      </div>
+    </div>
+    <div id=\"mcp-mode-banner-copy\" class=\"page-mode-banner-copy\">LLM-Assisted MCP is active. Using the discovered local environment and current time windows.</div>
+  </div>
   <div class=\"mcp-shell\">
     <div class=\"mcp-pane\">
       <h2>Prompt</h2>
       <div class=\"mcp-sub\">Single natural-language prompt input. No artifact controls.</div>
       <textarea id=\"mcp-question\" class=\"mcp-prompt\" placeholder=\"Example: Show failed Linux and Windows login activity in the last 24 hours, then summarize suspicious sources.\">Show failed login activity in the last 24 hours</textarea>
+      <div class=\"mcp-control-grid\">
+        <div class=\"mcp-segment-shell\">
+          <div class=\"mcp-segment-label\">Query Engine <span class=\"mcp-segment-tip\" title=\"LLM-Assisted MCP uses the guarded planner, writer, reviewer, and evidence summary path. Deterministic MCP stays on bounded templates as a fallback.\">?</span></div>
+          <div class=\"mcp-segment\" id=\"mcp-pipeline-segment\">
+            <button type=\"button\" class=\"mcp-segment-btn\" data-mcp-pipeline=\"assisted\" data-tone=\"assisted\" title=\"Default analyst mode with guarded query writing.\" aria-pressed=\"false\">
+              <span class=\"mcp-segment-btn-title\">LLM-Assisted</span>
+            </button>
+            <button type=\"button\" class=\"mcp-segment-btn\" data-mcp-pipeline=\"deterministic\" data-tone=\"deterministic\" title=\"Fallback mode with fixed bounded templates.\" aria-pressed=\"false\">
+              <span class=\"mcp-segment-btn-title\">Deterministic</span>
+            </button>
+          </div>
+        </div>
+        <div class=\"mcp-segment-shell\">
+          <div class=\"mcp-segment-label\">Dataset Scope <span class=\"mcp-segment-tip\" title=\"Live Mode uses the current environment. Demo Mode pivots search-style questions to historical public BOTSv3 data and widens time to all time.\">?</span></div>
+          <div class=\"mcp-segment\" id=\"mcp-mode-segment\">
+            <button type=\"button\" class=\"mcp-segment-btn\" data-mcp-mode=\"live\" data-tone=\"live\" title=\"Current environment and current time windows.\" aria-pressed=\"false\">
+              <span class=\"mcp-segment-btn-title\">Live Mode</span>
+            </button>
+            <button type=\"button\" class=\"mcp-segment-btn\" data-mcp-mode=\"demo\" data-tone=\"demo\" title=\"Historical BOTSv3 data across all time.\" aria-pressed=\"false\">
+              <span class=\"mcp-segment-btn-title\">Demo Mode</span>
+            </button>
+          </div>
+        </div>
+      </div>
       <div class=\"mcp-actions\">
         <button id=\"mcp-send\" class=\"mcp-send\">Ask Splunk MCP</button>
         <span id=\"mcp-status-pill\" class=\"mcp-status-pill\">idle</span>
@@ -13848,40 +17202,74 @@ def _mcp_page_body() -> str:
       </div>
       <p id=\"mcp-status\" class=\"muted\"></p>
       <div class=\"mcp-domain-box\">
-        <div class=\"mcp-sub\" style=\"margin:0 0 6px;\">Data Domain Hints Used for Query Planning</div>
+        <div class=\"mcp-sub\" style=\"margin:0 0 6px;\">Planning Hints | Likely Data Sources</div>
         <div id=\"mcp-domain-hints\" class=\"muted\">Run a question to view likely index/sourcetype targets.</div>
       </div>
     </div>
     <div class=\"mcp-pane\">
-      <h2>Assistant Output</h2>
-      <div class=\"mcp-sub\">Natural-language response plus execution telemetry from the guarded MCP flow.</div>
-      <pre id=\"mcp-chat\" class=\"mcp-chat\"></pre>
+      <h2>Analyst Answer</h2>
+      <div class=\"mcp-sub\">Short answer first. Evidence, SPL, and transcript stay below.</div>
+      <div id=\"mcp-summary-card\" class=\"mcp-summary-card\">
+        <div id=\"mcp-summary-title\" class=\"mcp-summary-title\">Ready for a question</div>
+        <div id=\"mcp-summary-copy\" class=\"mcp-summary-copy\">Run a question to see the analyst-facing answer, evidence summary, and next action.</div>
+      </div>
+      <div class=\"mcp-trust-strip\">
+        <span id=\"mcp-pipeline\" class=\"mcp-metric\">pipeline=llm_assisted</span>
+        <span id=\"mcp-intent\" class=\"mcp-metric\">intent=n/a</span>
+        <span id=\"mcp-tool\" class=\"mcp-metric\">tool=n/a</span>
+        <span id=\"mcp-rows\" class=\"mcp-metric\">rows=0</span>
+      </div>
+      <details class=\"mcp-transcript-shell\">
+        <summary>Conversation Transcript</summary>
+        <pre id=\"mcp-chat\" class=\"mcp-chat\"></pre>
+      </details>
     </div>
   </div>
-  <h2>Execution Details</h2>
-  <div class=\"mcp-metrics\">
-    <span id=\"mcp-intent\" class=\"mcp-metric\">intent=n/a</span>
-    <span id=\"mcp-tool\" class=\"mcp-metric\">tool=n/a</span>
-    <span id=\"mcp-rows\" class=\"mcp-metric\">rows=0</span>
-    <span id=\"mcp-writer\" class=\"mcp-metric\">writer_model=unknown</span>
-    <span id=\"mcp-runtime\" class=\"mcp-metric\">spl_run_ms=unknown</span>
-    <span id=\"mcp-rag\" class=\"mcp-metric\">rag=unknown</span>
+  <div class=\"mcp-evidence-grid\">
+    <section class=\"mcp-evidence-card\">
+      <div class=\"mcp-evidence-head\">
+        <div>
+          <h2>Result Rows</h2>
+          <div class=\"mcp-sub\">Sample evidence rows from the last run.</div>
+        </div>
+      </div>
+      <div id=\"mcp-results\" class=\"mcp-results-shell\"><div class=\"muted\" style=\"padding:10px;\">No sample rows yet.</div></div>
+    </section>
+    <section class=\"mcp-evidence-card\">
+      <div class=\"mcp-evidence-head\">
+        <div>
+          <h2>Executed SPL</h2>
+          <div class=\"mcp-sub\">Inspect the exact search used for this MCP result.</div>
+        </div>
+        <a id=\"mcp-spl-link\" class=\"btn-splunk\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; text-decoration:none; align-items:center; justify-content:center;\">Open In Splunk</a>
+      </div>
+      <pre id=\"mcp-spl\"></pre>
+    </section>
   </div>
-  <h3>SPL</h3>
-  <pre id=\"mcp-spl\"></pre>
-  <div class=\"mcp-spl-row\"><a id=\"mcp-spl-link\" class=\"btn-splunk\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; text-decoration:none; align-items:center; justify-content:center;\">Open In Splunk</a></div>
-  <h3>Result Rows (sample)</h3>
-  <div id=\"mcp-results\" class=\"mcp-results-shell\"><div class=\"muted\" style=\"padding:10px;\">No sample rows yet.</div></div>
-  <details class=\"guided\" style=\"margin-top:12px;\">
-    <summary>Show Raw JSON</summary>
+  <details class=\"mcp-diagnostics\">
+    <summary>Diagnostics</summary>
+    <div class=\"mcp-metrics\" style=\"margin-top:10px;\">
+      <span id=\"mcp-writer\" class=\"mcp-metric\">writer_model=unknown</span>
+      <span id=\"mcp-runtime\" class=\"mcp-metric\">spl_run_ms=unknown</span>
+      <span id=\"mcp-rag\" class=\"mcp-metric\">rag=unknown</span>
+    </div>
     <pre id=\"mcp-json\"></pre>
   </details>
 </div>
 <script>
   const q = document.getElementById('mcp-question');
   const send = document.getElementById('mcp-send');
+  const pipelineButtons = Array.from(document.querySelectorAll('[data-mcp-pipeline]'));
+  const modeButtons = Array.from(document.querySelectorAll('[data-mcp-mode]'));
+  const modeBanner = document.getElementById('mcp-mode-banner');
+  const pipelineBannerBadge = document.getElementById('mcp-pipeline-banner-badge');
+  const modeBannerBadge = document.getElementById('mcp-mode-banner-badge');
+  const modeBannerCopy = document.getElementById('mcp-mode-banner-copy');
   const statusEl = document.getElementById('mcp-status');
+  const summaryTitle = document.getElementById('mcp-summary-title');
+  const summaryCopy = document.getElementById('mcp-summary-copy');
   const chat = document.getElementById('mcp-chat');
+  const pipelineMetric = document.getElementById('mcp-pipeline');
   const intent = document.getElementById('mcp-intent');
   const tool = document.getElementById('mcp-tool');
   const rows = document.getElementById('mcp-rows');
@@ -13900,6 +17288,91 @@ def _mcp_page_body() -> str:
   const progressLabel = document.getElementById('mcp-progress-label');
   let progressTimer = null;
   let progressValue = 0;
+  const datasetStorageKey = 'agtsmith_mcp_dataset_mode';
+  const pipelineStorageKey = 'agtsmith_mcp_pipeline_mode';
+  let currentDatasetMode = window.localStorage.getItem(datasetStorageKey) === 'demo' ? 'demo' : 'live';
+  let currentPipelineMode = window.localStorage.getItem(pipelineStorageKey) === 'deterministic' ? 'deterministic' : 'assisted';
+  let effectiveDatasetMode = currentDatasetMode;
+  let effectivePipelineMode = currentPipelineMode;
+
+  function activeDatasetMode() {
+    return currentDatasetMode === 'demo' ? 'demo' : 'live';
+  }
+
+  function activePipelineMode() {
+    return currentPipelineMode === 'deterministic' ? 'deterministic' : 'assisted';
+  }
+
+  function datasetModeLabel(mode = effectiveDatasetMode) {
+    return mode === 'demo' ? 'Demo Mode' : 'Live Mode';
+  }
+
+  function pipelineModeLabel(mode = effectivePipelineMode) {
+    return mode === 'deterministic' ? 'Deterministic MCP' : 'LLM-Assisted MCP';
+  }
+
+  function persistMcpSelections() {
+    window.localStorage.setItem(datasetStorageKey, activeDatasetMode());
+    window.localStorage.setItem(pipelineStorageKey, activePipelineMode());
+  }
+
+  function syncSegmentButtons() {
+    modeButtons.forEach((btn) => {
+      const active = String(btn.getAttribute('data-mcp-mode') || '') === activeDatasetMode();
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    pipelineButtons.forEach((btn) => {
+      const active = String(btn.getAttribute('data-mcp-pipeline') || '') === activePipelineMode();
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function renderMcpExecutionProfile(detail = '') {
+    const demo = effectiveDatasetMode === 'demo';
+    const deterministic = effectivePipelineMode === 'deterministic';
+    syncSegmentButtons();
+    if (modeBanner) modeBanner.className = `page-mode-banner ${demo ? 'demo' : 'live'}`;
+    if (pipelineBannerBadge) {
+      pipelineBannerBadge.textContent = pipelineModeLabel();
+      pipelineBannerBadge.className = `page-mode-badge ${deterministic ? 'pipeline-deterministic' : 'pipeline-assisted'}`;
+    }
+    if (modeBannerBadge) {
+      modeBannerBadge.textContent = datasetModeLabel();
+      modeBannerBadge.className = `page-mode-badge ${demo ? 'mode-demo' : 'mode-live'}`;
+    }
+    if (pipelineMetric) {
+      pipelineMetric.textContent = `pipeline=${deterministic ? 'deterministic' : 'llm_assisted'}`;
+    }
+    if (modeBannerCopy) {
+      const pipelineCopy = deterministic
+        ? 'Deterministic MCP is active. Query generation stays on bounded templates without model-authored SPL.'
+        : 'LLM-Assisted MCP is active. The guarded planner, writer, reviewer, and evidence summary path runs before Splunk MCP execution.';
+      const datasetCopy = demo
+        ? 'Demo Mode is active. Search-style questions target historical public BOTSv3 data and widen time to all time.'
+        : 'Live Mode is active. Queries use the discovered local environment and current time windows.';
+      modeBannerCopy.textContent = detail || `${pipelineCopy} ${datasetCopy}`;
+    }
+  }
+
+  modeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      currentDatasetMode = String(btn.getAttribute('data-mcp-mode') || 'live') === 'demo' ? 'demo' : 'live';
+      effectiveDatasetMode = currentDatasetMode;
+      persistMcpSelections();
+      renderMcpExecutionProfile();
+    });
+  });
+  pipelineButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      currentPipelineMode = String(btn.getAttribute('data-mcp-pipeline') || 'assisted') === 'deterministic' ? 'deterministic' : 'assisted';
+      effectivePipelineMode = currentPipelineMode;
+      persistMcpSelections();
+      renderMcpExecutionProfile();
+    });
+  });
+  renderMcpExecutionProfile();
 
   function setStatus(label, cls='') {
     statusPill.textContent = label;
@@ -13922,19 +17395,23 @@ def _mcp_page_body() -> str:
   }
 
   function startProgress() {
+    const deterministic = activePipelineMode() === 'deterministic';
     if (progressTimer) clearInterval(progressTimer);
-    setProgress(3, 'Planning guarded MCP query...');
+    setProgress(3, deterministic ? 'Preparing deterministic MCP query...' : 'Planning LLM-assisted MCP query...');
     progressTimer = setInterval(() => {
       if (progressValue < 40) {
-        setProgress(progressValue + 2.4, 'Applying RAG + Data Domain context...');
+        setProgress(
+          progressValue + 2.4,
+          deterministic ? 'Selecting bounded deterministic template...' : 'Running planner, writer, review, and context grounding...'
+        );
         return;
       }
       if (progressValue < 76) {
-        setProgress(progressValue + 1.05, 'Executing Splunk MCP tool...');
+        setProgress(progressValue + 1.05, deterministic ? 'Executing deterministic Splunk MCP query...' : 'Executing reviewed Splunk MCP query...');
         return;
       }
       if (progressValue < 93) {
-        setProgress(progressValue + 0.42, 'Summarizing evidence...');
+        setProgress(progressValue + 0.42, deterministic ? 'Summarizing deterministic evidence...' : 'Preparing analyst-facing summary...');
       }
     }, 350);
   }
@@ -14025,6 +17502,15 @@ def _mcp_page_body() -> str:
     send.disabled = true;
     setStatus('running');
     statusEl.textContent = 'Running MCP query...';
+    effectiveDatasetMode = activeDatasetMode();
+    effectivePipelineMode = activePipelineMode();
+    renderMcpExecutionProfile();
+    if (summaryTitle) summaryTitle.textContent = `Running ${pipelineModeLabel(activePipelineMode())}`;
+    if (summaryCopy) {
+      summaryCopy.textContent = activePipelineMode() === 'deterministic'
+        ? 'Selecting a bounded deterministic MCP template, executing it, and preparing the analyst-facing answer.'
+        : 'Running the guarded planner, writer, reviewer, and evidence summary path before Splunk MCP execution.';
+    }
     startProgress();
     appendChat('You', question);
     try {
@@ -14032,7 +17518,9 @@ def _mcp_page_body() -> str:
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: question
+          message: question,
+          mode: activeDatasetMode(),
+          pipeline: activePipelineMode(),
         })
       });
       setProgress(95, 'Finalizing MCP output...');
@@ -14040,13 +17528,30 @@ def _mcp_page_body() -> str:
       if (!resp.ok) {
         statusEl.textContent = `error: ${data.error || `http_${resp.status}`}`;
         setStatus('error', 'bad');
+        if (summaryTitle) summaryTitle.textContent = 'MCP query failed';
+        if (summaryCopy) summaryCopy.textContent = statusEl.textContent;
         appendChat('System', statusEl.textContent);
         stopProgress(false);
         return;
       }
       setStatus('complete', 'ok');
       statusEl.textContent = 'Complete';
+      effectiveDatasetMode = String(data?.mode?.effective_mode || activeDatasetMode()) === 'demo' ? 'demo' : 'live';
+      effectivePipelineMode = String(data?.pipeline?.effective_pipeline || activePipelineMode()) === 'deterministic' ? 'deterministic' : 'assisted';
+      if (summaryTitle) summaryTitle.textContent = `${pipelineModeLabel()} answer ready`;
+      if (summaryCopy) summaryCopy.textContent = data.summary || '(no summary)';
       appendChat('Assistant', data.summary || '(no summary)');
+      if (data.pipeline && data.pipeline.label) {
+        appendChat('System', `${data.pipeline.label}: ${data.pipeline.detail || 'guarded query execution path selected.'}`);
+      }
+      if (data.mode && data.mode.detail) {
+        appendChat('System', `${data.mode.label}: ${data.mode.detail}`);
+      }
+      const bannerDetail = [data?.pipeline?.detail, data?.mode?.detail].filter(Boolean).join(' ');
+      renderMcpExecutionProfile(bannerDetail);
+      if (pipelineMetric) {
+        pipelineMetric.textContent = `pipeline=${String(data?.pipeline?.effective_pipeline || 'assisted').replace('assisted', 'llm_assisted')}`;
+      }
       intent.textContent = `intent=${data.intent || 'unknown'}`;
       tool.textContent = `tool=${data.selected_tool || 'n/a'}`;
       rows.textContent = `rows=${String(data.rows_returned ?? 0)} total=${String(data.total_rows ?? 0)}`;
@@ -14101,6 +17606,8 @@ def _mcp_page_body() -> str:
     } catch (err) {
       setStatus('error', 'bad');
       statusEl.textContent = `request failed: ${String(err)}`;
+      if (summaryTitle) summaryTitle.textContent = 'MCP request failed';
+      if (summaryCopy) summaryCopy.textContent = statusEl.textContent;
       appendChat('System', statusEl.textContent);
       stopProgress(false);
     } finally {
@@ -14109,6 +17616,212 @@ def _mcp_page_body() -> str:
   };
 </script>
 """
+
+
+def _summarize_mcp_rows(
+    question: str,
+    query_args: dict[str, Any],
+    rows: list[dict[str, Any]],
+    total_rows: int | None,
+    *,
+    intent: str = "",
+    selected_tool: str = "splunk_run_query",
+    mode_label: str = "",
+) -> str:
+    earliest = str(query_args.get("earliest_time", "") or "-24h").strip()
+    latest = str(query_args.get("latest_time", "") or "now").strip()
+    mode_prefix = f"[{mode_label}] " if mode_label else ""
+    if not rows:
+        hint = "Open the SPL in Splunk to broaden the time range or relax filters."
+        intent_name = str(intent or "").strip()
+        if selected_tool == "splunk_get_metadata":
+            hint = "Try a different metadata type or widen the time range if source activity is sparse."
+        elif selected_tool == "splunk_get_indexes":
+            hint = "If this looks incomplete, retry later or validate MCP/index permissions."
+        elif intent_name in {"windows_auth_failures", "windows_sysmon_network_activity", "windows_sysmon_dns_activity"}:
+            hint = "This may mean the selected Windows indexes have little or no matching telemetry in this window. Open in Splunk to widen the time range or validate Windows data coverage."
+        elif intent_name in {"linux_privilege_escalation", "linux_privilege_escalation_first_seen"}:
+            hint = "This may mean no matching sudo/su evidence exists in the current window. Open in Splunk to widen the time range or inspect alternate auth sources."
+        return (
+            f"{mode_prefix}No rows were returned for '{question}' "
+            f"over earliest={earliest} latest={latest}. "
+            f"{hint}"
+        )
+
+    sample_parts: list[str] = []
+    for row in rows[:3]:
+        if not isinstance(row, dict):
+            continue
+        pieces: list[str] = []
+        for key, value in row.items():
+            text = str(value).strip()
+            if not text:
+                continue
+            pieces.append(f"{key}={text}")
+            if len(pieces) >= 3:
+                break
+        if pieces:
+            sample_parts.append(", ".join(pieces))
+    sample_summary = " | ".join(sample_parts) if sample_parts else "Sample rows were returned."
+    return (
+        f"{mode_prefix}Returned {len(rows)} sample row(s)"
+        f"{f' out of {total_rows}' if isinstance(total_rows, int) else ''} "
+        f"for '{question}' over earliest={earliest} latest={latest}. "
+        f"Top sample values: {sample_summary}"
+    )
+
+
+def _run_mcp_chat_query_deterministic(question: str, *, mode_payload: dict[str, Any]) -> dict[str, Any]:
+    from langgraph_minimal_flow import determine_splunk_tool
+
+    template = map_question_to_template(question)
+    selected_tool, _reason, metadata_args, _chain_mode = determine_splunk_tool(question, template.intent)
+    effective_question = question
+    query_args: dict[str, Any] = {}
+    response_intent = template.intent
+    demo_search_effective = False
+    if selected_tool == "splunk_get_indexes":
+        response_intent = "top_indexes"
+        splunk_data = run_splunk_get_indexes()
+    elif selected_tool == "splunk_get_info":
+        response_intent = "splunk_info"
+        splunk_data = run_splunk_get_info()
+    elif selected_tool == "splunk_get_metadata":
+        response_intent = "metadata_inventory"
+        query_args = metadata_args if isinstance(metadata_args, dict) else {}
+        splunk_data = run_splunk_get_metadata(query_args)
+    else:
+        selected_tool = "splunk_run_query"
+        if mode_payload.get("demo_effective"):
+            effective_question = _demo_mode_question(question)
+            template = map_question_to_template(effective_question)
+            response_intent = template.intent
+            demo_search_effective = True
+        query_args = template_to_query_args(template, effective_question)
+        if mode_payload.get("demo_effective"):
+            query_args["earliest_time"] = "0"
+            query_args["latest_time"] = "now"
+        splunk_data = run_splunk_query_args(
+            query_args,
+            intent=template.intent,
+            summary_hint=template.summary_hint,
+        )
+    structured = splunk_data.get("structured", {}) if isinstance(splunk_data, dict) else {}
+    rows: list[dict[str, Any]] = []
+    if isinstance(structured, dict):
+        for key in ("results", "items", "rows", "indexes", "metadata"):
+            candidate = structured.get(key)
+            if isinstance(candidate, list):
+                rows = [row for row in candidate if isinstance(row, dict)]
+                if rows:
+                    break
+    total_rows_raw = structured.get("total_rows") if isinstance(structured, dict) else None
+    try:
+        total_rows = int(total_rows_raw) if total_rows_raw is not None else len(rows)
+    except Exception:
+        total_rows = len(rows)
+    summary = _summarize_mcp_rows(
+        question,
+        query_args,
+        rows[:25],
+        total_rows,
+        intent=response_intent,
+        selected_tool=selected_tool,
+        mode_label=str(mode_payload.get("label", "")) if demo_search_effective else "",
+    )
+    result_mode = dict(mode_payload)
+    if result_mode.get("demo_effective") and not demo_search_effective:
+        result_mode["detail"] = (
+            "Demo Mode is active. Inventory and metadata tools still reflect the live environment; "
+            "only search-style questions are rewritten to historical BOTSv3 data."
+        )
+    result = {
+        "question": question,
+        "effective_question": effective_question,
+        "summary": summary,
+        "intent": response_intent,
+        "supported": True,
+        "selected_tool": selected_tool,
+        "query_args": query_args,
+        "selected_spl_details": [
+            {
+                "tool": selected_tool,
+                "query": str(query_args.get("query", "")).strip(),
+                "rows_returned": len(rows),
+                "total_rows": total_rows,
+                "writer_model": "deterministic_mcp_template",
+            }
+        ],
+        "rows_returned": len(rows),
+        "total_rows": total_rows,
+        "evidence": {
+            "query_or_args": query_args,
+            "top_entities": rows[:25],
+        },
+        "search_strategy_summary": (
+            f"Deterministic MCP execution for intent={response_intent} using tool={selected_tool}."
+            + (
+                f" {result_mode.get('detail', '')}"
+                if result_mode.get("demo_effective")
+                else ""
+            )
+        ),
+        "rag_enabled": False,
+        "rag_max_chars": 0,
+        "mode": result_mode,
+        "pipeline": _mcp_chat_pipeline_payload(MCP_CHAT_PIPELINE_DETERMINISTIC),
+    }
+    return {"result": result, "meta": {"pipeline": "mcp_direct"}}
+
+
+def _run_mcp_chat_query_assisted(question: str, *, mode_payload: dict[str, Any]) -> dict[str, Any]:
+    from langgraph_minimal_flow import determine_splunk_tool
+
+    template = map_question_to_template(question)
+    selected_tool, _reason, _metadata_args, _chain_mode = determine_splunk_tool(question, template.intent)
+    effective_question = question
+    demo_search_effective = False
+    if mode_payload.get("demo_effective") and selected_tool == "splunk_run_query":
+        effective_question = _demo_mode_question(question)
+        demo_search_effective = True
+
+    payload = run_multi_model_soc(effective_question, write_artifact=False)
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    if not isinstance(result, dict):
+        result = {}
+    result = dict(result)
+
+    result_mode = dict(mode_payload)
+    if result_mode.get("demo_effective") and not demo_search_effective:
+        result_mode["detail"] = (
+            "Demo Mode is active. Inventory and metadata tools still reflect the live environment; "
+            "only search-style questions are rewritten to historical BOTSv3 data."
+        )
+    summary = str(result.get("summary", "")).strip()
+    if demo_search_effective and summary and not summary.startswith("[Demo Mode]"):
+        result["summary"] = f"[Demo Mode] {summary}"
+    result["question"] = question
+    result["effective_question"] = effective_question
+    result["mode"] = result_mode
+    result["pipeline"] = _mcp_chat_pipeline_payload(MCP_CHAT_PIPELINE_ASSISTED)
+
+    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    meta_payload = dict(meta) if isinstance(meta, dict) else {}
+    meta_payload["pipeline"] = "mcp_assisted"
+    return {"result": result, "meta": meta_payload}
+
+
+def _run_mcp_chat_query(
+    question: str,
+    *,
+    mode: str = MCP_CHAT_MODE_LIVE,
+    pipeline: str = MCP_CHAT_PIPELINE_ASSISTED,
+) -> dict[str, Any]:
+    mode_payload = _mcp_chat_mode_payload(mode)
+    pipeline_payload = _mcp_chat_pipeline_payload(pipeline)
+    if pipeline_payload.get("effective_pipeline") == MCP_CHAT_PIPELINE_DETERMINISTIC:
+        return _run_mcp_chat_query_deterministic(question, mode_payload=mode_payload)
+    return _run_mcp_chat_query_assisted(question, mode_payload=mode_payload)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -15127,11 +18840,13 @@ class Handler(BaseHTTPRequestHandler):
         if not question:
             self._json(HTTPStatus.OK, {"hints": [], "question": ""})
             return
-        hints = suggest_domains_for_question(question)
+        inferred_intent = map_question_to_template(question).intent
+        hints = suggest_domains_for_question(question, intent=inferred_intent)
         self._json(
             HTTPStatus.OK,
             {
                 "question": question,
+                "intent": inferred_intent,
                 "hints": hints,
                 "profile_path": str(ENV_PROFILE_PATH),
             },
@@ -15179,13 +18894,13 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length > 0 else b""
         data = json.loads(raw.decode("utf-8")) if raw else {}
         question = str(data.get("message", "")).strip()
+        mode = str(data.get("mode", MCP_CHAT_MODE_LIVE)).strip().lower()
+        pipeline = str(data.get("pipeline", MCP_CHAT_PIPELINE_ASSISTED)).strip().lower()
         if not question:
             self._json(HTTPStatus.BAD_REQUEST, {"error": "message is required"})
             return
 
-        session_id = str(data.get("session_id", "")).strip()
-        # MCP chat is intentionally non-artifact mode: interactive ask/answer only.
-        payload = run_multi_model_soc(question, session_id=session_id, write_artifact=False)
+        payload = _run_mcp_chat_query(question, mode=mode, pipeline=pipeline)
         result = payload.get("result", {}) if isinstance(payload, dict) else {}
         if not isinstance(result, dict):
             result = {}
@@ -15233,12 +18948,24 @@ class Handler(BaseHTTPRequestHandler):
             sample_rows = [r for r in top if isinstance(r, dict)]
             if sample_rows:
                 sample_source = "pipeline_evidence_top_entities"
-        domain_hints = suggest_domains_for_question(question, max_indexes=4, max_sourcetypes_per_index=4)
+        mode_payload = result.get("mode", {}) if isinstance(result.get("mode"), dict) else {}
+        pipeline_payload = result.get("pipeline", {}) if isinstance(result.get("pipeline"), dict) else {}
+        if bool(mode_payload.get("demo_effective")) and selected_tool == "splunk_run_query":
+            domain_hints = _demo_mode_domain_hints(str(result.get("intent", "")).strip())
+        else:
+            hint_question = str(result.get("effective_question", question)).strip() or question
+            domain_hints = suggest_domains_for_question(
+                hint_question,
+                intent=str(result.get("intent", "")).strip(),
+                max_indexes=4,
+                max_sourcetypes_per_index=4,
+            )
 
         self._json(
             HTTPStatus.OK,
             {
                 "question": question,
+                "effective_question": result.get("effective_question", question),
                 "summary": str(result.get("summary", "")),
                 "intent": result.get("intent"),
                 "supported": result.get("supported"),
@@ -15255,6 +18982,8 @@ class Handler(BaseHTTPRequestHandler):
                 "sample_rows_source": sample_source,
                 "sample_rows_error": sample_error,
                 "splunk_search_url_base": _splunk_search_url_base(),
+                "mode": mode_payload,
+                "pipeline": pipeline_payload,
                 "selected_spl_details": selected_spl_details,
                 "result": result_compact,
                 "meta": payload.get("meta", {}) if isinstance(payload, dict) else {},
@@ -15603,6 +19332,9 @@ class Handler(BaseHTTPRequestHandler):
             if not question:
                 self._json(400, {"error": "question is required"})
                 return
+            mode = str(data.get("mode", MCP_CHAT_MODE_LIVE)).strip().lower()
+            mode_payload = _mcp_chat_mode_payload(mode)
+            effective_question = _demo_mode_question(question) if mode_payload.get("demo_effective") else question
             session_id = str(data.get("session_id", "")).strip()
             case_id = str(data.get("case_id", "")).strip()
             parent_node_id = str(data.get("parent_node_id", "")).strip()
@@ -15624,7 +19356,7 @@ class Handler(BaseHTTPRequestHandler):
             pipeline = str(data.get("pipeline", "multi_model")).strip().lower()
             if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict):
                 result = _run_structured_pivot_investigation(
-                    question=question,
+                    question=effective_question,
                     pivot_context=pivot_context,
                     pivot_candidate=pivot_candidate,
                     session_id=session_id,
@@ -15632,7 +19364,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif pipeline == "agentic":
                 result = run_agentic_investigation(
-                    question,
+                    effective_question,
                     max_steps=max_steps,
                     session_id=session_id,
                     write_artifact=write_artifact,
@@ -15641,7 +19373,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             else:
                 result = run_multi_model_soc(
-                    question,
+                    effective_question,
                     session_id=session_id,
                     write_artifact=write_artifact,
                 )
@@ -15696,6 +19428,8 @@ class Handler(BaseHTTPRequestHandler):
                     "role": str(user.get("role", "unknown")),
                     "pipeline": pipeline,
                     "question": question,
+                    "effective_question": effective_question,
+                    "mode": mode_payload.get("effective_mode"),
                     "selected_tool": selected_tool,
                     "intent": result_body.get("intent"),
                     "rows_returned": result_body.get("rows_returned"),
@@ -15720,14 +19454,24 @@ class Handler(BaseHTTPRequestHandler):
                         artifact_path = str(meta.get("artifact", "")).strip()
                         if artifact_path:
                             _persist_mitre_bundle_to_artifact(artifact_path, mitre_bundle)
-                        pivot_context_payload = _build_structured_pivot_context(result_body, sample_rows)
+                        previous_graph_state = pivot_context.get("graph_case_state") if isinstance(pivot_context, dict) and isinstance(pivot_context.get("graph_case_state"), dict) else None
+                        pivot_context_payload = _build_structured_pivot_context(
+                            result_body,
+                            sample_rows,
+                            prior_graph_state=previous_graph_state,
+                        )
                         result_body["pivot_context"] = pivot_context_payload
                         result_body["sample_rows"] = sample_rows
                         result_body["sample_rows_source"] = sample_source
                         result_body["splunk_search_url_base"] = _splunk_search_url_base()
-                        previous_graph_state = pivot_context.get("graph_case_state") if isinstance(pivot_context, dict) and isinstance(pivot_context.get("graph_case_state"), dict) else None
+                        result_body["mode"] = mode_payload
+                        result_body["effective_question"] = effective_question
+                        if mode_payload.get("demo_effective"):
+                            current_summary = str(result_body.get("summary", "")).strip()
+                            if current_summary and not current_summary.startswith("[Demo Mode]"):
+                                result_body["summary"] = f"[Demo Mode] {current_summary}"
                         graph_case_state_payload = _build_graph_case_state_payload(
-                            question=question,
+                            question=effective_question,
                             result_body=result_body,
                             sample_rows=sample_rows,
                             case_id=case_id or "",
@@ -15738,7 +19482,7 @@ class Handler(BaseHTTPRequestHandler):
                         result_body["graph_case_state"] = graph_case_state_payload
                         case_context_payload = persist_case_result(
                             session_id=session_id,
-                            question=question,
+                            question=effective_question,
                             result_body=result_body,
                             graph_case_state=graph_case_state_payload,
                             case_id=case_id or None,
@@ -15774,11 +19518,15 @@ class Handler(BaseHTTPRequestHandler):
                         result_body["sample_rows"] = sample_rows
                         result_body["sample_rows_source"] = sample_source
                         result_body["splunk_search_url_base"] = _splunk_search_url_base()
+                        result_body["mode"] = mode_payload
+                        result_body["effective_question"] = effective_question
                     result["result"] = result_body
                 result["sample_rows"] = sample_rows
                 result["sample_rows_source"] = sample_source
                 result["sample_rows_error"] = sample_error
                 result["splunk_search_url_base"] = _splunk_search_url_base()
+                result["mode"] = mode_payload
+                result["effective_question"] = effective_question
             self._json(200, result)
         except Exception as exc:
             self._json(500, {"error": f"{type(exc).__name__}: {exc}"})

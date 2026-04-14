@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -13,6 +14,104 @@ import local_learning as ll
 
 
 class TestLocalLearning(unittest.TestCase):
+    def test_load_writer_benchmark_cases_round_robins_intents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            benchmark_path = Path(tmp) / "spl_cases.json"
+            benchmark_path.write_text(
+                """
+[
+  {"id":"linux-1","question":"q1","expected_intent":"linux_auth_failures"},
+  {"id":"linux-2","question":"q2","expected_intent":"linux_auth_failures"},
+  {"id":"linux-3","question":"q3","expected_intent":"linux_auth_failures"},
+  {"id":"windows-1","question":"q4","expected_intent":"windows_auth_failures"},
+  {"id":"windows-2","question":"q5","expected_intent":"windows_auth_failures"},
+  {"id":"windows-3","question":"q6","expected_intent":"windows_auth_failures"}
+]
+                """.strip(),
+                encoding="utf-8",
+            )
+            with mock.patch.object(ll, "WRITER_BENCHMARK_CASES", benchmark_path), \
+                 mock.patch.object(ll, "MAX_LEARNING_BENCHMARK_CASES", 4), \
+                 mock.patch.object(ll, "MAX_LEARNING_BENCHMARK_CASES_PER_INTENT", 2):
+                rows = ll._load_writer_benchmark_cases(["linux_auth_failures", "windows_auth_failures"])
+        self.assertEqual([row["id"] for row in rows], ["linux-1", "windows-1", "linux-2", "windows-2"])
+
+    def test_benchmark_writer_output_applies_alignment(self) -> None:
+        class FakeMM:
+            @staticmethod
+            def _apply_environment_constraints_to_query(question, intent, query):
+                return query
+
+            @staticmethod
+            def _normalize_planner_plan(candidate, question, fallback_reason):
+                return dict(candidate)
+
+            @staticmethod
+            def _default_plan_from_template(question):
+                return {"selected_tool": "splunk_run_query", "intent": "failed_login_activity", "tool_args": {}}
+
+            @staticmethod
+            def writer_node(state):
+                return {
+                    "writer_output": {
+                        "selected_tool": "splunk_run_query",
+                        "intent": "failed_login_activity",
+                        "tool_args": {"query": "search bad query", "earliest_time": "-24h", "latest_time": "now", "row_limit": 10},
+                    }
+                }
+
+            @staticmethod
+            def _enforce_question_alignment(question, plan):
+                aligned = dict(plan)
+                aligned["intent"] = "linux_privilege_escalation"
+                aligned["tool_args"] = {"query": "search aligned query", "earliest_time": "-24h", "latest_time": "now", "row_limit": 10}
+                return aligned
+
+            @staticmethod
+            def _normalize_candidate(candidate, question, fallback_reason):
+                normalized = dict(candidate)
+                normalized["reason"] = fallback_reason
+                return normalized
+
+        with mock.patch("minimal_question_to_answer.template_to_query_args", return_value={"query": "search seeded query"}), \
+             mock.patch("query_templates.TEMPLATES", [type("Template", (), {"intent": "linux_privilege_escalation", "earliest_time": "-24h", "latest_time": "now", "row_limit": 10})()]):
+            result = ll._benchmark_writer_output(FakeMM, {"question": "show failed sudo activity", "expected_intent": "linux_privilege_escalation"})
+        self.assertEqual(result["intent"], "linux_privilege_escalation")
+        self.assertEqual(result["tool_args"]["query"], "search aligned query")
+        self.assertEqual(result["reason"], "learning_benchmark_alignment_fallback")
+
+    def test_candidate_has_real_lift_requires_actual_improvement(self) -> None:
+        self.assertFalse(
+            ll._candidate_has_real_lift(
+                {
+                    "avg_score_delta": 0.0,
+                    "pass_rate_delta_pct": 0.0,
+                    "improved_case_count": 0,
+                    "regressed_case_count": 0,
+                }
+            )
+        )
+        self.assertTrue(
+            ll._candidate_has_real_lift(
+                {
+                    "avg_score_delta": 0.0,
+                    "pass_rate_delta_pct": 5.0,
+                    "improved_case_count": 0,
+                    "regressed_case_count": 0,
+                }
+            )
+        )
+
+    def test_ranked_approved_learning_records_prefers_exact_intent(self) -> None:
+        rows = [
+            {"intent": "windows_auth_failures", "kind": "preferred_fields", "proposal": {"preferred_fields": ["EventCode"]}, "status": "approved", "reason": "windows auth"},
+            {"intent": "apache_access_top_ips", "kind": "preferred_fields", "proposal": {"preferred_fields": ["clientip"]}, "status": "approved", "reason": "apache access"},
+        ]
+        with ll.learning_record_override(rows):
+            ranked = ll.ranked_approved_learning_records("show failed login activity in windows", "windows_auth_failures")
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0]["intent"], "windows_auth_failures")
+
     def test_spl_pattern_asset_is_sanitized(self) -> None:
         proposal, changed = ll._sanitize_learning_proposal(
             "spl_pattern_asset",

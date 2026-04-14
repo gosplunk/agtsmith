@@ -1,6 +1,8 @@
 # A.G.E.N.T. Smith
 ## Autonomous Guardrail-Enforced Networked Tasker
 
+> Release note: see [`docs/project/v1_4_0_delta.md`](/docs/view?path=project/v1_4_0_delta.md) for the short operator-facing summary of what changed in `v1.4.0`.
+
 A.G.E.N.T. Smith is a Splunk-centric analyst augmentation platform built to answer a practical question: how do we help analysts investigate faster without giving up control, evidence quality, or transparency?
 
 The current product is intentionally bounded. An analyst asks a natural-language question, the Linux controller assembles environment-aware SPL context, and the request moves through a guarded multi-model workflow before anything can touch Splunk. A reasoning model plans the search, a coding-focused model writes the SPL, a reviewer critiques it, and deterministic validation decides whether the approved read-only plan is allowed to execute. Splunk MCP is then used only for approved read-only retrieval, and the result comes back as an evidence-backed answer rather than a black-box model response.

@@ -11,6 +11,7 @@ artifacts/*
 docs/logs/
 output/playwright/
 .playwright-cli/
+tmp-shots*/
 
 .DS_Store
 .env

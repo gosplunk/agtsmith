@@ -133,7 +133,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "failed logon windows",
         ),
         query=(
-            "search index=windows sourcetype=XmlWinEventLog "
+            "search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
             "(Channel=Security OR source=\"XmlWinEventLog:Security\") "
             "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
             "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
@@ -196,7 +196,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "sysmon event 3",
         ),
         query=(
-            "search index=windows_sysmon sourcetype=XmlWinEventLog "
+            "search (index=windows_sysmon OR index=windows) sourcetype=XmlWinEventLog "
             "Channel=\"Microsoft-Windows-Sysmon/Operational\" "
             "(EventID=3 OR EventCode=3 OR DestinationIp=*) "
             "| table _time Computer Image SourceIp DestinationIp DestinationPort Protocol "
@@ -217,7 +217,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "dns queries windows",
         ),
         query=(
-            "search index=windows_sysmon sourcetype=XmlWinEventLog "
+            "search (index=windows_sysmon OR index=windows) sourcetype=XmlWinEventLog "
             "Channel=\"Microsoft-Windows-Sysmon/Operational\" "
             "(EventID=22 OR EventCode=22 OR QueryName=*) "
             "| table _time Computer Image QueryName QueryResults "

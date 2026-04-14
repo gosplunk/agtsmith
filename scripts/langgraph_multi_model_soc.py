@@ -50,6 +50,7 @@ from spl_query_repair import attempt_query_repair_once
 from tdir_core import build_tdir_case
 from environment_profile import apply_environment_query_constraints, validate_query_against_environment
 from intent_field_contracts import validate_query_for_intent
+from local_learning import ranked_approved_learning_records
 from runtime_config import (
     DEFAULT_MODEL_EVIDENCE_REVIEWER,
     DEFAULT_MODEL_FINAL_SUMMARY,
@@ -115,6 +116,92 @@ WINDOWS_STYLE_INTENTS = {
     "windows_credential_access_activity",
 }
 WEB_STYLE_INTENTS = {"apache_access_top_ips", "apache_404_spike"}
+
+
+def _merge_fields_preserving_order(existing: list[str], additions: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in [*existing, *additions]:
+        text = str(item).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def _parse_pipe_fields(query: str, command: str) -> tuple[list[str], re.Match[str] | None]:
+    match = re.search(rf"\|\s*{command}\s+(.+?)(?:\s*\|\s*|$)", str(query or ""), flags=re.IGNORECASE)
+    if not match:
+        return [], None
+    segment = match.group(1).strip()
+    if command.lower() == "table":
+        return [tok for tok in re.split(r"\s+", segment) if tok], match
+    by_match = re.search(r"\bby\s+(.+)$", segment, flags=re.IGNORECASE)
+    if not by_match:
+        return [], match
+    return [tok.strip().strip(",") for tok in by_match.group(1).split() if tok.strip().strip(",")], match
+
+
+def _inject_sources_into_query(query: str, sources: list[str]) -> str:
+    clean_sources = [str(item).strip() for item in sources if str(item).strip()]
+    if not clean_sources or re.search(r"\bsource=", str(query or ""), flags=re.IGNORECASE):
+        return query
+    source_clause = "(" + " OR ".join(f"source={json.dumps(item)}" for item in clean_sources) + ")"
+    return re.sub(r"^search\s+([^\|]+?)\b", lambda m: f"search {m.group(1).strip()} {source_clause} ", str(query or ""), count=1, flags=re.IGNORECASE).strip()
+
+
+def _apply_learning_assets(question: str, plan: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(plan, dict) or str(plan.get("selected_tool", "")).strip() != "splunk_run_query":
+        return plan
+    intent = str(plan.get("intent", "")).strip()
+    if not intent:
+        return plan
+    args = plan.get("tool_args", {}) if isinstance(plan.get("tool_args", {}), dict) else {}
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return plan
+    updated = dict(plan)
+    updated_args = dict(args)
+    learned_reasons: list[str] = []
+    for row in ranked_approved_learning_records(question, intent, max_records=4):
+        kind = str(row.get("kind", "")).strip()
+        proposal = row.get("proposal", {}) if isinstance(row.get("proposal", {}), dict) else {}
+        if kind == "preferred_sources":
+            preferred_sources = proposal.get("preferred_sources", [])
+            if isinstance(preferred_sources, list):
+                new_query = _inject_sources_into_query(query, [str(item) for item in preferred_sources])
+                if new_query != query:
+                    query = new_query
+                    learned_reasons.append("learning:preferred_sources")
+        elif kind == "preferred_fields":
+            preferred_fields = [str(item).strip() for item in proposal.get("preferred_fields", []) if str(item).strip()]
+            if preferred_fields:
+                fields, match = _parse_pipe_fields(query, "table")
+                if match:
+                    merged = _merge_fields_preserving_order(fields, preferred_fields)
+                    query = query[:match.start()] + f"| table {' '.join(merged)}" + query[match.end():]
+                    learned_reasons.append("learning:preferred_fields_table")
+                else:
+                    fields, match = _parse_pipe_fields(query, "stats")
+                    if match and fields:
+                        merged = _merge_fields_preserving_order(fields, preferred_fields)
+                        replacement = re.sub(r"\bby\s+(.+)$", f"by {' '.join(merged)}", match.group(0), flags=re.IGNORECASE)
+                        query = query[:match.start()] + replacement + query[match.end():]
+                        learned_reasons.append("learning:preferred_fields_stats")
+        elif kind == "spl_pattern_asset":
+            required_sources = [str(item).strip() for item in proposal.get("required_sources", []) if str(item).strip()]
+            required_sourcetypes = [str(item).strip() for item in proposal.get("required_sourcetypes", []) if str(item).strip()]
+            template = str(proposal.get("query_template", "")).strip()
+            if template and template.lower().startswith("search "):
+                if not query or (required_sources and not any(f"source={json.dumps(src)}" in query for src in required_sources)) or (
+                    required_sourcetypes and not any(f"sourcetype={st}" in query for st in required_sourcetypes)
+                ):
+                    query = template
+                    learned_reasons.append("learning:spl_pattern_asset")
+    if learned_reasons:
+        updated_args["query"] = query
+        updated["tool_args"] = updated_args
+        prior_reason = str(updated.get("reason", "")).strip()
+        updated["reason"] = "; ".join([part for part in [prior_reason, *learned_reasons] if part])
+    return updated
 
 
 def _apply_environment_constraints_to_query(question: str, intent: str, query: str) -> str:
@@ -220,7 +307,14 @@ def _call_ollama_json(*, model: str, system_prompt: str, user_payload: dict[str,
         "stream": False,
         "think": False,
     }
-    with httpx.Client(timeout=timeout) as client:
+    timeout_config = httpx.Timeout(
+        timeout,
+        connect=min(8.0, timeout),
+        read=timeout,
+        write=min(30.0, timeout),
+        pool=min(30.0, timeout),
+    )
+    with httpx.Client(timeout=timeout_config) as client:
         resp = client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
         resp.raise_for_status()
         body = resp.json()
@@ -393,6 +487,32 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
         "linux_session_activity_summary": "linux_session_activity",
     }
     intent = intent_aliases.get(intent, intent)
+    q_lower = question.lower()
+    failed_priv_esc = any(
+        tok in q_lower
+        for tok in (
+            "failed sudo",
+            "sudo failure",
+            "failed privilege escalation",
+            "failed su",
+            "privilege escalation attempts",
+        )
+    )
+    if intent == "linux_privilege_escalation_activity":
+        activity_focused = any(
+            tok in q_lower
+            for tok in (
+                "sudo behavior",
+                "sudo activity",
+                "su behavior",
+                "su activity",
+                "root session",
+                "sudo sessions",
+                "preserve context sudo",
+            )
+        )
+        if failed_priv_esc:
+            intent = "linux_privilege_escalation"
     confidence = _float01(candidate.get("confidence", 0.5), default=0.5)
     reason = str(candidate.get("reason") or candidate.get("rationale") or "")
 
@@ -434,7 +554,6 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
         args["row_limit"] = max(1, min(200, rl))
 
         # Question-aware query cleanup for common planner mistakes on benchmark-only BOTSv3 families.
-        q_lower = question.lower()
         if "botsv3" in q_lower:
             if "query" not in args:
                 out = _default_plan_from_template(question)
@@ -626,7 +745,7 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
             )
             normalized["intent"] = "linux_privilege_escalation_first_seen"
         if any(tok in q_lower for tok in ("sysmon network", "network connections", "event id 3", "sysmon event 3")):
-            target_index = "index=botsv3" if "botsv3" in q_lower else "index=windows_sysmon"
+            target_index = "index=botsv3" if "botsv3" in q_lower else "(index=windows_sysmon OR index=windows)"
             args["query"] = (
                 f"search {target_index} sourcetype=XmlWinEventLog "
                 "Channel=\"Microsoft-Windows-Sysmon/Operational\" "
@@ -636,7 +755,7 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
             )
             normalized["intent"] = "windows_sysmon_network_activity"
         if any(tok in q_lower for tok in ("sysmon dns", "dns queries", "event id 22", "sysmon event 22")):
-            target_index = "index=botsv3" if "botsv3" in q_lower else "index=windows_sysmon"
+            target_index = "index=botsv3" if "botsv3" in q_lower else "(index=windows_sysmon OR index=windows)"
             args["query"] = (
                 f"search {target_index} sourcetype=XmlWinEventLog "
                 "Channel=\"Microsoft-Windows-Sysmon/Operational\" "
@@ -700,7 +819,7 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
                 )
             args["query"] = query
             normalized["intent"] = "linux_privilege_escalation"
-        if (not first_seen_priv_esc) and any(tok in q_lower for tok in ("sudo behavior", "sudo activity", "su behavior", "su activity", "root session", "sudo sessions")):
+        if (not first_seen_priv_esc) and (not failed_priv_esc) and any(tok in q_lower for tok in ("sudo behavior", "sudo activity", "su behavior", "su activity", "root session", "sudo sessions")):
             args["query"] = (
                 "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
                 "(\"sudo:\" OR \"su:\" OR \"pam_unix(sudo:session)\" OR \"pam_unix(su:session)\" OR \"COMMAND=\" OR "
@@ -1249,6 +1368,8 @@ def validate_final_plan_node(state: MultiModelState) -> MultiModelState:
     plan = _normalize_candidate(plan, question, fallback_reason="final_plan_normalization_fallback")
     plan = _enforce_question_alignment(question, plan)
     plan = _normalize_candidate(plan, question, fallback_reason="post_alignment_normalization_fallback")
+    plan = _apply_learning_assets(question, plan)
+    plan = _normalize_candidate(plan, question, fallback_reason="post_learning_assets_normalization_fallback")
 
     tool = plan.get("selected_tool", "")
     args = plan.get("tool_args", {})

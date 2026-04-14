@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.4.0
+
+- changed MCP chat so the primary path is now LLM-assisted instead of deterministic-template-only, while still preserving deterministic MCP as an explicit fallback mode
+- added more visible MCP execution controls for `LLM-Assisted` vs `Deterministic` query generation and `Live Mode` vs `Demo Mode` dataset scope
+- redesigned the Investigation UI around a single decision-first center column with an `Answer Card`, `Confidence + Why`, one dominant `Primary Next Action`, concise evidence, and inline SPL validation
+- reduced analyst cognitive load by demoting the left rail into a mirror of the staged follow-up and downgrading rerun behavior so it no longer competes with the primary continue action
+- made saved IOC values in evidence and the Investigation Timeline actionable so analysts can stage the best preserved pivot directly from returned evidence instead of copying values by hand
+- improved saved investigation continuity and pivot explanation so reopened cases clearly state what changed from the prior step, why the next move is best, and when not to continue
+- strengthened environment-aware query grounding and ranking so failed-login investigations prefer authoritative auth sourcetypes and do not inherit irrelevant web-domain rewrites
+- added portable intent playbooks and regression coverage for deeper pivots across credential abuse, privilege escalation, endpoint DNS or network activity, web hunting, and cloud API identity activity
+- improved the `/learning` SPL Optimization workflow with clearer run-state visibility, change summaries, pending review, approved asset tracking, and stronger operator guidance
+- refreshed the documentation set with stable `v1.4.0` release highlights and operator-facing upgrade notes
+
 ## v1.0.0
 
 - first public release of A.G.E.N.T. Smith

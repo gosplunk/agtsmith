@@ -26,6 +26,12 @@ class GraphCaseState(TypedDict, total=False):
     evidence_entities: dict[str, list[str]]
     ranked_entities: dict[str, list[dict[str, Any]]]
     pivot_candidates: list[dict[str, Any]]
+    pivot_history: list[dict[str, Any]]
+    pivot_signatures: list[str]
+    investigation_depth: int
+    playbook_id: str
+    playbook_name: str
+    playbook_stage: str
     matching_active_spl_assets: list[dict[str, Any]]
     summary: str
     updated_at: int
@@ -62,6 +68,12 @@ def bootstrap_graph_case_state(
         evidence_entities={},
         ranked_entities={},
         pivot_candidates=[],
+        pivot_history=[],
+        pivot_signatures=[],
+        investigation_depth=0,
+        playbook_id="",
+        playbook_name="",
+        playbook_stage="",
         matching_active_spl_assets=[],
         summary="",
         updated_at=now_ts,

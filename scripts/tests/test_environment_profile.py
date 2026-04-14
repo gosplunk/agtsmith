@@ -69,6 +69,36 @@ class EnvironmentProfileTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("environment_sourcetype_not_in_index", reason)
 
+    def test_validate_query_allows_known_botsv3_sourcetypes_when_recent_profile_is_empty(self) -> None:
+        profile = {
+            "indexes": [{"index": "botsv3", "sourcetypes": []}],
+            "sourcetype_to_indexes": {},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            ok, reason = validate_query_against_environment(
+                {"query": 'search index=botsv3 sourcetype="aws:cloudtrail" | stats count by eventSource'},
+                profile_path=path,
+            )
+            self.assertTrue(ok, reason)
+            self.assertEqual(reason, "environment_query_ok")
+
+    def test_validate_query_still_blocks_unknown_botsv3_sourcetypes(self) -> None:
+        profile = {
+            "indexes": [{"index": "botsv3", "sourcetypes": []}],
+            "sourcetype_to_indexes": {},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            ok, reason = validate_query_against_environment(
+                {"query": 'search index=botsv3 sourcetype="not:a:real:demo:sourcetype" | stats count'},
+                profile_path=path,
+            )
+            self.assertFalse(ok)
+            self.assertIn("environment_sourcetype_not_in_index", reason)
+
     def test_context_builder_includes_indexes(self) -> None:
         profile = {
             "indexes": [{"index": "linux", "sourcetypes": ["access_combined", "auth.log"]}],
@@ -133,6 +163,7 @@ class EnvironmentProfileTests(unittest.TestCase):
             )
             self.assertTrue(hints)
             self.assertEqual(hints[0]["index"], "linux")
+            self.assertEqual(hints[0]["sourcetypes"][0], "auth.log")
 
     def test_suggest_domains_allows_internal_when_explicit(self) -> None:
         profile = {
@@ -150,11 +181,234 @@ class EnvironmentProfileTests(unittest.TestCase):
             path.write_text(json.dumps(profile), encoding="utf-8")
             hints = suggest_domains_for_question(
                 "Show Splunk internal failed login activity from _audit in the last 24 hours",
+                intent="internal_auth_failures",
                 profile_path=path,
                 max_indexes=3,
             )
             self.assertTrue(hints)
             self.assertEqual(hints[0]["index"], "_audit")
+
+    def test_suggest_domains_keeps_cross_platform_auth_balanced(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "linux", "sourcetypes": ["auth.log", "linux_secure", "auditd"]},
+                {"index": "windows", "sourcetypes": ["XmlWinEventLog"]},
+                {"index": "noise_linux", "sourcetypes": ["auth.log", "syslog", "secure"]},
+            ],
+            "sourcetype_to_indexes": {
+                "auth.log": ["linux", "noise_linux"],
+                "linux_secure": ["linux"],
+                "auditd": ["linux"],
+                "XmlWinEventLog": ["windows"],
+            },
+            "sourcetype_field_inventory": {
+                "auth.log": {"interesting_fields": ["user", "rhost", "host"]},
+                "linux_secure": {"interesting_fields": ["user", "src_ip", "host"]},
+                "auditd": {"interesting_fields": ["acct", "addr", "host"]},
+                "XmlWinEventLog": {"interesting_fields": ["TargetUserName", "IpAddress", "EventCode"]},
+            },
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            hints = suggest_domains_for_question(
+                "Show failed login activity across Windows and Linux in the last 24 hours.",
+                intent="failed_login_activity",
+                profile_path=path,
+                max_indexes=3,
+            )
+            self.assertGreaterEqual(len(hints), 2)
+            self.assertEqual(hints[0]["index"], "linux")
+            self.assertEqual(hints[1]["index"], "windows")
+
+    def test_suggest_domains_prefers_windows_sysmon_for_sysmon_questions(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "windows", "sourcetypes": ["Script:ListeningPorts", "XmlWinEventLog"]},
+                {"index": "windows_sysmon", "sourcetypes": ["XmlWinEventLog"]},
+            ],
+            "sourcetype_to_indexes": {
+                "Script:ListeningPorts": ["windows"],
+                "XmlWinEventLog": ["windows", "windows_sysmon"],
+            },
+            "sourcetype_field_inventory": {
+                "Script:ListeningPorts": {"interesting_fields": ["port", "process_name", "host"]},
+                "XmlWinEventLog": {"interesting_fields": ["Image", "DestinationIp", "DestinationPort", "Protocol", "QueryName"]},
+            },
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            hints = suggest_domains_for_question(
+                "Show Windows Sysmon network connections in the last 30 days with process image and destination IP.",
+                intent="windows_sysmon_network_activity",
+                profile_path=path,
+                max_indexes=3,
+            )
+            self.assertTrue(hints)
+            self.assertEqual(hints[0]["index"], "windows_sysmon")
+
+    def test_apply_constraints_rewrites_windows_auth_to_environment_index(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "soc_windows", "sourcetypes": ["XmlWinEventLog:Security", "XmlWinEventLog"]},
+            ],
+            "sourcetype_to_indexes": {
+                "XmlWinEventLog:Security": ["soc_windows"],
+                "XmlWinEventLog": ["soc_windows"],
+            },
+            "index_sourcetype_field_inventory": {
+                "soc_windows": {
+                    "XmlWinEventLog:Security": {
+                        "interesting_field_examples": [
+                            {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+                            {"field": "IpAddress", "sample_values": ["10.0.0.5"], "count": 10},
+                            {"field": "EventCode", "sample_values": ["4625"], "count": 10},
+                        ]
+                    }
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            query = (
+                "search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+                "(Channel=Security OR source=\"XmlWinEventLog:Security\") "
+                "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
+                "| table _time Computer TargetUserName IpAddress"
+            )
+            rendered = apply_environment_query_constraints(
+                "Show Windows failed login activity in the last 24 hours.",
+                "windows_auth_failures",
+                query,
+                profile_path=path,
+            )
+            self.assertIn("index=soc_windows", rendered)
+            self.assertNotIn("index=windows_sysmon", rendered)
+            self.assertNotIn("index=windows ", rendered)
+
+    def test_apply_constraints_rewrites_sysmon_to_discovered_index(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "soc_windows", "sourcetypes": ["XmlWinEventLog:Security"]},
+                {"index": "soc_sysmon", "sourcetypes": ["XmlWinEventLog"]},
+            ],
+            "sourcetype_to_indexes": {
+                "XmlWinEventLog:Security": ["soc_windows"],
+                "XmlWinEventLog": ["soc_sysmon"],
+            },
+            "index_sourcetype_field_inventory": {
+                "soc_sysmon": {
+                    "XmlWinEventLog": {
+                        "interesting_field_examples": [
+                            {"field": "QueryName", "sample_values": ["example.org"], "count": 10},
+                            {"field": "Image", "sample_values": ["C:\\\\Windows\\\\System32\\\\nslookup.exe"], "count": 10},
+                            {"field": "EventID", "sample_values": ["22"], "count": 10},
+                        ]
+                    }
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            query = (
+                "search (index=windows_sysmon OR index=windows) sourcetype=XmlWinEventLog "
+                "Channel=\"Microsoft-Windows-Sysmon/Operational\" "
+                "(EventID=22 OR EventCode=22 OR QueryName=*) "
+                "| table _time Computer Image QueryName"
+            )
+            rendered = apply_environment_query_constraints(
+                "Show Windows Sysmon DNS queries in the last 24 hours.",
+                "windows_sysmon_dns_activity",
+                query,
+                profile_path=path,
+            )
+            self.assertIn("index=soc_sysmon", rendered)
+            self.assertNotIn("index=windows_sysmon", rendered)
+            self.assertNotIn("index=windows ", rendered)
+
+    def test_apply_constraints_rewrites_cross_platform_auth_to_discovered_indexes(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "soc_linux", "sourcetypes": ["auth.log"]},
+                {"index": "soc_windows", "sourcetypes": ["XmlWinEventLog:Security", "XmlWinEventLog"]},
+            ],
+            "sourcetype_to_indexes": {
+                "auth.log": ["soc_linux"],
+                "XmlWinEventLog:Security": ["soc_windows"],
+                "XmlWinEventLog": ["soc_windows"],
+            },
+            "index_sourcetype_field_inventory": {
+                "soc_linux": {
+                    "auth.log": {
+                        "interesting_field_examples": [
+                            {"field": "user", "sample_values": ["root"], "count": 10},
+                            {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10},
+                        ]
+                    }
+                },
+                "soc_windows": {
+                    "XmlWinEventLog:Security": {
+                        "interesting_field_examples": [
+                            {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+                            {"field": "IpAddress", "sample_values": ["10.0.0.5"], "count": 10},
+                            {"field": "EventCode", "sample_values": ["4625"], "count": 10},
+                        ]
+                    }
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            query = (
+                "search ((index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+                "(\"Failed password\" OR \"authentication failure\")) OR "
+                "((index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+                "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\"))) "
+                "| stats count by index"
+            )
+            rendered = apply_environment_query_constraints(
+                "Show failed login activity across Windows and Linux in the last 24 hours.",
+                "failed_login_activity",
+                query,
+                profile_path=path,
+            )
+            self.assertIn("index=soc_linux", rendered)
+            self.assertIn("index=soc_windows", rendered)
+            self.assertNotIn("index=windows_sysmon", rendered)
+
+    def test_suggest_domains_with_intent_down_ranks_irrelevant_web_sourcetypes(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "soc_linux", "sourcetypes": ["access_combined", "linux_secure", "auth.log"]},
+            ],
+            "sourcetype_to_indexes": {
+                "access_combined": ["soc_linux"],
+                "linux_secure": ["soc_linux"],
+                "auth.log": ["soc_linux"],
+            },
+            "sourcetype_field_inventory": {
+                "access_combined": {"interesting_fields": ["clientip", "status", "uri_path"]},
+                "linux_secure": {"interesting_fields": ["user", "src_ip", "host"]},
+                "auth.log": {"interesting_fields": ["user", "rhost", "host"]},
+            },
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            hints = suggest_domains_for_question(
+                "Show failed login activity in the last 24 hours",
+                intent="failed_login_activity",
+                profile_path=path,
+                max_indexes=3,
+            )
+            self.assertTrue(hints)
+            self.assertEqual(hints[0]["index"], "soc_linux")
+            self.assertEqual(hints[0]["sourcetypes"][:2], ["linux_secure", "auth.log"])
+            self.assertNotEqual(hints[0]["sourcetypes"][0], "access_combined")
 
     def test_build_tag_context_includes_relevant_tags(self) -> None:
         profile = {

@@ -250,6 +250,31 @@ def _extract_sourcetypes(metadata_data: dict[str, Any]) -> tuple[list[str], dict
     return sorted(sourcetypes), counts
 
 
+def _load_index_sourcetypes(
+    *,
+    index_name: str,
+    earliest_time: str,
+    latest_time: str,
+    metadata_row_limit: int,
+) -> tuple[list[str], dict[str, int], str]:
+    md_args = {
+        "type": "sourcetypes",
+        "index": index_name,
+        "earliest_time": earliest_time,
+        "latest_time": latest_time,
+        "row_limit": metadata_row_limit,
+    }
+    md_data = run_splunk_get_metadata(md_args)
+    st_list, st_counts = _extract_sourcetypes(md_data)
+    if index_name.strip().lower() == "botsv3" and not st_list and earliest_time != "0":
+        md_args["earliest_time"] = "0"
+        md_args["latest_time"] = "now"
+        md_data = run_splunk_get_metadata(md_args)
+        st_list, st_counts = _extract_sourcetypes(md_data)
+        return st_list, st_counts, "0"
+    return st_list, st_counts, earliest_time
+
+
 def _extract_host_query_sourcetypes(query_data: dict[str, Any]) -> tuple[list[str], dict[str, int]]:
     rows = query_data.get("structured", {}).get("results", []) if isinstance(query_data, dict) else []
     sourcetypes: list[str] = []
@@ -829,16 +854,13 @@ def build_profile(
     fresh_rows: list[dict[str, Any]] = []
 
     for index_name in indexes:
-        md_args = {
-            "type": "sourcetypes",
-            "index": index_name,
-            "earliest_time": earliest_time,
-            "latest_time": latest_time,
-            "row_limit": metadata_row_limit,
-        }
         try:
-            md_data = run_splunk_get_metadata(md_args)
-            st_list, st_counts = _extract_sourcetypes(md_data)
+            st_list, st_counts, metadata_earliest = _load_index_sourcetypes(
+                index_name=index_name,
+                earliest_time=earliest_time,
+                latest_time=latest_time,
+                metadata_row_limit=metadata_row_limit,
+            )
         except Exception as exc:
             fresh_rows.append(
                 {
@@ -856,6 +878,7 @@ def build_profile(
                 "sourcetypes": st_list,
                 "sourcetype_event_counts": st_counts,
                 "error": "",
+                "metadata_earliest_time": metadata_earliest,
             }
         )
     rows = sorted(fresh_rows, key=lambda x: x.get("index", ""))

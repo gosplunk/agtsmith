@@ -45,10 +45,60 @@ def map_question_to_template(question: str) -> QueryTemplate:
     dims = infer_question_dimensions(question)
     platforms = set(dims.get("platforms", []))
     activities = set(dims.get("activities", []))
+    first_seen_priv_esc = any(
+        tok in normalized
+        for tok in (
+            "first time privilege escalation",
+            "first privilege escalation",
+            "first seen privilege escalation",
+            "first time sudo",
+            "first seen sudo",
+            "first time su",
+            "first observed sudo",
+            "first observed root session",
+            "newly observed sudo",
+            "new sudo behavior",
+            "show new sudo behavior",
+        )
+    )
+    failed_priv_esc = any(
+        tok in normalized
+        for tok in (
+            "failed sudo",
+            "sudo failure",
+            "failed privilege escalation",
+            "failed su",
+            "privilege escalation attempts",
+        )
+    )
+    priv_esc_activity = any(
+        tok in normalized
+        for tok in (
+            "sudo behavior",
+            "sudo activity",
+            "su behavior",
+            "su activity",
+            "root session",
+            "sudo sessions",
+            "preserve context sudo",
+        )
+    )
     explicit_botsv3_sourcetype = extract_explicit_botsv3_sourcetype(question)
     explicit_botsv3_overview = explicit_botsv3_sourcetype and (
         "overview of sourcetype" in normalized or "show an overview of sourcetype" in normalized
     )
+    if first_seen_priv_esc:
+        for template in TEMPLATES:
+            if template.intent == "linux_privilege_escalation_first_seen":
+                return template
+    if failed_priv_esc:
+        for template in TEMPLATES:
+            if template.intent == "linux_privilege_escalation":
+                return template
+    if priv_esc_activity:
+        for template in TEMPLATES:
+            if template.intent == "linux_privilege_escalation_activity":
+                return template
     if "auth_success" in activities and platforms == {"linux"}:
         for template in TEMPLATES:
             if template.intent == "linux_successful_logins":
@@ -76,6 +126,10 @@ def map_question_to_template(question: str) -> QueryTemplate:
     if "windows" in platforms and "process_activity" in activities:
         for template in TEMPLATES:
             if template.intent == "windows_process_activity":
+                return template
+    if "apache" in normalized and any(tok in normalized for tok in ("logon attempt", "login attempt", "weird logon", "weird login", "failed login")):
+        for template in TEMPLATES:
+            if template.intent == "apache_access_top_ips":
                 return template
     if explicit_botsv3_overview:
         for template in TEMPLATES:
@@ -513,6 +567,20 @@ def summarize_with_ollama_model(
             "Ollama summary returned empty text "
             f"(done={body.get('done')} done_reason={body.get('done_reason')})"
         )
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = text.replace("<think>", "").replace("</think>", "").strip()
+    markers = (
+        "Here's a concise summary",
+        "Here is a concise summary",
+        "Based on the query result",
+        "Summary of the query results",
+    )
+    lower = text.lower()
+    for marker in markers:
+        idx = lower.find(marker.lower())
+        if idx > 0:
+            text = text[idx:].strip()
+            break
     return text
 
 

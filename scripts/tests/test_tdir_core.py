@@ -32,6 +32,7 @@ class TdirCoreTests(unittest.TestCase):
         self.assertGreaterEqual(int(case["risk_score"]), 80)
         self.assertEqual(case["phase_status"]["soar_automation"], "not_enabled_yet")
         self.assertTrue(case["recommended_next_pivots"])
+        self.assertNotIn("Pivot to index inventory for broader visibility.", case["recommended_next_pivots"])
 
     def test_zero_row_case(self) -> None:
         case = build_tdir_case(

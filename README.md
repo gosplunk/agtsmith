@@ -1,10 +1,12 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.3.5`
+Current release: `v1.4.0`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
 This repository is published as a clean starting point. It ships with example configuration, not live environment secrets or local runtime state.
+
+For a short operator-facing summary of what changed in `v1.4.0`, read [v1.4.0 Release Highlights](docs/project/v1_4_0_delta.md).
 
 ## Start Here
 If you are trying to get the platform running for the first time, read the [Initial Setup Guide](docs/runbooks/initial_setup.md) alongside the quick start below.
@@ -50,7 +52,7 @@ Then:
 - run the first investigation
 
 ## Screenshots
-These screenshots reflect the current `v1.3.5` interface.
+The screenshot set below still reflects the earlier `v1.3.5` interface. `v1.4.0` adds a rebuilt investigation decision flow, LLM-assisted MCP defaults, stronger pivot staging, clearer Learning workflow guidance, and updated docs; see [v1.4.0 Release Highlights](docs/project/v1_4_0_delta.md).
 
 ### Login
 `v1.3.5` login flow for the analyst console.
@@ -159,6 +161,18 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - added deterministic Splunk Web auto-detection that derives the host from Splunk MCP/base settings and probes `https://HOST:8000` first, then `http://HOST:8000`
 - persisted auto-detected `SPLUNK_WEB_URL` during Configuration saves so working handoff targets remain stable across restarts
 - surfaced Splunk Web handoff validation explicitly in Configuration so operators can see whether `Open In Splunk` will render before they leave the page
+
+## What's New In v1.4.0
+- made `LLM-Assisted MCP` the default MCP experience while retaining deterministic MCP as an explicit fallback mode
+- added clear `LLM-Assisted` vs `Deterministic` and `Live Mode` vs `Demo Mode` controls in MCP instead of a low-signal checkbox-style demo toggle
+- rebuilt Investigation UI around one decision-first center flow: `Answer Card`, `Confidence + Why`, one dominant `Primary Next Action`, key evidence, and inline SPL trust validation
+- demoted the left rail into a mirror/workspace surface so it no longer competes with the center continue action once a result is loaded
+- turned evidence values and saved timeline entities into clickable pivot staging controls that preserve structured follow-up context instead of forcing manual copy/paste
+- improved structured pivot continuity, saved-case reopening, and next-action copy so the analyst can see what changed from the prior step and when not to continue
+- tightened environment-aware query grounding to avoid leaking web-style sourcetypes into failed-login auth searches and to rank authoritative local indexes and sourcetypes more intelligently
+- added portable intent playbooks for deeper pivot recommendations across credential abuse, web hunting, endpoint network or DNS, privilege escalation, and cloud API identity investigations
+- improved the `/learning` workflow so SPL Optimization shows clearer run status, what changed this run, pending review, approved assets, and stronger operator guidance before optimization starts
+- updated the docs set with stable `v1.4.0` release notes and operator-facing highlights
 
 ## What It Is Not
 - Autonomous response or recovery

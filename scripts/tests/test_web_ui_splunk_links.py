@@ -62,6 +62,9 @@ def _install_stub_modules() -> None:
 
     mod = types.ModuleType("minimal_question_to_answer")
     mod.map_question_to_template = lambda *args, **kwargs: None
+    mod.run_splunk_get_indexes = lambda *args, **kwargs: {}
+    mod.run_splunk_get_info = lambda *args, **kwargs: {}
+    mod.run_splunk_get_metadata = lambda *args, **kwargs: {}
     mod.run_splunk_query_args = lambda *args, **kwargs: {}
     mod.summarize_with_ollama_model = lambda *args, **kwargs: ""
     mod.template_to_query_args = lambda *args, **kwargs: {}
@@ -77,8 +80,15 @@ def _install_stub_modules() -> None:
     stubs["ollama_log_stream"] = mod
 
     mod = types.ModuleType("environment_profile")
+    mod.load_environment_profile = lambda *args, **kwargs: {}
     mod.suggest_domains_for_question = lambda *args, **kwargs: []
     stubs["environment_profile"] = mod
+
+    mod = types.ModuleType("investigation_playbooks")
+    mod.playbook_for_intent = lambda *args, **kwargs: {}
+    mod.playbook_target_order = lambda *args, **kwargs: []
+    mod.playbook_targets_for_intent = lambda *args, **kwargs: []
+    stubs["investigation_playbooks"] = mod
 
     mod = types.ModuleType("runtime_config")
     mod.DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER = "stub"

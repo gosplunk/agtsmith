@@ -60,16 +60,22 @@ EXPECTED_KIND_BY_DOMAIN = {
 AUTO_STALE_PENDING_HOURS = 72
 LEGACY_SOURCETYPE_TOKENS = ("too_small",)
 LEARNING_MODEL_TIMEOUT_SECONDS = 15.0
+LEARNING_BENCHMARK_MODEL_TIMEOUT_SECONDS = 6.0
 MAX_LEARNING_AUDIT_ENTRIES = 20
 MAX_LEARNING_AUDIT_BUNDLES = 8
 MAX_LEARNING_AUDIT_BUNDLES_PER_INTENT = 2
-MAX_LEARNING_BENCHMARK_CASES = 4
-MAX_LEARNING_BENCHMARK_CASES_PER_INTENT = 1
+MAX_LEARNING_BENCHMARK_CASES = 20
+MAX_LEARNING_BENCHMARK_CASES_PER_INTENT = 3
 DEFAULT_LEARNING_BENCHMARK_INTENTS = (
     "linux_auth_failures",
     "windows_auth_failures",
+    "windows_sysmon_network_activity",
+    "windows_sysmon_dns_activity",
     "apache_access_top_ips",
     "failed_login_activity",
+    "linux_privilege_escalation",
+    "linux_privilege_escalation_activity",
+    "linux_privilege_escalation_first_seen",
 )
 TIMEOUT_TOKENS = ("readtimeout", "timed out", "timeout")
 DEFAULT_SPL_OPTIMIZER_WRITER_ALT = "qwen2.5-coder:14b"
@@ -550,6 +556,41 @@ def approved_learning_records() -> list[dict[str, Any]]:
     return out
 
 
+def ranked_approved_learning_records(question: str, intent: str = "", *, max_records: int = 4) -> list[dict[str, Any]]:
+    q = str(question or "").lower()
+    wanted_intent = str(intent or "").strip().lower()
+    tokens = {tok for tok in re.findall(r"[a-z0-9_]{3,}", q)}
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for row in approved_learning_records():
+        if not isinstance(row, dict):
+            continue
+        row_intent = str(row.get("intent", "")).strip().lower()
+        kind = str(row.get("kind", "")).strip().lower()
+        proposal = row.get("proposal", {}) if isinstance(row.get("proposal", {}), dict) else {}
+        score = 0
+        if wanted_intent and row_intent == wanted_intent:
+            score += 20
+        elif wanted_intent:
+            continue
+        if row_intent and row_intent in q:
+            score += 6
+        if kind == "spl_pattern_asset":
+            score += 4
+        blob = " ".join(
+            [
+                row_intent,
+                kind,
+                str(row.get("reason", "")),
+                json.dumps(proposal, sort_keys=True),
+            ]
+        ).lower()
+        score += sum(1 for tok in tokens if tok in blob)
+        if score > 0:
+            scored.append((score, row))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [row for _score, row in scored[:max_records]]
+
+
 def _approved_learning_state_summary(records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     rows = [row for row in (records if records is not None else approved_learning_records()) if isinstance(row, dict)]
     intents = sorted({str(row.get("intent", "")).strip() for row in rows if str(row.get("intent", "")).strip()})
@@ -581,7 +622,7 @@ def _learning_benchmark_timeout_override(module: Any, timeout: float):
         return
 
     def _wrapped_call_ollama_json(*, model: str, system_prompt: str, user_payload: dict[str, Any], timeout: float = 180.0) -> dict[str, Any]:
-        bounded_timeout = min(float(timeout or LEARNING_MODEL_TIMEOUT_SECONDS), float(LEARNING_MODEL_TIMEOUT_SECONDS))
+        bounded_timeout = min(float(timeout or LEARNING_BENCHMARK_MODEL_TIMEOUT_SECONDS), float(LEARNING_BENCHMARK_MODEL_TIMEOUT_SECONDS))
         return original(
             model=model,
             system_prompt=system_prompt,
@@ -1335,21 +1376,73 @@ def _load_writer_benchmark_cases(target_intents: list[str]) -> list[dict[str, An
         return []
     rows = raw if isinstance(raw, list) else []
     allow = {str(item).strip() for item in target_intents if str(item).strip()}
-    per_intent: dict[str, int] = {}
-    selected: list[dict[str, Any]] = []
+    grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
         intent = str(row.get("expected_intent", "")).strip()
         if intent not in allow:
             continue
-        if int(per_intent.get(intent, 0)) >= MAX_LEARNING_BENCHMARK_CASES_PER_INTENT:
-            continue
-        selected.append(row)
-        per_intent[intent] = int(per_intent.get(intent, 0)) + 1
-        if len(selected) >= MAX_LEARNING_BENCHMARK_CASES:
-            break
+        grouped.setdefault(intent, []).append(row)
+    per_intent: dict[str, int] = {}
+    selected: list[dict[str, Any]] = []
+    intents = sorted(grouped)
+    while intents and len(selected) < MAX_LEARNING_BENCHMARK_CASES:
+        next_intents: list[str] = []
+        for intent in intents:
+            used = int(per_intent.get(intent, 0))
+            items = grouped.get(intent, [])
+            if used >= MAX_LEARNING_BENCHMARK_CASES_PER_INTENT or used >= len(items):
+                continue
+            selected.append(items[used])
+            per_intent[intent] = used + 1
+            if len(selected) >= MAX_LEARNING_BENCHMARK_CASES:
+                break
+            if used + 1 < len(items) and used + 1 < MAX_LEARNING_BENCHMARK_CASES_PER_INTENT:
+                next_intents.append(intent)
+        intents = next_intents
     return selected
+
+
+def _benchmark_writer_output(mm: Any, case: dict[str, Any]) -> dict[str, Any]:
+    from minimal_question_to_answer import template_to_query_args
+    from query_templates import TEMPLATES
+
+    question = str(case.get("question", "")).strip()
+    expected_intent = str(case.get("expected_intent", "")).strip()
+    template = next((row for row in TEMPLATES if getattr(row, "intent", "") == expected_intent), None)
+    if template is not None:
+        tool_args = template_to_query_args(template, question)
+        if isinstance(tool_args, dict) and str(tool_args.get("query", "")).strip():
+            tool_args = dict(tool_args)
+            tool_args["query"] = mm._apply_environment_constraints_to_query(question, expected_intent, str(tool_args.get("query", "")).strip())
+        planner_output = mm._normalize_planner_plan(
+            {
+                "selected_tool": "splunk_run_query",
+                "intent": expected_intent,
+                "tool_args": {
+                    "earliest_time": template.earliest_time,
+                    "latest_time": template.latest_time,
+                    "row_limit": template.row_limit,
+                },
+                "canonical_template_query": str(tool_args.get("query", "")).strip() if isinstance(tool_args, dict) else "",
+                "confidence": 0.8,
+                "reason": "learning_writer_benchmark_expected_intent_anchor",
+                "source": "learning_benchmark",
+            },
+            question,
+            fallback_reason="learning_benchmark_planner_anchor_fallback",
+        )
+    else:
+        planner_output = mm._normalize_planner_plan(
+            mm._default_plan_from_template(question),
+            question,
+            fallback_reason="learning_benchmark_default_plan_fallback",
+        )
+    writer_state = mm.writer_node({"question": question, "planner_output": planner_output})
+    writer_output = writer_state.get("writer_output", {}) or {}
+    aligned = mm._enforce_question_alignment(question, writer_output)
+    return mm._normalize_candidate(aligned, question, fallback_reason="learning_benchmark_alignment_fallback")
 
 
 def _extract_query_shape(query: str) -> str:
@@ -1547,9 +1640,7 @@ def _run_writer_quality_snapshot(
                     phase,
                 )
             question = str(case.get("question", "")).strip()
-            planner_state = mm.planner_node({"question": question})
-            writer_state = mm.writer_node({"question": question, "planner_output": planner_state.get("planner_output", {})})
-            writer_output = writer_state.get("writer_output", {}) or {}
+            writer_output = _benchmark_writer_output(mm, case)
             actual_intent = str(writer_output.get("intent", "")).strip() or "unknown"
             query_args = writer_output.get("tool_args", {}) if isinstance(writer_output.get("tool_args", {}), dict) else {}
             policy_ok, policy_reason = validate_query_args(query_args, question=question)
@@ -1680,6 +1771,16 @@ def _snapshot_tuple(snapshot: dict[str, Any]) -> tuple[float, float, int]:
     )
 
 
+def _candidate_has_real_lift(delta: dict[str, Any]) -> bool:
+    avg_delta = float(delta.get("avg_score_delta", 0.0) or 0.0)
+    pass_delta = float(delta.get("pass_rate_delta_pct", 0.0) or 0.0)
+    improved = int(delta.get("improved_case_count", 0) or 0)
+    regressed = int(delta.get("regressed_case_count", 0) or 0)
+    if avg_delta > 0.0 or pass_delta > 0.0:
+        return True
+    return improved > regressed and improved > 0
+
+
 def _select_improving_candidates(
     *,
     candidates: list[dict[str, Any]],
@@ -1780,7 +1881,7 @@ def _select_improving_candidates(
             "regressed_case_count": int(delta.get("regressed_case_count", 0) or 0),
             "writer_scope": ",".join(relevant_intents),
         }
-        if _snapshot_tuple(trial) > _snapshot_tuple(current_subset):
+        if _candidate_has_real_lift(delta):
             selected.append(row)
             row["selection_reason"] = "improved_writer_quality"
             if log_cb:
@@ -2045,6 +2146,7 @@ def generate_self_learn_candidates(
     considered = 0
     total = max(1, len(bundles))
     timeout_warning_count = 0
+    optimization_errors: list[dict[str, str]] = []
     cache_metrics: dict[str, Any] = {"hits": 0, "misses": 0, "labels": []}
     deterministic_covered_intents: set[str] = set()
     optimization_ai_used = False
@@ -2062,6 +2164,15 @@ def generate_self_learn_candidates(
                 log_cb(line)
             except Exception:
                 pass
+
+    def _collect_optimization_errors(reason: str) -> None:
+        text = str(reason or "").strip()
+        if "optimization asset " not in text or " failed:" not in text:
+            return
+        match = re.search(r"optimization asset ([^ ]+) failed: ([A-Za-z0-9_]+)", text)
+        if not match:
+            return
+        optimization_errors.append({"component": match.group(1), "error_type": match.group(2), "detail": text})
 
     _progress("Collecting local evidence for the SPL Optimization AI Engine...", 8, "collecting_evidence")
     _log(f"[learning] evidence bundles discovered: {len(bundles)}")
@@ -2144,6 +2255,8 @@ def generate_self_learn_candidates(
                             f"[learning] optimization asset candidate intent={optimization_candidate.get('intent')} "
                             f"kind={optimization_candidate.get('kind')}"
                         )
+                    else:
+                        _collect_optimization_errors(str(reason_opt))
                 continue
             _log(f"[learning] deterministic environment candidate rejected: {reason}")
         planner = _planner_decision(bundle, models)
@@ -2228,6 +2341,8 @@ def generate_self_learn_candidates(
                     f"[learning] optimization asset candidate intent={optimization_candidate.get('intent')} "
                     f"kind={optimization_candidate.get('kind')}"
                 )
+            else:
+                _collect_optimization_errors(str(reason_opt))
     target_intents = sorted({
         *DEFAULT_LEARNING_BENCHMARK_INTENTS,
         *[str(row.get("intent", "")).strip() for row in approved_records if str(row.get("intent", "")).strip()],
@@ -2318,6 +2433,7 @@ def generate_self_learn_candidates(
             for row in selected_candidates
         ],
         "timeout_warnings": timeout_warning_count,
+        "optimization_errors": optimization_errors[-16:],
         "run_mode": "ai_optimization_cycle" if optimization_ai_used else "fast_optimization_check",
     }
     _progress("Writing optimization assets and registry updates...", 92, "writing_registry")

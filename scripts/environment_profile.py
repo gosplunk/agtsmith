@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from botsv3_catalog import BOTSV3_SOURCETYPES
+
 PROFILE_PATH_DEFAULT = Path("artifacts/environment/environment_profile_latest.json")
 PROFILE_PATH_LEGACY = Path("docs/logs/environment_profile_latest.json")
 
@@ -607,12 +609,60 @@ INTENT_USE_CASE_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+INTENT_CANONICAL_ALIASES: dict[str, str] = {
+    "linux_audit_activity_summary": "linux_audit_activity",
+    "investigate_linux_audit_activity": "linux_audit_activity",
+    "windows_process_activity_summary": "windows_process_activity",
+    "windows_sysmon_network_summary": "windows_sysmon_network_activity",
+    "windows_sysmon_network_connections": "windows_sysmon_network_activity",
+    "windows_sysmon_network_connections_summary": "windows_sysmon_network_activity",
+    "windows_sysmon_dns_summary": "windows_sysmon_dns_activity",
+    "windows_sysmon_dns_activity_summary": "windows_sysmon_dns_activity",
+    "windows_dns_activity_summary": "windows_sysmon_dns_activity",
+    "windows_credential_access_summary": "windows_credential_access_activity",
+    "linux_session_activity_summary": "linux_session_activity",
+}
+
+
+def canonicalize_intent(intent: str, question: str = "") -> str:
+    intent_l = str(intent or "").strip().lower()
+    canonical = INTENT_CANONICAL_ALIASES.get(intent_l, intent_l)
+    q = str(question or "").lower()
+    if canonical == "linux_privilege_escalation_activity":
+        failed_priv_esc = any(
+            tok in q
+            for tok in (
+                "failed sudo",
+                "sudo failure",
+                "failed privilege escalation",
+                "failed su",
+                "privilege escalation attempts",
+            )
+        )
+        activity_focused = any(
+            tok in q
+            for tok in (
+                "sudo behavior",
+                "sudo activity",
+                "su behavior",
+                "su activity",
+                "root session",
+                "sudo sessions",
+                "preserve context sudo",
+            )
+        )
+        if failed_priv_esc and not activity_focused:
+            return "linux_privilege_escalation"
+    return canonical
+
+
 def _question_tokens(question: str) -> set[str]:
     return {token for token in re.findall(r"[a-z0-9_:.+-]{3,}", str(question or "").lower()) if token}
 
 
 def _intent_use_cases(intent: str, question: str) -> set[str]:
-    derived = set(INTENT_USE_CASE_ALIASES.get(str(intent or "").strip(), ()))
+    intent_canonical = canonicalize_intent(intent, question)
+    derived = set(INTENT_USE_CASE_ALIASES.get(intent_canonical, ()))
     q = str(question or "").lower()
     if any(tok in q for tok in ("failed", "login", "authentication", "password", "brute force", "failed logon")):
         derived.update({"linux_auth_failures", "windows_auth_failures", "credential_abuse"})
@@ -631,6 +681,54 @@ def _intent_use_cases(intent: str, question: str) -> set[str]:
     if any(tok in q for tok in ("office 365 management", "o365 management", "ms:o365:management", "o365:management:activity")):
         derived.update({"o365_management_activity"})
     return derived
+
+
+def _intent_style_targets(intent: str, question: str) -> set[str]:
+    styles: set[str] = set()
+    for use_case in _intent_use_cases(intent, question):
+        if use_case.startswith("linux_"):
+            styles.add("linux")
+        elif use_case.startswith("windows_"):
+            styles.add("windows")
+        elif use_case.startswith("apache_") or use_case in {"web_scanning"}:
+            styles.add("web")
+    q = str(question or "").lower()
+    if any(tok in q for tok in ("apache", "http", "web", "404", "user agent")):
+        styles.add("web")
+    if any(tok in q for tok in ("linux", "ssh", "sudo", "su", "auth.log", "secure")):
+        styles.add("linux")
+    if any(tok in q for tok in ("windows", "sysmon", "xmlwineventlog", "4625", "4624")):
+        styles.add("windows")
+    return styles
+
+
+def _preferred_index_order(intent: str, question: str) -> list[str]:
+    intent_canonical = canonicalize_intent(intent, question)
+    q = str(question or "").lower()
+    if any(tok in q for tok in ("splunk internal", "_audit", "_internal", "splunk auth", "splunk platform")):
+        return ["_audit", "internal"]
+    if intent_canonical in {"windows_sysmon_network_activity", "windows_sysmon_dns_activity"} or "sysmon" in q:
+        return ["windows_sysmon", "windows"]
+    if intent_canonical in {"failed_login_activity", "successful_login_activity"}:
+        return ["linux", "windows"]
+    return []
+
+
+def _index_priority_bucket(index_name: str, domain: dict[str, Any], preferred: list[str]) -> int:
+    if not preferred:
+        return len(preferred)
+    idx_l = str(index_name or "").lower()
+    styles = {str(item).strip() for item in domain.get("styles", []) if str(item).strip()} if isinstance(domain, dict) else set()
+    for pos, target in enumerate(preferred):
+        if target == "_audit" and idx_l == "_audit":
+            return pos
+        if target == "internal" and idx_l.startswith("_"):
+            return pos
+        if target == "windows_sysmon" and ("sysmon" in idx_l or "windows_sysmon" in idx_l):
+            return pos
+        if target in styles:
+            return pos
+    return len(preferred)
 
 
 def _domain_styles(index_name: str, sourcetypes: list[str], semantics: dict[str, Any]) -> set[str]:
@@ -830,6 +928,7 @@ def resolve_authoritative_domains_for_question(
     profile_path: str | Path = PROFILE_PATH_DEFAULT,
     max_domains: int = 4,
 ) -> list[dict[str, Any]]:
+    intent = canonicalize_intent(intent, question)
     profile = attach_semantics(load_environment_profile(profile_path))
     indexes = profile.get("indexes", [])
     semantics = profile.get("sourcetype_semantics", {}) if isinstance(profile.get("sourcetype_semantics"), dict) else {}
@@ -878,12 +977,21 @@ def resolve_authoritative_domains_for_question(
             score += 6
         if idx_l.startswith("_") and not explicit_internal:
             score -= 6
+        ranked_sourcetypes = _rank_domain_sourcetypes(
+            index_name=idx,
+            sourcetypes=sourcetypes,
+            intent=intent,
+            question=question,
+            semantics=semantics,
+            field_inventory=field_inventory,
+            index_sourcetype_inventory=index_sourcetype_inventory,
+        )
         scored.append(
             (
                 score,
                 {
                     "index": idx,
-                    "sourcetypes": sourcetypes,
+                    "sourcetypes": ranked_sourcetypes,
                     "styles": sorted(styles),
                     "matched_use_cases": sorted(matched_use_cases),
                     "score": score,
@@ -915,6 +1023,28 @@ def _select_domain_by_style(domains: list[dict[str, Any]], style: str) -> dict[s
     return None
 
 
+def _select_domains_by_style(domains: list[dict[str, Any]], style: str) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for domain in domains:
+        styles = domain.get("styles", [])
+        if isinstance(styles, list) and style in styles:
+            selected.append(domain)
+    return selected
+
+
+def _index_clause_for_domains(domains: list[dict[str, Any]]) -> str:
+    indexes: list[str] = []
+    for domain in domains:
+        index_name = str(domain.get("index", "")).strip()
+        if index_name and index_name not in indexes:
+            indexes.append(index_name)
+    if not indexes:
+        return ""
+    if len(indexes) == 1:
+        return f"index={indexes[0]}"
+    return "(" + " OR ".join(f"index={idx}" for idx in indexes) + ")"
+
+
 def _auth_sourcetype_clause(domain: dict[str, Any], semantics: dict[str, Any]) -> str:
     sourcetypes = [str(item).strip() for item in domain.get("sourcetypes", []) if str(item).strip()]
     selected: list[str] = []
@@ -922,7 +1052,7 @@ def _auth_sourcetype_clause(domain: dict[str, Any], semantics: dict[str, Any]) -
         sem = semantics.get(st, {}) if isinstance(semantics, dict) else {}
         use_cases = {str(item).strip() for item in sem.get("use_cases", []) if str(item).strip()} if isinstance(sem, dict) else set()
         st_l = st.lower()
-    if (
+        if (
             {"linux_auth_failures", "windows_auth_failures", "linux_privilege_escalation", "linux_audit_activity"} & use_cases
             or any(tok in st_l for tok in ("auth", "secure", "audit", "wineventlog", "sysmon", "security"))
         ):
@@ -963,6 +1093,72 @@ def _preferred_sourcetype_for_intent(intent: str, domain: dict[str, Any]) -> str
     return ""
 
 
+def _sourcetype_styles(st: str, sem: dict[str, Any]) -> set[str]:
+    styles: set[str] = set()
+    st_l = str(st or "").lower()
+    use_cases = {str(item).strip() for item in sem.get("use_cases", []) if str(item).strip()} if isinstance(sem, dict) else set()
+    for use_case in use_cases:
+        if use_case.startswith("linux_"):
+            styles.add("linux")
+        elif use_case.startswith("windows_"):
+            styles.add("windows")
+        elif use_case.startswith("apache_") or use_case in {"web_scanning"}:
+            styles.add("web")
+    if any(tok in st_l for tok in ("auth", "secure", "auditd", "linux_audit", "sudo", "su")):
+        styles.add("linux")
+    if any(tok in st_l for tok in ("xmlwineventlog", "wineventlog", "sysmon")):
+        styles.add("windows")
+    if any(tok in st_l for tok in ("access_combined", "apache", "nginx", "http")):
+        styles.add("web")
+    return styles
+
+
+def _rank_domain_sourcetypes(
+    *,
+    index_name: str,
+    sourcetypes: list[str],
+    intent: str,
+    question: str,
+    semantics: dict[str, Any],
+    field_inventory: dict[str, Any],
+    index_sourcetype_inventory: dict[str, Any],
+) -> list[str]:
+    tokens = _question_tokens(question)
+    target_use_cases = _intent_use_cases(intent, question)
+    target_styles = _intent_style_targets(intent, question)
+    ranked: list[tuple[int, int, str]] = []
+    for pos, st in enumerate(sourcetypes):
+        sem = semantics.get(st, {}) if isinstance(semantics, dict) else {}
+        use_cases = {str(item).strip() for item in sem.get("use_cases", []) if str(item).strip()} if isinstance(sem, dict) else set()
+        desc = str(sem.get("description", "")).lower() if isinstance(sem, dict) else ""
+        styles = _sourcetype_styles(st, sem)
+        field_meta = _domain_field_meta(
+            index_name=index_name,
+            sourcetype=st,
+            field_inventory=field_inventory,
+            index_sourcetype_inventory=index_sourcetype_inventory,
+        )
+        populated_fields = _field_inventory_populated_names(field_meta)
+        st_l = st.lower()
+        score = 0
+        score += 18 * len(use_cases & target_use_cases)
+        score += 8 * len(styles & target_styles)
+        if target_styles and styles and not (styles & target_styles):
+            score -= 6
+        if any(token == st_l or token in st_l for token in tokens):
+            score += 10
+        score += 2 * sum(1 for token in tokens if token in desc)
+        if "linux_auth_failures" in target_use_cases and {"user", "uid", "acct", "rhost", "src_ip", "addr"} & populated_fields:
+            score += 5
+        if "windows_auth_failures" in target_use_cases and {"TargetUserName", "SubjectUserName", "IpAddress", "Source_Network_Address"} & populated_fields:
+            score += 5
+        if any(use_case.startswith("apache_") for use_case in target_use_cases) and {"clientip", "src", "status", "uri", "uri_path"} & populated_fields:
+            score += 5
+        ranked.append((score, -pos, st))
+    ranked.sort(reverse=True)
+    return [st for _score, _pos, st in ranked]
+
+
 def apply_environment_query_constraints(
     question: str,
     intent: str,
@@ -975,6 +1171,7 @@ def apply_environment_query_constraints(
         return rendered
     if "botsv3" in str(question or "").lower():
         return rendered
+    intent = canonicalize_intent(intent, question)
 
     profile = attach_semantics(load_environment_profile(profile_path))
     semantics = profile.get("sourcetype_semantics", {}) if isinstance(profile.get("sourcetype_semantics"), dict) else {}
@@ -986,6 +1183,9 @@ def apply_environment_query_constraints(
     linux_domain = _select_domain_by_style(domains, "linux")
     windows_domain = _select_domain_by_style(domains, "windows")
     web_domain = _select_domain_by_style(domains, "web")
+    linux_domains = _select_domains_by_style(domains, "linux")
+    windows_domains = _select_domains_by_style(domains, "windows")
+    web_domains = _select_domains_by_style(domains, "web")
     active_domain = primary
     if str(intent or "").startswith("linux_"):
         active_domain = linux_domain or primary
@@ -995,10 +1195,14 @@ def apply_environment_query_constraints(
         active_domain = web_domain or primary
 
     active_index = str((active_domain or {}).get("index", "")).strip()
-    linux_index = str((linux_domain or active_domain or {}).get("index", "")).strip()
+    linux_bound_intent = str(intent or "").strip().startswith("linux_") or str(intent or "").strip() in {"failed_login_activity", "successful_login_activity"}
+    linux_index = str(((linux_domain or {}) if linux_bound_intent else (linux_domain or active_domain or {})).get("index", "")).strip()
     windows_index = str((windows_domain or {}).get("index", "")).strip()
+    linux_index_clause = _index_clause_for_domains(linux_domains if linux_domains else ([linux_domain] if linux_domain else []))
+    windows_index_clause = _index_clause_for_domains(windows_domains if windows_domains else ([windows_domain] if windows_domain else []))
+    web_index_clause = _index_clause_for_domains(web_domains if web_domains else ([web_domain] if web_domain else []))
     sourcetype_clause = _auth_sourcetype_clause(active_domain or {}, semantics)
-    linux_clause = _auth_sourcetype_clause(linux_domain or active_domain or {}, semantics)
+    linux_clause = _auth_sourcetype_clause((linux_domain or {}) if linux_bound_intent else (linux_domain or active_domain or {}), semantics)
     windows_clause = _auth_sourcetype_clause(windows_domain or {}, semantics) if windows_domain else ""
     web_sourcetypes = [str(item).strip() for item in (web_domain or active_domain or {}).get("sourcetypes", []) if str(item).strip()]
     web_access = next((st for st in web_sourcetypes if any(tok in st.lower() for tok in ("access_combined", "apache:access", "nginx"))), "")
@@ -1010,15 +1214,26 @@ def apply_environment_query_constraints(
     if active_index:
         rendered = re.sub(r"\(index=main OR index=main\)", f"index={active_index}", rendered, flags=re.IGNORECASE)
         rendered = re.sub(r"\bindex=main\b", f"index={active_index}", rendered, flags=re.IGNORECASE)
-    if windows_index:
-        rendered = re.sub(r"\bindex=windows_sysmon\b", f"index={windows_index}", rendered, flags=re.IGNORECASE)
-        rendered = re.sub(r"\bindex=windows\b", f"index={windows_index}", rendered, flags=re.IGNORECASE)
-        rendered = re.sub(r"\(index=windows OR index=windows_sysmon\)", f"index={windows_index}", rendered, flags=re.IGNORECASE)
+    if windows_index_clause:
+        rendered = re.sub(
+            r"\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=winnetmon)?\)",
+            windows_index_clause,
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        rendered = re.sub(r"\bindex=windows_sysmon\b", windows_index_clause, rendered, flags=re.IGNORECASE)
+        rendered = re.sub(r"\bindex=windows\b", windows_index_clause, rendered, flags=re.IGNORECASE)
+        rendered = re.sub(r"\bindex=winnetmon\b", windows_index_clause, rendered, flags=re.IGNORECASE)
     elif str(intent or "").strip() in {"failed_login_activity", "successful_login_activity"}:
-        rendered = re.sub(r"\|\s*append\s*\[\s*search\s+\(index=windows OR index=windows_sysmon\).*?\]\s*", " ", rendered, flags=re.IGNORECASE)
+        rendered = re.sub(
+            r"\|\s*append\s*\[\s*search\s+\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=winnetmon)?\).*?\]\s*",
+            " ",
+            rendered,
+            flags=re.IGNORECASE,
+        )
         rendered = re.sub(r"\|\s*append\s*\[\s*search\s+index=windows.*?\]\s*", " ", rendered, flags=re.IGNORECASE)
         rendered = re.sub(
-            r"\s+OR\s+\(\(index=windows OR index=windows_sysmon\)\s+sourcetype=XmlWinEventLog\s+\((?:EventCode=4625|EventID=4625|\"An account failed to log on\"|EventCode=4624|EventID=4624|\"An account was successfully logged on\")[^)]*\)\)\s*",
+            r"\s+OR\s+\(\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=winnetmon)?\)\s+sourcetype=XmlWinEventLog\s+\((?:EventCode=4625|EventID=4625|\"An account failed to log on\"|EventCode=4624|EventID=4624|\"An account was successfully logged on\")[^)]*\)\)\s*",
             " ",
             rendered,
             flags=re.IGNORECASE,
@@ -1046,10 +1261,9 @@ def apply_environment_query_constraints(
         if first_term:
             rendered = re.sub(r"\bsourcetype=XmlWinEventLog\b", first_term, rendered, flags=re.IGNORECASE)
 
-    if web_domain:
-        web_index = str(web_domain.get("index", "")).strip()
-        if web_index:
-            rendered = re.sub(r"\bindex=linux\b", f"index={web_index}", rendered, flags=re.IGNORECASE)
+    if web_domain and str(intent or "").startswith("apache_"):
+        if web_index_clause:
+            rendered = re.sub(r"\bindex=linux\b", web_index_clause, rendered, flags=re.IGNORECASE)
         if web_access:
             rendered = re.sub(r"\bsourcetype=access_combined\b", _format_sourcetype_term(web_access), rendered, flags=re.IGNORECASE)
         if web_error:
@@ -1063,9 +1277,9 @@ def apply_environment_query_constraints(
 
     if active_index and not any(idx in rendered for idx in (f"index={active_index}",)):
         q_indexes = extract_indexes_from_query(rendered)
-        generic_only = q_indexes and all(idx in {"linux", "windows", "windows_sysmon", "main"} for idx in q_indexes)
+        generic_only = q_indexes and all(idx in {"linux", "windows", "windows_sysmon", "winnetmon", "main"} for idx in q_indexes)
         if generic_only:
-            rendered = re.sub(r"\bindex=(linux|windows|windows_sysmon|main)\b", f"index={active_index}", rendered, flags=re.IGNORECASE)
+            rendered = re.sub(r"\bindex=(linux|windows|windows_sysmon|winnetmon|main)\b", f"index={active_index}", rendered, flags=re.IGNORECASE)
 
     rendered = re.sub(r"\(index=([A-Za-z0-9_:-]+)\s+OR\s+index=\1\)", r"index=\1", rendered, flags=re.IGNORECASE)
 
@@ -1159,6 +1373,7 @@ def build_tag_context(
 def suggest_domains_for_question(
     question: str,
     *,
+    intent: str = "",
     profile_path: str | Path = PROFILE_PATH_DEFAULT,
     max_indexes: int = 5,
     max_sourcetypes_per_index: int = 5,
@@ -1166,6 +1381,7 @@ def suggest_domains_for_question(
     profile = load_environment_profile(profile_path)
     if not profile:
         return []
+    profile = attach_semantics(profile)
     indexes = profile.get("indexes", [])
     if not isinstance(indexes, list):
         return []
@@ -1173,7 +1389,21 @@ def suggest_domains_for_question(
     q = (question or "").lower().strip()
     if not q:
         return []
+    intent_canonical = canonicalize_intent(intent, question)
     internal_explicit = any(tok in q for tok in ("splunk internal", "_internal", "_audit", "splunk auth", "splunk platform"))
+    semantics = profile.get("sourcetype_semantics", {}) if isinstance(profile.get("sourcetype_semantics"), dict) else {}
+    field_inventory = profile.get("sourcetype_field_inventory", {}) if isinstance(profile.get("sourcetype_field_inventory"), dict) else {}
+    index_sourcetype_inventory = (
+        profile.get("index_sourcetype_field_inventory", {})
+        if isinstance(profile.get("index_sourcetype_field_inventory"), dict)
+        else {}
+    )
+    authoritative = (
+        resolve_authoritative_domains_for_question(question, intent_canonical, profile_path=profile_path, max_domains=max_indexes)
+        if intent_canonical
+        else []
+    )
+    authoritative_by_index = {str(item.get("index", "")).strip(): item for item in authoritative if isinstance(item, dict)}
 
     hints_by_topic: list[tuple[str, tuple[str, ...]]] = [
         ("failed_login", ("failed", "login", "auth", "authentication")),
@@ -1195,12 +1425,16 @@ def suggest_domains_for_question(
             continue
         score = 0
         reasons: list[str] = []
+        ranked_sourcetypes = [str(x).strip() for x in sts if str(x).strip()]
 
         q_tokens = set(re.findall(r"[a-z0-9_:.+-]+", q))
 
         if idx.lower() in q_tokens:
             score += 6
             reasons.append(f"question contains index '{idx}'")
+        if idx in authoritative_by_index:
+            score += 20
+            reasons.append("authoritative-domain match")
 
         for st in sts:
             st_l = str(st).lower()
@@ -1238,11 +1472,51 @@ def suggest_domains_for_question(
                     reasons.append("splunk-internal topic weighting")
 
         if score > 0:
-            scored.append((score, row, reasons))
+            styles = _domain_styles(idx, ranked_sourcetypes, semantics)
+            ranked_sourcetypes = _rank_domain_sourcetypes(
+                index_name=idx,
+                sourcetypes=ranked_sourcetypes,
+                intent=intent_canonical,
+                question=question,
+                semantics=semantics,
+                field_inventory=field_inventory,
+                index_sourcetype_inventory=index_sourcetype_inventory,
+            )
+            ranked_row = dict(row)
+            ranked_row["sourcetypes"] = ranked_sourcetypes
+            ranked_row["styles"] = sorted(styles)
+            scored.append((score, ranked_row, reasons))
 
-    scored.sort(key=lambda x: x[0], reverse=True)
+    preferred_order = _preferred_index_order(intent_canonical, question)
+    scored.sort(
+        key=lambda x: (
+            _index_priority_bucket(str(x[1].get("index", "")).strip(), x[1], preferred_order),
+            -x[0],
+            str(x[1].get("index", "")).strip(),
+        )
+    )
+    chosen_scored: list[tuple[int, dict[str, Any], list[str]]] = []
+    if preferred_order:
+        used_indexes: set[str] = set()
+        for bucket in range(len(preferred_order)):
+            for item in scored:
+                idx = str(item[1].get("index", "")).strip()
+                if idx in used_indexes:
+                    continue
+                if _index_priority_bucket(idx, item[1], preferred_order) == bucket:
+                    chosen_scored.append(item)
+                    used_indexes.add(idx)
+                    break
+        for item in scored:
+            idx = str(item[1].get("index", "")).strip()
+            if idx in used_indexes:
+                continue
+            chosen_scored.append(item)
+            used_indexes.add(idx)
+    else:
+        chosen_scored = scored
     out: list[dict[str, Any]] = []
-    for score, row, reasons in scored[:max(1, max_indexes)]:
+    for score, row, reasons in chosen_scored[:max(1, max_indexes)]:
         idx = str(row.get("index", "")).strip()
         sts = [str(x).strip() for x in row.get("sourcetypes", []) if str(x).strip()]
         out.append(
@@ -1289,6 +1563,26 @@ def extract_sourcetypes_from_query(query: str) -> list[str]:
     return out
 
 
+def _known_index_sourcetypes(
+    index_name: str,
+    *,
+    row_sourcetypes: set[str],
+    sourcetype_to_indexes: dict[str, Any],
+) -> set[str]:
+    idx = str(index_name or "").strip().lower()
+    out = {str(item).strip() for item in row_sourcetypes if str(item).strip()}
+    for sourcetype, indexes in sourcetype_to_indexes.items():
+        if not isinstance(indexes, list):
+            continue
+        if idx in {str(item).strip().lower() for item in indexes if str(item).strip()}:
+            st_name = str(sourcetype).strip()
+            if st_name:
+                out.add(st_name)
+    if idx == "botsv3":
+        out.update(BOTSV3_SOURCETYPES)
+    return out
+
+
 def validate_query_against_environment(query_args: dict[str, Any], *, profile_path: str | Path = PROFILE_PATH_DEFAULT) -> tuple[bool, str]:
     if not isinstance(query_args, dict):
         return False, "environment_query_args_not_dict"
@@ -1300,16 +1594,23 @@ def validate_query_against_environment(query_args: dict[str, Any], *, profile_pa
     if not profile:
         return True, "environment_profile_missing_skip"
 
+    st_to_idx = profile.get("sourcetype_to_indexes", {})
+    if not isinstance(st_to_idx, dict):
+        st_to_idx = {}
     indexes_by_name: dict[str, set[str]] = {}
     known_indexes: set[str] = set()
     for row in profile.get("indexes", []):
         if not isinstance(row, dict):
             continue
         idx = str(row.get("index", "")).strip()
-        sts = {str(x).strip() for x in row.get("sourcetypes", []) if str(x).strip()}
         if idx:
             known_indexes.add(idx)
-            indexes_by_name[idx] = sts
+            row_sourcetypes = {str(x).strip() for x in row.get("sourcetypes", []) if str(x).strip()}
+            indexes_by_name[idx] = _known_index_sourcetypes(
+                idx,
+                row_sourcetypes=row_sourcetypes,
+                sourcetype_to_indexes=st_to_idx,
+            )
 
     q_indexes = extract_indexes_from_query(query)
     q_sourcetypes = extract_sourcetypes_from_query(query)
@@ -1324,11 +1625,11 @@ def validate_query_against_environment(query_args: dict[str, Any], *, profile_pa
     # sourcetype and index pairing check
     if q_sourcetypes:
         if not q_indexes:
-            st_to_idx = profile.get("sourcetype_to_indexes", {})
-            if isinstance(st_to_idx, dict):
-                for st in q_sourcetypes:
-                    if st not in st_to_idx:
-                        return False, f"environment_unknown_sourcetype:{st}"
+            for st in q_sourcetypes:
+                if st in BOTSV3_SOURCETYPES:
+                    continue
+                if st not in st_to_idx:
+                    return False, f"environment_unknown_sourcetype:{st}"
             return True, "environment_sourcetype_known_no_index_constraint"
 
         concrete_indexes = [i for i in q_indexes if i not in {"*", "_*"}]

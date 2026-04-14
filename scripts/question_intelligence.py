@@ -144,6 +144,7 @@ def infer_question_dimensions(question: str) -> dict[str, Any]:
 def score_template_for_question(template: Any, question: str) -> tuple[int, list[str]]:
     dims = infer_question_dimensions(question)
     q = (question or "").lower()
+    tokens = {t for t in re.findall(r"[a-z0-9_]+", q)}
     score = 0
     reasons: list[str] = []
 
@@ -233,10 +234,10 @@ def score_template_for_question(template: Any, question: str) -> tuple[int, list
         if "first_seen" in shapes and intent == "linux_privilege_escalation_activity":
             score -= 14
             reasons.append("priv_esc_activity_penalty:prefer_first_seen_when_requested")
-    if "bot" in q and intent == "apache_suspicious_user_agents":
+    if {"bot", "bots"} & tokens and intent == "apache_suspicious_user_agents":
         score += 12
         reasons.append("bot_bonus")
-    if "bot" in q and intent == "apache_access_top_ips":
+    if {"bot", "bots"} & tokens and intent == "apache_access_top_ips":
         score -= 8
         reasons.append("bot_penalty:prefer_user_agent_intent")
     if any(tok in q for tok in ("stream:http", "stream http", "http methods", "destination sites")):
