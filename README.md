@@ -52,32 +52,32 @@ Then:
 - run the first investigation
 
 ## Screenshots
-The screenshot set below still reflects the earlier `v1.3.5` interface. `v1.4.0` adds a rebuilt investigation decision flow, LLM-assisted MCP defaults, stronger pivot staging, clearer Learning workflow guidance, and updated docs; see [v1.4.0 Release Highlights](docs/project/v1_4_0_delta.md).
+These screenshots reflect the current `v1.4.0` interface.
 
 ### Login
-`v1.3.5` login flow for the analyst console.
+`v1.4.0` login flow for the analyst console.
 
-![A.G.E.N.T. Smith v1.3.5 login](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-login.png)
+![A.G.E.N.T. Smith v1.4.0 login](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-login.png)
 
 ### Investigation Workspace
-`v1.3.5` Splunk-first investigation workflow with durable case memory, Investigation Timeline reasoning cards, current assessment, recommended next steps, and ATT&CK context.
+`v1.4.0` Splunk-first investigation workflow with a decision-first answer card, confidence-backed recommendation, one primary next action, and inline trust validation.
 
-![A.G.E.N.T. Smith v1.3.5 investigation workspace](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-investigation.png)
+![A.G.E.N.T. Smith v1.4.0 investigation workspace](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-investigation.png)
 
 ### Architecture View
-`v1.3.5` system architecture and role separation view for the bounded Splunk investigation pipeline.
+`v1.4.0` system architecture and role separation view for the bounded Splunk investigation pipeline.
 
-![A.G.E.N.T. Smith v1.3.5 architecture view](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-architecture.png)
+![A.G.E.N.T. Smith v1.4.0 architecture view](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-architecture.png)
 
 ### Data Domains And Personalization
-`v1.3.5` environment-aware Data Domains view showing local index and sourcetype discovery, per-domain field inventory, and portable query grounding built from the live Splunk environment.
+`v1.4.0` environment-aware Data Domains view showing local index and sourcetype discovery, current coverage, and grounded planning support built from the live Splunk environment.
 
-![A.G.E.N.T. Smith v1.3.5 Data Domains personalization view](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-data-domains.png)
+![A.G.E.N.T. Smith v1.4.0 Data Domains personalization view](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-data-domains.png)
 
 ### SPL Optimization AI Engine
-`v1.3.5` SPL Optimization AI Engine showing the simplified operator view, reusable SPL asset workflow, and repository-backed optimization state.
+`v1.4.0` SPL Optimization AI Engine showing run controls, what changed this run, repository state, and reusable SPL asset workflow.
 
-![A.G.E.N.T. Smith v1.3.5 SPL Optimization AI Engine](docs/images/screenshots/v1.3.1/agtsmith-v1.3.1-learning.png)
+![A.G.E.N.T. Smith v1.4.0 SPL Optimization AI Engine](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-learning.png)
 
 ## How It Works
 The default SPL path is a split-role pipeline:
