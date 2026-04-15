@@ -12,8 +12,24 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+_DEMO_RUN_MULTI_MODEL_SOC = None
+_DEMO_MAP_QUESTION_TO_TEMPLATE = None
+_DEMO_RUN_SPLUNK_GET_INDEXES = None
+_DEMO_RUN_SPLUNK_GET_INFO = None
+_DEMO_RUN_SPLUNK_GET_METADATA = None
+_DEMO_RUN_SPLUNK_QUERY_ARGS = None
+_DEMO_TEMPLATE_TO_QUERY_ARGS = None
+
 
 def _install_stub_modules() -> None:
+    global _DEMO_RUN_MULTI_MODEL_SOC
+    global _DEMO_MAP_QUESTION_TO_TEMPLATE
+    global _DEMO_RUN_SPLUNK_GET_INDEXES
+    global _DEMO_RUN_SPLUNK_GET_INFO
+    global _DEMO_RUN_SPLUNK_GET_METADATA
+    global _DEMO_RUN_SPLUNK_QUERY_ARGS
+    global _DEMO_TEMPLATE_TO_QUERY_ARGS
+
     def _parse_env_file(path: Path) -> tuple[list[str], dict[str, str]]:
         target = Path(path)
         if not target.exists():
@@ -87,6 +103,7 @@ def _install_stub_modules() -> None:
         },
         "meta": {"pipeline": "agentic_loop"},
     }
+    _DEMO_RUN_MULTI_MODEL_SOC = mod.run_multi_model_soc
     stubs["langgraph_multi_model_soc"] = mod
 
     mod = types.ModuleType("local_learning")
@@ -119,6 +136,12 @@ def _install_stub_modules() -> None:
         "latest_time": "now",
         "row_limit": 20,
     }
+    _DEMO_MAP_QUESTION_TO_TEMPLATE = mod.map_question_to_template
+    _DEMO_RUN_SPLUNK_GET_INDEXES = mod.run_splunk_get_indexes
+    _DEMO_RUN_SPLUNK_GET_INFO = mod.run_splunk_get_info
+    _DEMO_RUN_SPLUNK_GET_METADATA = mod.run_splunk_get_metadata
+    _DEMO_RUN_SPLUNK_QUERY_ARGS = mod.run_splunk_query_args
+    _DEMO_TEMPLATE_TO_QUERY_ARGS = mod.template_to_query_args
     stubs["minimal_question_to_answer"] = mod
 
     mod = types.ModuleType("ollama_log_stream")
@@ -189,6 +212,31 @@ import web_ui_server as wus
 
 
 class WebUiDemoModeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._old_run_multi_model_soc = wus.run_multi_model_soc
+        self._old_map_question_to_template = wus.map_question_to_template
+        self._old_run_splunk_get_indexes = wus.run_splunk_get_indexes
+        self._old_run_splunk_get_info = wus.run_splunk_get_info
+        self._old_run_splunk_get_metadata = wus.run_splunk_get_metadata
+        self._old_run_splunk_query_args = wus.run_splunk_query_args
+        self._old_template_to_query_args = wus.template_to_query_args
+        wus.run_multi_model_soc = _DEMO_RUN_MULTI_MODEL_SOC
+        wus.map_question_to_template = _DEMO_MAP_QUESTION_TO_TEMPLATE
+        wus.run_splunk_get_indexes = _DEMO_RUN_SPLUNK_GET_INDEXES
+        wus.run_splunk_get_info = _DEMO_RUN_SPLUNK_GET_INFO
+        wus.run_splunk_get_metadata = _DEMO_RUN_SPLUNK_GET_METADATA
+        wus.run_splunk_query_args = _DEMO_RUN_SPLUNK_QUERY_ARGS
+        wus.template_to_query_args = _DEMO_TEMPLATE_TO_QUERY_ARGS
+
+    def tearDown(self) -> None:
+        wus.run_multi_model_soc = self._old_run_multi_model_soc
+        wus.map_question_to_template = self._old_map_question_to_template
+        wus.run_splunk_get_indexes = self._old_run_splunk_get_indexes
+        wus.run_splunk_get_info = self._old_run_splunk_get_info
+        wus.run_splunk_get_metadata = self._old_run_splunk_get_metadata
+        wus.run_splunk_query_args = self._old_run_splunk_query_args
+        wus.template_to_query_args = self._old_template_to_query_args
+
     def test_clean_analyst_summary_text_strips_reasoning_trace(self) -> None:
         raw = (
             "The task is to summarize the provided query results in plain English.\n"

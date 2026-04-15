@@ -4,8 +4,8 @@
 This page is the reader's starting point. It does not try to explain the whole platform again. It tells you which document to read next based on what you need.
 
 ## Start Here
-If you want the short explanation of what changed in `v1.4.0`, read:
-- [`docs/project/v1_4_0_delta.md`](/docs/view?path=project/v1_4_0_delta.md)
+If you want the short explanation of what changed in `v1.4.1`, read:
+- [`docs/project/v1_4_1_delta.md`](/docs/view?path=project/v1_4_1_delta.md)
 
 If you want the shortest explanation of what A.G.E.N.T. Smith is, read:
 - [`docs/whitepapers/project_one_page_white_paper.md`](/docs/view?path=whitepapers/project_one_page_white_paper.md)

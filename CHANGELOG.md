@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.4.1
+
+- refined the SPL Asset Repository into a cleaner scan-first analyst workspace with a stable two-column layout, stronger visual hierarchy, and better lower-page composition
+- replaced always-open SPL code boxes in `/spl-assets` with preview-first disclosure so full SPL, rationale, fit, and review controls are revealed intentionally instead of cluttering the table
+- modernized the row-level `View full SPL` control so it matches the command-surface treatment used elsewhere in the `v1.4.x` UI
+- tightened release readiness by isolating MCP demo-mode and Splunk Web handoff regression tests so the full UI bundle remains green when the suite is run together
+- updated release metadata and operator-facing documentation for the `v1.4.1` patch line
+
 ## v1.4.0
 
 - changed MCP chat so the primary path is now LLM-assisted instead of deterministic-template-only, while still preserving deterministic MCP as an explicit fallback mode

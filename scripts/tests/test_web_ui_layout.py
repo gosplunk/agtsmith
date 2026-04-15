@@ -170,6 +170,46 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertIn('Result Rows', html)
         self.assertIn('Executed SPL', html)
 
+    def test_spl_asset_repository_uses_contained_two_column_layout(self) -> None:
+        wus.learning_registry_summary = lambda *args, **kwargs: {
+            "repository": {
+                "records": [
+                    {
+                        "id": "asset-1",
+                        "intent": "linux_auth_failures",
+                        "use_when": "Use for Linux failed login questions.",
+                        "why": "Grounded in local auth sources.",
+                        "query_template": "search index=linux source=/var/log/auth.log | stats count by host user_name src_ip",
+                        "required_fields": ["host", "user_name", "src_ip"],
+                        "required_sources": ["/var/log/auth.log"],
+                        "required_sourcetypes": ["auth.log"],
+                        "updated_at": "2026-04-14T20:38:54.466869+00:00",
+                        "match_tokens": ["failed", "login", "linux"],
+                    }
+                ]
+            },
+            "repository_path": "/tmp/spl_optimization_repository.json",
+        }
+        wus._load_json_if_exists = lambda *args, **kwargs: {"history_assets": []}
+        html = wus._spl_asset_repository_page_body()
+        self.assertIn('grid-template-columns:minmax(320px,420px) minmax(0,1fr)', html)
+        self.assertIn('class="splrepo-side-rail"', html)
+        self.assertIn('class="splrepo-spotlight-title-block"', html)
+        self.assertIn('class="splrepo-metric splrepo-metric-active splrepo-spotlight-pill"', html)
+        self.assertIn('class="splrepo-review-surface"', html)
+        self.assertIn('class="splrepo-pattern-preview"', html)
+        self.assertIn('class="btn-secondary splrepo-row-toggle"', html)
+        self.assertIn('class="splrepo-detail-row"', html)
+        self.assertIn('class="splrepo-code-block"', html)
+        self.assertIn('.splrepo-row-toggle::before', html)
+        self.assertIn('.splrepo-row-toggle[aria-expanded="true"]', html)
+        self.assertIn('<colgroup>', html)
+        self.assertNotIn('class="splrepo-table-scroll"', html)
+        self.assertNotIn('scrollbar-gutter:stable both-edges', html)
+        self.assertNotIn('overscroll-behavior:contain', html)
+        self.assertNotIn('.splrepo-main{display:grid;gap:16px;order:2;min-width:0;}', html)
+        self.assertNotIn('.splrepo-side{display:grid;gap:16px;order:1;position:sticky;top:88px;align-self:start;min-width:0;}', html)
+
 
 if __name__ == "__main__":
     unittest.main()

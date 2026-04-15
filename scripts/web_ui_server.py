@@ -12962,7 +12962,7 @@ def _docs_index_body() -> str:
         <h2>Start Here</h2>
         <p>If you are new to A.G.E.N.T. Smith, begin with the business overview and then move into the technical architecture only if you need deeper detail.</p>
         <p><a href=\"/docs\">Open the business overview</a></p>
-        <p><a href=\"/docs/view?path=project/v1_4_0_delta.md\">Open the v1.4.0 release highlights</a></p>
+        <p><a href=\"/docs/view?path=project/v1_4_1_delta.md\">Open the v1.4.1 release highlights</a></p>
       </div>
       <div class=\"card\">
         <h2>How To Use This Section</h2>
@@ -12975,7 +12975,7 @@ def _docs_index_body() -> str:
         <h2>What Is This?</h2>
         <p>Use these if you want the business story, problem statement, current value, and roadmap direction.</p>
         <div class=\"guide-links\">
-          <a class=\"guide-link\" href=\"/docs/view?path=project/v1_4_0_delta.md\"><strong>v1.4.0 Release Highlights</strong><span>Short operator-facing summary of what changed in the v1.4.0 release.</span></a>
+          <a class=\"guide-link\" href=\"/docs/view?path=project/v1_4_1_delta.md\"><strong>v1.4.1 Release Highlights</strong><span>Short operator-facing summary of what changed in the v1.4.1 release.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=whitepapers/project_one_page_white_paper.md\"><strong>What A.G.E.N.T. Smith Is</strong><span>Fastest explanation for non-technical readers.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=runbooks/initial_setup.md\"><strong>Initial Setup Guide</strong><span>Step-by-step install and configuration for a new machine.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=whitepapers/executive_white_paper.md\"><strong>Executive Summary</strong><span>Value, controls, and readiness framing for leadership.</span></a>
@@ -16412,15 +16412,35 @@ def _spl_asset_repository_page_body() -> str:
             parts.append(f"pass rate {pass_delta:+.2f}%")
         return html.escape(" | ".join(parts) if parts else "No benchmark lift recorded yet; kept for local review and provenance")
 
-    def _asset_row(row: dict[str, Any], state_label: str, actions: bool = False) -> str:
+    def _plain_pattern(row: dict[str, Any]) -> str:
+        return str(row.get("query_template", "")).strip() or "No SPL pattern recorded"
+
+    def _pattern_preview(pattern: str) -> str:
+        collapsed = " ".join(pattern.split())
+        if len(collapsed) > 168:
+            collapsed = collapsed[:165].rstrip() + "..."
+        return html.escape(collapsed)
+
+    def _state_tone(state_label: str) -> str:
+        label = state_label.strip().lower()
+        if "active" in label or "approved" in label:
+            return "active"
+        if "reject" in label:
+            return "rejected"
+        if "pending" in label:
+            return "pending"
+        return "recorded"
+
+    def _asset_row(row: dict[str, Any], state_label: str, row_key: str, actions: bool = False) -> str:
         intent = html.escape(str(row.get("intent", "")).strip() or "unknown_intent")
         use_when = html.escape(str(row.get("use_when", "")).strip() or "No use case recorded")
         why = html.escape(str(row.get("why", "")).strip() or str(row.get("reason", "")).strip() or "No rationale recorded")
-        query_template = html.escape(str(row.get("query_template", "")).strip() or "No SPL pattern recorded")
+        query_raw = _plain_pattern(row)
+        query_template = html.escape(query_raw)
         row_id = html.escape(str(row.get("id", "")).strip())
         updated_at = html.escape(str(row.get("updated_at", "")).strip() or str(row.get("created_at", "")).strip() or "Unknown")
         selection_reason = html.escape(str(row.get("selection_reason", "")).strip().replace("_", " ") or "Awaiting review")
-        action_html = '<span class="splrepo-row-actions-empty">Active</span>'
+        action_html = '<span class="splrepo-row-actions-empty">This asset is already active in runtime.</span>'
         if actions and row_id:
             action_html = (
                 f'<div class="splrepo-row-actions">'
@@ -16428,38 +16448,114 @@ def _spl_asset_repository_page_body() -> str:
                 f'<button class="learning-item-btn splrepo-action-reject" data-repo-action="reject" data-id="{row_id}">Reject</button>'
                 f'</div>'
             )
+        tone = _state_tone(state_label)
+        preview_label = "Review draft" if actions else "View full SPL"
+        detail_extra = (
+            f"""
+            <section class="splrepo-detail-block splrepo-detail-block-review">
+              <div class="splrepo-guide-title">Review decision</div>
+              <div class="splrepo-detail-copy">Why it is waiting: {selection_reason}</div>
+              <div class="splrepo-detail-copy" style="margin-top:8px;">Approve only if this draft is reusable, grounded, and worth influencing future SPL writing.</div>
+              <div style="margin-top:12px;">{action_html}</div>
+            </section>
+            """
+            if actions
+            else ""
+        )
         return f"""
-        <tr>
+        <tr class="splrepo-summary-row" data-asset-summary="{row_key}">
           <td>
-            <div class="splrepo-cell-title">{intent}</div>
+            <div class="splrepo-row-head">
+              <div class="splrepo-cell-title">{intent}</div>
+              <span class="splrepo-state-badge {tone}">{html.escape(state_label)}</span>
+            </div>
             <div class="splrepo-cell-sub">{use_when}</div>
           </td>
-          <td><span class="learning-badge">{html.escape(state_label)}</span></td>
-          <td>{_question_family(row)}</td>
-          <td>{why}</td>
           <td>{_fit_summary(row)}</td>
           <td>
-            <div class="splrepo-pattern">{query_template}</div>
-            {'<div class="splrepo-cell-sub">Why not active yet: ' + selection_reason + '</div>' if actions else ''}
+            <div class="splrepo-detail-copy">{why}</div>
+            <div class="splrepo-cell-sub">Question family: {_question_family(row)}</div>
+          </td>
+          <td>
+            <div class="splrepo-pattern-preview">{_pattern_preview(query_raw)}</div>
+            <div class="splrepo-cell-sub">Open one row at a time to inspect the full reusable SPL.</div>
           </td>
           <td>
             <div class="splrepo-cell-sub">{_benchmark_summary(row)}</div>
-            <div class="splrepo-cell-sub" style="margin-top:6px;">{updated_at}</div>
+            <div class="splrepo-cell-sub" style="margin-top:6px;">Updated: {updated_at}</div>
+            {f'<div class="splrepo-cell-sub" style="margin-top:6px;">Review note: {selection_reason}</div>' if actions else '<div class="splrepo-cell-sub" style="margin-top:6px;">Active assets already influence future SPL writing.</div>'}
+            <button
+              type="button"
+              class="btn-secondary splrepo-row-toggle"
+              data-asset-toggle="{row_key}"
+              data-closed-label="{preview_label}"
+              data-open-label="Hide details"
+              aria-expanded="false"
+              aria-controls="splrepo-detail-{row_key}"
+            >{preview_label}</button>
           </td>
-          <td>{action_html}</td>
+        </tr>
+        <tr class="splrepo-detail-row" id="splrepo-detail-{row_key}" data-asset-detail="{row_key}" hidden>
+          <td colspan="5">
+            <div class="splrepo-detail-card">
+              <div class="splrepo-detail-head">
+                <div class="splrepo-row-head">
+                  <div class="splrepo-cell-title">{intent}</div>
+                  <span class="splrepo-detail-pill">{'Draft awaiting review' if actions else 'Approved runtime asset'}</span>
+                </div>
+                <div class="splrepo-cell-sub">Full SPL, rationale, environment fit, and review controls stay here so the summary row remains scan-first.</div>
+              </div>
+              <div class="splrepo-detail-pattern">
+                <div class="splrepo-guide-title">Full SPL</div>
+                <pre class="splrepo-code-block">{query_template}</pre>
+              </div>
+              <div class="splrepo-detail-meta">
+                <section class="splrepo-detail-block">
+                  <div class="splrepo-guide-title">Why this exists</div>
+                  <div class="splrepo-detail-copy">{why}</div>
+                </section>
+                <section class="splrepo-detail-block">
+                  <div class="splrepo-guide-title">Environment fit</div>
+                  <div class="splrepo-detail-copy">{_fit_summary(row)}</div>
+                  <div class="splrepo-detail-copy" style="margin-top:8px;"><strong>Question family:</strong> {_question_family(row)}</div>
+                </section>
+                <section class="splrepo-detail-block">
+                  <div class="splrepo-guide-title">Proof and timing</div>
+                  <div class="splrepo-detail-copy">{_benchmark_summary(row)}</div>
+                  <div class="splrepo-detail-copy" style="margin-top:8px;"><strong>Updated:</strong> {updated_at}</div>
+                </section>
+                {detail_extra}
+              </div>
+            </div>
+          </td>
         </tr>
         """
 
     recent_history = sorted(draft_rows, key=lambda row: str(row.get("updated_at", "") or row.get("created_at", "")), reverse=True)[:8]
-    active_table_rows = "".join(_asset_row(row, "ACTIVE") for row in active_rows)
-    draft_table_rows = "".join(_asset_row(row, str(row.get("status", "")).strip().upper() or "RECORDED", actions=True) for row in recent_history)
+    active_table_rows = "".join(_asset_row(row, "ACTIVE", f"active-{idx}") for idx, row in enumerate(active_rows))
+    draft_table_rows = "".join(
+        _asset_row(row, str(row.get("status", "")).strip().upper() or "RECORDED", f"draft-{idx}", actions=True)
+        for idx, row in enumerate(recent_history)
+    )
     repo_path = html.escape(str(summary.get("repository_path", "")).strip() or "Not created yet")
     active_count = len(active_rows)
     history_count = len(draft_rows)
+    queue_state = "Open" if history_count > 0 else "Clear"
+    table_colgroup = """
+      <colgroup>
+        <col style="width:22%;" />
+        <col style="width:20%;" />
+        <col style="width:22%;" />
+        <col style="width:20%;" />
+        <col style="width:16%;" />
+      </colgroup>
+    """
     spotlight = active_rows[0] if active_rows else None
     spotlight_intent = html.escape(str((spotlight or {}).get("intent", "")).strip() or "No active asset yet")
     spotlight_when = html.escape(str((spotlight or {}).get("use_when", "")).strip())
-    spotlight_pattern = html.escape(str((spotlight or {}).get("query_template", "")).strip())
+    spotlight_pattern_raw = _plain_pattern(spotlight or {}) if spotlight else ""
+    spotlight_pattern_preview = _pattern_preview(spotlight_pattern_raw) if spotlight_pattern_raw else ""
+    spotlight_pattern = html.escape(spotlight_pattern_raw)
     spotlight_why = html.escape(str((spotlight or {}).get("why", "")).strip() or str((spotlight or {}).get("reason", "")).strip())
     review_message = (
         "Nothing is waiting for approval right now."
@@ -16469,189 +16565,342 @@ def _spl_asset_repository_page_body() -> str:
     return f"""
 <div class="card">
   <style>
-    .splrepo-shell{{display:grid;gap:16px;}}
-    .splrepo-hero{{border:1px solid #27415a;border-radius:18px;background:linear-gradient(165deg,#0a1729,#07131f 56%,#0a1a17);padding:18px;}}
+    .splrepo-shell{{display:grid;gap:18px;min-width:0;}}
+    .splrepo-hero{{border:1px solid #31516b;border-radius:20px;background:linear-gradient(165deg,#0b1a2d,#07131f 54%,#0a1b18);padding:20px;box-shadow:0 18px 34px rgba(2,8,23,.24);}}
     .splrepo-hero h1{{margin:0 0 8px;font-size:32px;line-height:1.05;}}
-    .splrepo-copy{{color:#9fb4cc;font-size:13px;line-height:1.6;}}
+    .splrepo-copy{{color:#a8bfd6;font-size:13px;line-height:1.6;overflow-wrap:anywhere;}}
     .splrepo-metrics{{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;}}
-    .splrepo-metric{{border:1px solid #315a79;border-radius:999px;padding:6px 10px;background:#0b2030;color:#d6e5f3;font-size:12px;font-weight:800;}}
-    .splrepo-guide-title{{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px;}}
+    .splrepo-metric{{display:inline-flex;align-items:center;max-width:100%;border:1px solid #315a79;border-radius:999px;padding:6px 10px;background:#0b2030;color:#d6e5f3;font-size:12px;font-weight:800;white-space:normal;overflow-wrap:anywhere;box-sizing:border-box;transition:background .18s ease,border-color .18s ease,color .18s ease;}}
+    .splrepo-metric-active{{border-color:#1f7a5a;background:#0b261d;color:#d1fae5;}}
+    .splrepo-metric-drafts{{border-color:#315a79;background:#0b2030;color:#dbeafe;}}
+    .splrepo-metric-queue-open{{border-color:#9a670d;background:#2a1905;color:#fde68a;}}
+    .splrepo-metric-queue-clear{{border-color:#315a79;background:#0a1f30;color:#cfe4f6;}}
+    .splrepo-kicker{{font-size:11px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;color:#8fd0ff;margin-bottom:6px;}}
+    .splrepo-guide-title{{font-size:11px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;color:#8fd0ff;margin-bottom:6px;}}
     .splrepo-guide-copy{{color:#dbeafe;font-size:13px;line-height:1.55;}}
-    .splrepo-grid{{display:grid;grid-template-columns:minmax(360px,408px) minmax(0,1fr);gap:24px;align-items:start;}}
-    .splrepo-main{{display:grid;gap:16px;order:2;min-width:0;}}
+    .splrepo-grid{{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);gap:20px;align-items:start;min-width:0;}}
+    .splrepo-grid > *{{min-width:0;}}
+    .splrepo-side{{min-width:0;overflow:hidden;}}
+    .splrepo-side-rail{{display:grid;gap:16px;position:sticky;top:88px;align-self:start;min-width:0;max-width:100%;z-index:0;}}
+    .splrepo-side-rail > *{{min-width:0;max-width:100%;}}
+    .splrepo-main{{display:grid;gap:18px;min-width:0;position:relative;z-index:1;}}
     .splrepo-main > *{{min-width:0;}}
-    .splrepo-side{{display:grid;gap:16px;order:1;position:sticky;top:88px;align-self:start;min-width:0;}}
-    .splrepo-panel{{border:1px solid #27415a;border-radius:16px;background:#081729;padding:14px;box-sizing:border-box;min-width:0;width:100%;}}
-    .splrepo-panel h2{{margin:0 0 8px;font-size:20px;}}
-    .splrepo-list{{display:grid;gap:10px;}}
-    .splrepo-spotlight{{border:1px solid #26614d;border-radius:16px;background:linear-gradient(160deg,#08182a,#09211c);padding:14px;}}
-    .splrepo-spotlight-head{{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;}}
+    .splrepo-panel{{border:1px solid #27415a;border-radius:18px;background:#081729;padding:16px;box-sizing:border-box;min-width:0;width:100%;overflow:hidden;}}
+    .splrepo-panel h2{{margin:0 0 8px;font-size:21px;line-height:1.15;color:#f8fafc;}}
+    .splrepo-panel-main{{border-color:#31516b;background:linear-gradient(180deg,#0a1a2d,#081727);box-shadow:0 18px 32px rgba(2,8,23,.2);}}
+    .splrepo-side .splrepo-panel{{background:linear-gradient(180deg,#081522,#07111a);border-color:#243a4e;box-shadow:inset 0 1px 0 rgba(255,255,255,.02);}}
+    .splrepo-spotlight{{display:grid;gap:12px;border:1px solid #26614d;border-radius:18px;background:linear-gradient(160deg,#08182a,#0a231d);padding:16px;box-sizing:border-box;overflow:hidden;box-shadow:0 16px 28px rgba(3,12,9,.2);}}
+    .splrepo-spotlight-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:0;min-width:0;}}
+    .splrepo-spotlight-head > *{{min-width:0;}}
+    .splrepo-spotlight-title-block{{display:grid;gap:4px;flex:1 1 180px;min-width:0;}}
     .splrepo-spotlight-title{{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#86efac;}}
-    .splrepo-spotlight-name{{font-size:20px;font-weight:900;color:#f8fafc;}}
-    .splrepo-spotlight-copy{{color:#cfe4da;font-size:13px;line-height:1.55;}}
-    .splrepo-queue-stat{{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border:1px solid #315a79;border-radius:14px;background:#071523;}}
+    .splrepo-spotlight-name{{font-size:20px;font-weight:900;color:#f8fafc;overflow-wrap:anywhere;}}
+    .splrepo-spotlight-copy{{color:#cfe4da;font-size:13px;line-height:1.55;overflow-wrap:anywhere;}}
+    .splrepo-spotlight-pill{{flex:0 1 100%;justify-self:start;align-self:flex-start;}}
+    .splrepo-spotlight-meta{{color:#9fb4cc;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;}}
+    .splrepo-code-block{{margin:0;padding:14px;border:1px solid #244258;border-radius:14px;background:#071523;color:#d9e7f5;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;box-sizing:border-box;}}
+    .splrepo-inline-detail{{display:grid;gap:10px;margin-top:10px;}}
+    .splrepo-inline-detail summary{{cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:8px;width:max-content;max-width:100%;padding:7px 12px;border:1px solid #315a79;border-radius:999px;background:#0b2030;color:#dbeafe;font-size:12px;font-weight:800;}}
+    .splrepo-inline-detail summary::-webkit-details-marker{{display:none;}}
+    .splrepo-inline-detail[open] summary{{border-color:#3b82f6;background:#0b2740;color:#e0f2fe;}}
+    .splrepo-pattern-preview{{padding:12px 14px;border:1px solid #244258;border-radius:14px;background:linear-gradient(180deg,#091724,#07121d);font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;line-height:1.45;color:#d9e7f5;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word;overflow-wrap:anywhere;min-height:74px;}}
+    .splrepo-pattern-preview.spotlight{{-webkit-line-clamp:4;min-height:0;}}
+    .splrepo-queue-stat{{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px 14px;border:1px solid #315a79;border-radius:14px;background:#071523;min-width:0;}}
+    .splrepo-queue-stat > *{{min-width:0;}}
     .splrepo-queue-count{{font-size:24px;font-weight:900;color:#f8fafc;}}
     .splrepo-status-list{{display:grid;gap:8px;margin-top:10px;}}
-    .splrepo-status-item{{border:1px solid #27415a;border-radius:12px;background:#071523;padding:10px 12px;color:#dbeafe;font-size:13px;line-height:1.5;}}
-    .splrepo-section-head{{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:10px;flex-wrap:wrap;}}
-    .splrepo-section-note{{color:#9fb4cc;font-size:12px;line-height:1.45;}}
-    .splrepo-compare{{border:1px solid #27415a;border-radius:16px;background:#081729;padding:14px;}}
-    .splrepo-compare-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:10px;}}
+    .splrepo-status-item{{border:1px solid #27415a;border-radius:12px;background:#071523;padding:10px 12px;color:#dbeafe;font-size:13px;line-height:1.5;overflow-wrap:anywhere;}}
+    .splrepo-status-item code{{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;}}
+    .splrepo-guide-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px;}}
+    .splrepo-guide-stat{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:10px 12px;display:grid;gap:4px;}}
+    .splrepo-guide-stat-label{{color:#8fb4cf;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;}}
+    .splrepo-guide-stat strong{{font-size:18px;color:#f8fafc;}}
+    .splrepo-section-head{{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:14px;flex-wrap:wrap;}}
+    .splrepo-section-head > *{{min-width:0;}}
+    .splrepo-section-note{{color:#a8bfd6;font-size:12px;line-height:1.5;max-width:78ch;}}
+    .splrepo-top-link{{text-decoration:none;white-space:nowrap;}}
+    .splrepo-review-surface{{border:1px solid #31516b;border-radius:20px;background:linear-gradient(180deg,#091a2d,#081522);padding:16px;box-shadow:0 18px 32px rgba(2,8,23,.18);display:grid;gap:16px;}}
+    .splrepo-review-grid{{display:grid;grid-template-columns:minmax(280px,360px) minmax(0,1fr);gap:16px;align-items:start;min-width:0;}}
+    .splrepo-review-grid > *{{min-width:0;}}
+    .splrepo-compare{{border:1px solid #27415a;border-radius:16px;background:linear-gradient(180deg,#081729,#07131f);padding:14px;}}
+    .splrepo-compare-grid{{display:grid;grid-template-columns:1fr;gap:12px;margin-top:10px;}}
     .splrepo-compare-col{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:12px;}}
     .splrepo-compare-col h3{{margin:0 0 6px;font-size:15px;}}
     .splrepo-compare-col p{{margin:0;color:#c9d9ea;font-size:13px;line-height:1.55;}}
-    .splrepo-footer-note{{color:#8fb4cf;font-size:12px;line-height:1.5;}}
-    .splrepo-table-wrap{{border:1px solid #27415a;border-radius:16px;background:#081729;overflow:hidden;}}
-    .splrepo-table-scroll{{overflow:auto;}}
-    .splrepo-table{{width:100%;border-collapse:collapse;min-width:980px;table-layout:fixed;}}
-    .splrepo-table thead th{{position:sticky;top:0;background:#0b2030;color:#8fd0ff;font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;text-align:left;padding:12px;border-bottom:1px solid #27415a;z-index:1;}}
-    .splrepo-table tbody tr{{border-top:1px solid #1f3549;}}
-    .splrepo-table tbody tr:hover{{background:rgba(11,32,48,.45);}}
-    .splrepo-table td{{vertical-align:top;padding:12px;color:#dbeafe;font-size:13px;line-height:1.5;}}
-    .splrepo-cell-title{{font-weight:900;color:#f8fafc;}}
-    .splrepo-cell-sub{{margin-top:4px;color:#8fb4cf;font-size:12px;line-height:1.45;}}
-    .splrepo-pattern{{max-width:100%;font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-size:12px;line-height:1.45;color:#d9e7f5;white-space:normal;word-break:break-word;}}
+    .splrepo-footer-note{{color:#8fb4cf;font-size:12px;line-height:1.5;overflow-wrap:anywhere;}}
+    .splrepo-table-wrap{{display:grid;border:1px solid #2d465c;border-radius:18px;background:linear-gradient(180deg,#081729,#071321);overflow:hidden;min-width:0;box-shadow:inset 0 1px 0 rgba(255,255,255,.02);}}
+    .splrepo-table{{width:100%;border-collapse:collapse;table-layout:fixed;}}
+    .splrepo-table thead th{{background:#0d2436;color:#8fd0ff;font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;text-align:left;padding:12px;border-bottom:1px solid #27415a;}}
+    .splrepo-table tbody tr{{border-top:1px solid #20384a;}}
+    .splrepo-summary-row td{{vertical-align:top;padding:14px 12px;color:#dbeafe;font-size:13px;line-height:1.55;transition:background .18s ease,border-color .18s ease;}}
+    .splrepo-summary-row:hover td{{background:rgba(13,36,54,.46);}}
+    .splrepo-summary-row.is-open td{{background:rgba(13,36,54,.74);}}
+    .splrepo-detail-row td{{padding:0 12px 14px;background:#081729;color:#dbeafe;}}
+    .splrepo-table th,.splrepo-table td{{min-width:0;box-sizing:border-box;}}
+    .splrepo-row-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;min-width:0;}}
+    .splrepo-row-head > *{{min-width:0;}}
+    .splrepo-cell-title{{font-weight:900;color:#f8fafc;font-size:15px;overflow-wrap:anywhere;}}
+    .splrepo-cell-sub{{margin-top:4px;color:#8fb4cf;font-size:12px;line-height:1.45;overflow-wrap:anywhere;}}
+    .splrepo-detail-copy{{color:#d8e6f3;font-size:13px;line-height:1.55;overflow-wrap:anywhere;}}
+    .splrepo-state-badge{{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;border:1px solid #315a79;background:#0b2030;color:#dbeafe;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;}}
+    .splrepo-state-badge.active{{border-color:#1f7a5a;background:#0b261d;color:#d1fae5;}}
+    .splrepo-state-badge.recorded{{border-color:#315a79;background:#0b2030;color:#dbeafe;}}
+    .splrepo-state-badge.pending{{border-color:#9a670d;background:#2a1905;color:#fde68a;}}
+    .splrepo-state-badge.rejected{{border-color:#7f1d1d;background:#220c14;color:#fecaca;}}
+    .splrepo-detail-pill{{display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid #315a79;background:#0b2030;color:#dbeafe;font-size:12px;font-weight:800;}}
+    .splrepo-row-toggle{{
+      margin-top:10px;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      max-width:100%;
+      min-height:34px;
+      padding:7px 12px 7px 10px;
+      border-radius:999px;
+      border:1px solid #355773;
+      background:linear-gradient(180deg,#12283b,#0c1d2d);
+      color:#e3effa;
+      font-size:12px;
+      font-weight:850;
+      letter-spacing:.02em;
+      white-space:nowrap;
+      box-shadow:0 8px 18px rgba(4,15,24,.22), inset 0 1px 0 rgba(255,255,255,.06), inset 0 -1px 0 rgba(3,10,17,.26);
+      transition:background .18s ease,border-color .18s ease,box-shadow .18s ease,color .18s ease,transform .12s ease;
+    }}
+    .splrepo-row-toggle::before{{
+      content:"";
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      flex:0 0 auto;
+      background:radial-gradient(circle at 30% 30%,#c9e7ff,#60a5fa 58%,#1d4ed8 100%);
+      box-shadow:0 0 0 1px rgba(147,197,253,.18), 0 0 12px rgba(59,130,246,.18);
+    }}
+    .splrepo-row-toggle:hover{{
+      background:linear-gradient(180deg,#16324a,#102435);
+      border-color:#4f78a0;
+      color:#f8fbff;
+      box-shadow:0 12px 24px rgba(4,15,24,.28), inset 0 1px 0 rgba(255,255,255,.08), 0 0 0 1px rgba(79,120,160,.14);
+    }}
+    .splrepo-row-toggle:focus-visible{{
+      outline:none;
+      border-color:#67a8df;
+      color:#f8fbff;
+      box-shadow:0 0 0 3px rgba(59,130,246,.18), 0 12px 24px rgba(4,15,24,.3), inset 0 1px 0 rgba(255,255,255,.08);
+    }}
+    .splrepo-row-toggle:active{{
+      transform:translateY(1px);
+      box-shadow:0 5px 12px rgba(4,15,24,.24), inset 0 1px 0 rgba(255,255,255,.05);
+    }}
+    .splrepo-row-toggle[aria-expanded="true"]{{
+      background:linear-gradient(180deg,#173850,#11283b);
+      border-color:#5a88b2;
+      color:#f8fbff;
+      box-shadow:0 10px 22px rgba(6,20,31,.28), inset 0 1px 0 rgba(255,255,255,.08), 0 0 0 1px rgba(103,168,223,.12);
+    }}
+    .splrepo-row-toggle[aria-expanded="true"]::before{{
+      background:radial-gradient(circle at 30% 30%,#d1fae5,#34d399 58%,#047857 100%);
+      box-shadow:0 0 0 1px rgba(52,211,153,.18), 0 0 12px rgba(16,185,129,.18);
+    }}
     .splrepo-row-actions{{display:flex;gap:8px;flex-wrap:wrap;}}
-    .splrepo-row-actions-empty{{color:#86efac;font-size:12px;font-weight:800;}}
+    .splrepo-row-actions-empty{{color:#86efac;font-size:12px;font-weight:800;line-height:1.5;}}
+    .splrepo-detail-card{{display:grid;gap:14px;padding:14px;border:1px solid #31516b;border-radius:16px;background:linear-gradient(180deg,#0a1a2c,#081522);box-shadow:inset 0 1px 0 rgba(255,255,255,.02);}}
+    .splrepo-detail-head{{display:grid;gap:4px;}}
+    .splrepo-detail-pattern{{display:grid;gap:8px;}}
+    .splrepo-detail-meta{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0;}}
+    .splrepo-detail-block{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:12px;min-width:0;}}
+    .splrepo-detail-block-review{{background:linear-gradient(180deg,#0b1727,#08131c);}}
     .splrepo-empty{{padding:16px;color:#9fb4cc;font-size:13px;line-height:1.6;}}
     .splrepo-action-approve{{background:linear-gradient(135deg,#34d399,#10b981);border-color:#34d399;color:#04230f;box-shadow:0 6px 18px rgba(16,185,129,.18);}}
     .splrepo-action-reject{{background:linear-gradient(180deg,#2a1620,#170b12);border-color:#7f1d1d;color:#fecaca;box-shadow:0 6px 18px rgba(127,29,29,.18);}}
-    .splrepo-side .splrepo-panel{{padding:16px;}}
-    @media (max-width: 1080px){{.splrepo-grid,.splrepo-compare-grid{{grid-template-columns:1fr;}}.splrepo-side{{position:static;top:auto;}}}}
+    .splrepo-panel-drafts{{padding:0;background:transparent;border:0;box-shadow:none;}}
+    @media (max-width: 1180px){{
+      .splrepo-review-grid,.splrepo-detail-meta{{grid-template-columns:1fr;}}
+    }}
+    @media (max-width: 1080px){{
+      .splrepo-grid,.splrepo-compare-grid{{grid-template-columns:1fr;}}
+      .splrepo-side-rail{{position:static;top:auto;}}
+    }}
   </style>
   <div class="splrepo-shell">
     <div class="splrepo-hero">
+      <div class="splrepo-kicker">Control Surface</div>
       <h1>SPL Asset Repository</h1>
       <div class="splrepo-copy">This is where the SPL Optimization AI Engine stores reusable SPL patterns for this environment. <strong>Approved active assets</strong> already influence future SPL writing. <strong>Recorded drafts</strong> are candidate patterns waiting for review.</div>
       <div class="splrepo-metrics">
-        <span class="splrepo-metric">Approved Active {active_count}</span>
-        <span class="splrepo-metric">Recorded Drafts {history_count}</span>
-        <span class="splrepo-metric">Review Queue {"Open" if history_count > 0 else "Clear"}</span>
+        <span class="splrepo-metric splrepo-metric-active">Approved Active {active_count}</span>
+        <span class="splrepo-metric splrepo-metric-drafts">Recorded Drafts {history_count}</span>
+        <span class="splrepo-metric {'splrepo-metric-queue-open' if history_count > 0 else 'splrepo-metric-queue-clear'}">Review Queue {queue_state}</span>
       </div>
     </div>
     <div class="splrepo-grid">
+      <div class="splrepo-side">
+        <div class="splrepo-side-rail">
+          <section class="splrepo-spotlight">
+            <div class="splrepo-spotlight-head">
+              <div class="splrepo-spotlight-title-block">
+                <div class="splrepo-spotlight-title">Active Asset Spotlight</div>
+                <div class="splrepo-spotlight-name">{spotlight_intent}</div>
+              </div>
+              <span class="splrepo-metric splrepo-metric-active splrepo-spotlight-pill">{'Active and influencing future SPL' if spotlight else 'No active asset yet'}</span>
+            </div>
+            <div class="splrepo-spotlight-copy">{spotlight_when if spotlight_when else 'Approve a recorded draft from the table to create the first active reusable SPL asset for this environment.'}</div>
+            {f'<div class="splrepo-spotlight-meta"><strong>Why it matters:</strong> {spotlight_why}</div>' if spotlight_why else ''}
+            {f'<div class="splrepo-guide-title">Current reusable pattern</div><div class="splrepo-pattern-preview spotlight">{spotlight_pattern_preview}</div><details class="splrepo-inline-detail"><summary>View full reusable SPL</summary><pre class="splrepo-code-block">{spotlight_pattern}</pre></details>' if spotlight_pattern else ''}
+          </section>
+          <section class="splrepo-panel">
+            <div class="splrepo-kicker">Support Context</div>
+            <h2>How To Work This Page</h2>
+            <div class="splrepo-status-list">
+              <div class="splrepo-status-item"><strong>Scan</strong> the tables by row to compare reusable SPL assets quickly.</div>
+              <div class="splrepo-status-item"><strong>Review</strong> recorded drafts in the queue before they influence runtime.</div>
+              <div class="splrepo-status-item"><strong>Approve</strong> only assets that are accurate, reusable, and grounded in this environment.</div>
+            </div>
+            <div class="splrepo-guide-grid">
+              <div class="splrepo-guide-stat">
+                <span class="splrepo-guide-stat-label">Approved active</span>
+                <strong>{active_count}</strong>
+              </div>
+              <div class="splrepo-guide-stat">
+                <span class="splrepo-guide-stat-label">Recorded drafts</span>
+                <strong>{history_count}</strong>
+              </div>
+            </div>
+            <details class="splrepo-inline-detail">
+              <summary>Repository status and path</summary>
+              <div class="splrepo-status-list" style="margin-top:0;">
+                <div class="splrepo-status-item"><strong>Repository path:</strong> <code>{repo_path}</code></div>
+                <div class="splrepo-status-item"><strong>Runtime role:</strong> active assets influence future SPL writing, recorded drafts do not.</div>
+              </div>
+            </details>
+          </section>
+          <section class="splrepo-panel">
+            <div class="splrepo-kicker">Review Queue</div>
+            <h2>Review Queue</h2>
+            <div class="splrepo-queue-stat">
+              <div>
+                <div class="splrepo-guide-title" style="margin:0 0 4px;">Recorded drafts ready</div>
+                <div class="splrepo-copy">{review_message}</div>
+              </div>
+              <div class="splrepo-queue-count">{history_count}</div>
+            </div>
+            <div class="splrepo-status-list">
+              <div class="splrepo-status-item"><strong>Approve</strong> when a draft is accurate, reusable, and grounded in this environment.</div>
+              <div class="splrepo-status-item"><strong>Reject</strong> when a draft is too generic, too weak, or not worth influencing future SPL writing.</div>
+              <div class="splrepo-status-item"><strong>Remember:</strong> recorded drafts are visible history only. They do not become active until approved.</div>
+            </div>
+            <div class="splrepo-footer-note" style="margin-top:10px;">This page is for review and activation. The SPL Optimization AI Engine creates the drafts; this repository decides what becomes active.</div>
+          </section>
+        </div>
+      </div>
       <div class="splrepo-main">
-        <section class="splrepo-panel splrepo-panel-active">
+        <section class="splrepo-panel splrepo-panel-main splrepo-panel-active">
           <div class="splrepo-section-head">
             <div>
+              <div class="splrepo-kicker">Primary Work Surface</div>
               <h2>Active Reusable SPL Assets</h2>
-              <div class="splrepo-section-note">These are already approved and can influence future SPL writing. Scan by row, then open the optimization page if you want to generate more drafts.</div>
+              <div class="splrepo-section-note">These assets already influence future SPL writing. Scan the summary rows first, then open exactly one row when you need the full SPL, fit, and proof.</div>
             </div>
-            <a class="btn-secondary" href="/learning" style="text-decoration:none;">Back to SPL Optimization</a>
+            <a class="btn-secondary splrepo-top-link" href="/learning">Back to SPL Optimization</a>
           </div>
           <div class="splrepo-table-wrap">
-            <div class="splrepo-table-scroll">
+            <table class="splrepo-table">
+              {table_colgroup}
+              <thead>
+                <tr>
+                  <th>Asset</th>
+                  <th>Coverage and fit</th>
+                  <th>Why it exists</th>
+                  <th>SPL preview</th>
+                  <th>Review</th>
+                </tr>
+              </thead>
+              <tbody>
+                {active_table_rows if active_table_rows else '<tr><td colspan="5" class="splrepo-empty">No approved SPL assets yet. Approve a recorded draft when you want it to influence future SPL writing.</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="splrepo-review-surface">
+          <div class="splrepo-section-head">
+            <div>
+              <div class="splrepo-kicker">Review Workspace</div>
+              <h2>Recorded SPL Asset Drafts</h2>
+              <div class="splrepo-section-note">Use the comparison card to keep the review standard visible, then inspect a single draft row when you want the full SPL and approval decision controls.</div>
+            </div>
+          </div>
+          <div class="splrepo-review-grid">
+            <section class="splrepo-compare">
+              <h2 style="margin:0 0 4px;font-size:18px;">Why An Approved Asset Is Better For This Environment</h2>
+              <div class="splrepo-copy">Use this as a quick mental model when reviewing drafts.</div>
+              <div class="splrepo-compare-grid">
+                <div class="splrepo-compare-col">
+                  <h3>Generic baseline pattern</h3>
+                  <p>Broader SPL often assumes generic fields, wider search scopes, and weaker environment grounding. It is easier to write once, but it is less reliable for this deployment.</p>
+                </div>
+                <div class="splrepo-compare-col">
+                  <h3>Approved environment-specific asset</h3>
+                  <p>An approved asset names the real indexes, sources, sourcetypes, and fields this environment actually exposes. That makes future SPL writing more reusable, more constrained, and more trustworthy.</p>
+                </div>
+              </div>
+            </section>
+            <section class="splrepo-panel splrepo-panel-drafts">
+              <h2>Recorded SPL Asset Drafts</h2>
+              <div class="splrepo-section-note">These drafts were generated by the engine. They do not affect runtime until approved. Review them row by row and act from the last column.</div>
+              <div class="splrepo-table-wrap" style="margin-top:14px;">
               <table class="splrepo-table">
+                {table_colgroup}
                 <thead>
                   <tr>
-                    <th>Intent</th>
-                    <th>State</th>
-                    <th>Question Family</th>
-                    <th>Why This Exists</th>
-                    <th>Environment Fit</th>
-                    <th>Pattern</th>
-                    <th>Proof / Updated</th>
-                    <th>Actions</th>
+                    <th>Asset</th>
+                    <th>Coverage and fit</th>
+                    <th>Why it exists</th>
+                    <th>SPL preview</th>
+                    <th>Review</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {active_table_rows if active_table_rows else '<tr><td colspan="8" class="splrepo-empty">No approved SPL assets yet. Approve a recorded draft when you want it to influence future SPL writing.</td></tr>'}
+                  {draft_table_rows if draft_table_rows else '<tr><td colspan="5" class="splrepo-empty">No recorded SPL drafts yet. Run the SPL Optimization AI Engine to generate reusable drafts for review.</td></tr>'}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </section>
           </div>
-        </section>
-        <section class="splrepo-compare">
-          <h2 style="margin:0 0 4px;font-size:18px;">Why An Approved Asset Is Better For This Environment</h2>
-          <div class="splrepo-copy">Use this as a quick mental model when reviewing drafts.</div>
-          <div class="splrepo-compare-grid">
-            <div class="splrepo-compare-col">
-              <h3>Generic baseline pattern</h3>
-              <p>Broader SPL often assumes generic fields, wider search scopes, and weaker environment grounding. It is easier to write once, but it is less reliable for this deployment.</p>
-            </div>
-            <div class="splrepo-compare-col">
-              <h3>Approved environment-specific asset</h3>
-              <p>An approved asset names the real indexes, sources, sourcetypes, and fields this environment actually exposes. That makes future SPL writing more reusable, more constrained, and more trustworthy.</p>
-            </div>
-          </div>
-        </section>
-        <section class="splrepo-panel splrepo-panel-drafts">
-          <div class="splrepo-section-head">
-            <div>
-              <h2>Recorded SPL Asset Drafts</h2>
-              <div class="splrepo-section-note">These drafts were generated by the engine. They do not affect runtime until approved. Review them row by row and act from the last column.</div>
-            </div>
-          </div>
-          <div class="splrepo-table-wrap">
-            <div class="splrepo-table-scroll">
-              <table class="splrepo-table">
-                <thead>
-                      <tr>
-                        <th>Intent</th>
-                        <th>State</th>
-                        <th>Question Family</th>
-                        <th>Why This Exists</th>
-                        <th>Environment Fit</th>
-                        <th>Pattern</th>
-                        <th>Proof / Updated</th>
-                        <th>Actions</th>
-                      </tr>
-                </thead>
-                <tbody>
-                  {draft_table_rows if draft_table_rows else '<tr><td colspan="8" class="splrepo-empty">No recorded SPL drafts yet. Run the SPL Optimization AI Engine to generate reusable drafts for review.</td></tr>'}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-      </div>
-      <div class="splrepo-side">
-        <section class="splrepo-spotlight">
-          <div class="splrepo-spotlight-head">
-            <div class="splrepo-spotlight-title">Active Asset Spotlight</div>
-            <span class="splrepo-metric">{'Active and influencing future SPL' if spotlight else 'No active asset yet'}</span>
-          </div>
-          <div class="splrepo-spotlight-name">{spotlight_intent}</div>
-          <div class="splrepo-spotlight-copy">{spotlight_when if spotlight_when else 'Approve a recorded draft from the table to create the first active reusable SPL asset for this environment.'}</div>
-          {f'<div class="learning-item-meta" style="margin-top:10px;"><strong>Why it matters:</strong> {spotlight_why}</div>' if spotlight_why else ''}
-          {f'<div class="learning-item-meta"><strong>Current reusable pattern:</strong> {spotlight_pattern}</div>' if spotlight_pattern else ''}
-        </section>
-        <section class="splrepo-panel">
-          <h2>What This Page Is For</h2>
-          <div class="splrepo-status-list">
-            <div class="splrepo-status-item"><strong>Scan</strong> the tables by row to compare reusable SPL assets quickly.</div>
-            <div class="splrepo-status-item"><strong>Review</strong> recorded drafts in the queue before they influence runtime.</div>
-            <div class="splrepo-status-item"><strong>Approve</strong> only assets that are accurate, reusable, and grounded in this environment.</div>
-          </div>
-        </section>
-        <section class="splrepo-panel">
-          <h2>Review Queue</h2>
-          <div class="splrepo-queue-stat">
-            <div>
-              <div class="splrepo-guide-title" style="margin:0 0 4px;">Recorded drafts ready</div>
-              <div class="splrepo-copy">{review_message}</div>
-            </div>
-            <div class="splrepo-queue-count">{history_count}</div>
-          </div>
-          <div class="splrepo-status-list">
-            <div class="splrepo-status-item"><strong>Approve</strong> when a draft is accurate, reusable, and grounded in this environment.</div>
-            <div class="splrepo-status-item"><strong>Reject</strong> when a draft is too generic, too weak, or not worth influencing future SPL writing.</div>
-            <div class="splrepo-status-item"><strong>Remember:</strong> recorded drafts are visible history only. They do not become active until approved.</div>
-          </div>
-        </section>
-        <section class="splrepo-panel">
-          <h2>Repository Status</h2>
-          <div class="splrepo-status-list">
-            <div class="splrepo-status-item"><strong>Repository path:</strong> <code>{repo_path}</code></div>
-            <div class="splrepo-status-item"><strong>Approved active:</strong> {active_count}</div>
-            <div class="splrepo-status-item"><strong>Recorded drafts:</strong> {history_count}</div>
-          </div>
-          <div class="splrepo-footer-note" style="margin-top:10px;">This page is for review and activation. The SPL Optimization AI Engine creates the drafts; this repository decides what becomes active.</div>
         </section>
       </div>
     </div>
   </div>
   <script>
+    document.querySelectorAll('[data-asset-toggle]').forEach((btn) => {{
+      btn.onclick = () => {{
+        const key = String(btn.getAttribute('data-asset-toggle') || '').trim();
+        const table = btn.closest('table');
+        if(!key || !table) return;
+        const detail = table.querySelector(`[data-asset-detail="${{key}}"]`);
+        const summary = table.querySelector(`[data-asset-summary="${{key}}"]`);
+        const isOpen = btn.getAttribute('aria-expanded') === 'true';
+        table.querySelectorAll('[data-asset-detail]').forEach((row) => {{
+          row.hidden = true;
+          const rowKey = String(row.getAttribute('data-asset-detail') || '').trim();
+          const rowBtn = table.querySelector(`[data-asset-toggle="${{rowKey}}"]`);
+          const rowSummary = table.querySelector(`[data-asset-summary="${{rowKey}}"]`);
+          if(rowBtn){{
+            rowBtn.setAttribute('aria-expanded', 'false');
+            rowBtn.textContent = rowBtn.getAttribute('data-closed-label') || 'View details';
+          }}
+          if(rowSummary){{
+            rowSummary.classList.remove('is-open');
+          }}
+        }});
+        if(!detail || isOpen) return;
+        detail.hidden = false;
+        btn.setAttribute('aria-expanded', 'true');
+        btn.textContent = btn.getAttribute('data-open-label') || 'Hide details';
+        if(summary){{
+          summary.classList.add('is-open');
+        }}
+      }};
+    }});
     document.querySelectorAll('[data-repo-action][data-id]').forEach((btn) => {{
       btn.onclick = async () => {{
         const action = String(btn.getAttribute('data-repo-action') || '').trim();

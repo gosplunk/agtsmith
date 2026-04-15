@@ -1,12 +1,12 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.4.0`
+Current release: `v1.4.1`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
 This repository is published as a clean starting point. It ships with example configuration, not live environment secrets or local runtime state.
 
-For a short operator-facing summary of what changed in `v1.4.0`, read [v1.4.0 Release Highlights](docs/project/v1_4_0_delta.md).
+For a short operator-facing summary of what changed in `v1.4.1`, read [v1.4.1 Release Highlights](docs/project/v1_4_1_delta.md).
 
 ## Start Here
 If you are trying to get the platform running for the first time, read the [Initial Setup Guide](docs/runbooks/initial_setup.md) alongside the quick start below.
@@ -52,7 +52,7 @@ Then:
 - run the first investigation
 
 ## Screenshots
-These screenshots reflect the current `v1.4.0` interface.
+These screenshots reflect the current `v1.4.x` interface. The images below were captured from the `v1.4.0` build and remain representative of `v1.4.1`.
 
 ### Login
 `v1.4.0` login flow for the analyst console.
@@ -161,6 +161,13 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - added deterministic Splunk Web auto-detection that derives the host from Splunk MCP/base settings and probes `https://HOST:8000` first, then `http://HOST:8000`
 - persisted auto-detected `SPLUNK_WEB_URL` during Configuration saves so working handoff targets remain stable across restarts
 - surfaced Splunk Web handoff validation explicitly in Configuration so operators can see whether `Open In Splunk` will render before they leave the page
+
+## What's New In v1.4.1
+- refined `/spl-assets` into a cleaner analyst review workspace with a stable two-column layout, stronger section hierarchy, and better lower-page composition
+- replaced table-embedded SPL scroll boxes with preview-first disclosure so full SPL opens intentionally instead of turning the asset tables into cramped code grids
+- modernized the row-level `View full SPL` control so it reads like a premium inspection chip instead of a generic secondary form button
+- kept the existing dark Splunk-adjacent aesthetic while making the top control layer, left support rail, and main work surface easier to distinguish at a glance
+- hardened the UI regression suite so MCP demo mode and Splunk Web handoff coverage remain reliable when the full test bundle is run together
 
 ## What's New In v1.4.0
 - made `LLM-Assisted MCP` the default MCP experience while retaining deterministic MCP as an explicit fallback mode

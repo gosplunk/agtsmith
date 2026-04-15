@@ -12,8 +12,18 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+_LINKS_PARSE_ENV_FILE = None
+_LINKS_WRITE_ENV_FILE = None
+_LINKS_GET_SPLUNK_BASE_URL = None
+_LINKS_GET_SPLUNK_MCP_URL = None
+
 
 def _install_stub_modules() -> None:
+    global _LINKS_PARSE_ENV_FILE
+    global _LINKS_WRITE_ENV_FILE
+    global _LINKS_GET_SPLUNK_BASE_URL
+    global _LINKS_GET_SPLUNK_MCP_URL
+
     def _parse_env_file(path: Path) -> tuple[list[str], dict[str, str]]:
         target = Path(path)
         if not target.exists():
@@ -113,6 +123,10 @@ def _install_stub_modules() -> None:
     mod.get_runtime_secret = lambda name, default="": default
     mod.parse_env_file = _parse_env_file
     mod.write_env_file = _write_env_file
+    _LINKS_PARSE_ENV_FILE = mod.parse_env_file
+    _LINKS_WRITE_ENV_FILE = mod.write_env_file
+    _LINKS_GET_SPLUNK_BASE_URL = mod.get_splunk_base_url
+    _LINKS_GET_SPLUNK_MCP_URL = mod.get_splunk_mcp_url
     stubs["runtime_config"] = mod
 
     mod = types.ModuleType("case_store")
@@ -137,12 +151,24 @@ class SplunkLinkResolutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self._old_ui_env_path = wus.UI_ENV_PATH
         self._old_cache = dict(wus._SPLUNK_WEB_BASE_CACHE)
+        self._old_parse_env_file = wus.parse_env_file
+        self._old_write_env_file = wus.write_env_file
+        self._old_get_splunk_base_url = wus.get_splunk_base_url
+        self._old_get_splunk_mcp_url = wus.get_splunk_mcp_url
+        wus.parse_env_file = _LINKS_PARSE_ENV_FILE
+        wus.write_env_file = _LINKS_WRITE_ENV_FILE
+        wus.get_splunk_base_url = _LINKS_GET_SPLUNK_BASE_URL
+        wus.get_splunk_mcp_url = _LINKS_GET_SPLUNK_MCP_URL
         self._tmpdir = tempfile.TemporaryDirectory()
         wus.UI_ENV_PATH = Path(self._tmpdir.name) / "ui.env"
         wus._SPLUNK_WEB_BASE_CACHE.clear()
 
     def tearDown(self) -> None:
         wus.UI_ENV_PATH = self._old_ui_env_path
+        wus.parse_env_file = self._old_parse_env_file
+        wus.write_env_file = self._old_write_env_file
+        wus.get_splunk_base_url = self._old_get_splunk_base_url
+        wus.get_splunk_mcp_url = self._old_get_splunk_mcp_url
         wus._SPLUNK_WEB_BASE_CACHE.clear()
         wus._SPLUNK_WEB_BASE_CACHE.update(self._old_cache)
         self._tmpdir.cleanup()
