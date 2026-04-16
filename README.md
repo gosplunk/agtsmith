@@ -106,49 +106,32 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - Grounded in local environment metadata, Data Domains, and curated SPL references
 - Built to be tuned empirically with benchmarks and evals
 
-## What's New In v1.1.0
-- SPL Optimization AI Engine with reviewable, airgapped environment-specific memory
-- Stronger Linux auth, Windows auth, Apache, and mixed-platform investigation handling
-- Improved Investigation UI result rendering, progress visibility, and operator feedback
-- Pilot benchmark pack and full-pipeline hardening harness for BOTSv3 and live-environment testing
+## What's New In v1.4.1
+- refined `/spl-assets` into a cleaner analyst review workspace with a stable two-column layout, stronger section hierarchy, and better lower-page composition
+- replaced table-embedded SPL scroll boxes with preview-first disclosure so full SPL opens intentionally instead of turning the asset tables into cramped code grids
+- modernized the row-level `View full SPL` control so it reads like a premium inspection chip instead of a generic secondary form button
+- kept the existing dark Splunk-adjacent aesthetic while making the top control layer, left support rail, and main work surface easier to distinguish at a glance
+- hardened the UI regression suite so MCP demo mode and Splunk Web handoff coverage remain reliable when the full test bundle is run together
 
-## What's New In v1.2.0
-- redesigned the Investigation workspace into a desktop-first two-column layout with a sticky control rail and dominant results column
-- added richer ATT&CK investigation support: hover definitions, ATT&CK pivots, follow-on technique context, persisted ATT&CK bundles, and model-backed ATT&CK validation
-- improved investigation state handling so in-progress runs show pending state and zero-row completions produce a bounded no-evidence outcome
-- improved follow-up usability with a Pivot Drawer, visually distinct follow-up execution, hidden-by-default advanced controls, and collapsed SPL sample results
-- added ATT&CK logic benchmarks for BOTSv3-oriented investigation logic validation
-- added built-in HTTPS support and masked Splunk token handling in Configuration
-- sanitized shipped defaults so environment-specific URLs and local learned assumptions are not baked into the public repo
+<details>
+<summary>What's New In v1.4.0</summary>
 
-## What's New In v1.2.1
-- aligned the live investigation runtime to the saved Configuration role assignments instead of falling back to process defaults
-- moved security review, evidence review, continuation review, and final summary to `Foundation-Sec-8B-Reasoning` while keeping `Qwen` for planning and `deepseek-coder-v2:lite` for SPL generation and repair
-- updated the docs, architecture graphs, and model strategy guidance to reflect the split-role investigation pipeline
-- added a canonical next-release planning document for `v1.3.0`, including persistent follow-up context as a planned standard-pivot enhancement
-- fixed the runtime configuration save flow so changing Ollama/Splunk hosts does not leave the UI stuck on `Saving...`
+- made `LLM-Assisted MCP` the default MCP experience while retaining deterministic MCP as an explicit fallback mode
+- added clear `LLM-Assisted` vs `Deterministic` and `Live Mode` vs `Demo Mode` controls in MCP instead of a low-signal checkbox-style demo toggle
+- rebuilt Investigation UI around one decision-first center flow: `Answer Card`, `Confidence + Why`, one dominant `Primary Next Action`, key evidence, and inline SPL trust validation
+- demoted the left rail into a mirror/workspace surface so it no longer competes with the center continue action once a result is loaded
+- turned evidence values and saved timeline entities into clickable pivot staging controls that preserve structured follow-up context instead of forcing manual copy/paste
+- improved structured pivot continuity, saved-case reopening, and next-action copy so the analyst can see what changed from the prior step and when not to continue
+- tightened environment-aware query grounding to avoid leaking web-style sourcetypes into failed-login auth searches and to rank authoritative local indexes and sourcetypes more intelligently
+- added portable intent playbooks for deeper pivot recommendations across credential abuse, web hunting, endpoint network or DNS, privilege escalation, and cloud API identity investigations
+- improved the `/learning` workflow so SPL Optimization shows clearer run status, what changed this run, pending review, approved assets, and stronger operator guidance before optimization starts
+- updated the docs set with stable `v1.4.0` release notes and operator-facing highlights
 
-## What's New In v1.2.3
-- clarified SPL Optimization AI Engine so the operator can see which learning mode ran and why a no-gain run finished without keeping new hints
-- added explicit learned-state, benchmark cache, candidate filtering, and run-duration feedback to the Learning page
-- fixed the Learning page so `Run Optimization Cycle` is no longer blocked by the admin onboarding modal or by a client-side JavaScript parse error
+</details>
 
-## What's New In v1.2.4
-- redesigned the Investigation Drawer into a sticky Splunk-first analyst workbench with action-first tabs for pivots, evidence, SPL, ATT&CK context, and decision tracing
-- added stronger investigation trust cues including left-rail phase status, improved long-running guidance, richer Splunk handoff, and row-level drill-down from evidence back into Splunk
-- turned SPL Optimization into a repository-backed workflow with reusable SPL assets, explicit approval flow, and a dedicated SPL Asset Repository review surface
-- reorganized Control Center pages around current state, next action, and working context so configuration, audit, environment coverage, and artifacts are easier to scan
-- refreshed the public screenshots so GitHub matches the current product surface
-- added persistent case timelines with saved investigation and pivot nodes, a dedicated Case Workspace, and PostgreSQL-backed case memory for reopening prior findings without rerunning Splunk
+<details>
+<summary>What's New In v1.3.5</summary>
 
-## What's New In v1.3.1
-- made query grounding materially more environment-native by learning field inventory per `index + sourcetype`, selecting authoritative local domains from Data Domains, and rewriting generic canonical SPL toward the live environment instead of assuming generic index names
-- fixed several analyst-facing investigation paths so successful login activity, Apache 404s, suspicious user agents, Linux session activity, Office 365 management activity, and CloudTrail activity route through the same environment-aware validation and execution flow used in the running product
-- upgraded investigation continuity into a durable case workflow with PostgreSQL-backed case memory, structured pivot context, persistent case/node ids, and an Investigation Timeline that can reopen original findings and deeper pivots without rerunning Splunk
-- added a stronger analyst reasoning surface in the Investigation Drawer, including narrative continuity, richer timeline cards, clickable step restore behavior, and stateful pivot continuation
-- hardened current assessment output so fallback summaries remain useful and evidence-aware when the final-summary model fails or times out
-
-## What's New In v1.3.5
 - fixed `/api/ask` so optional post-run enrichment and case persistence fail open instead of returning HTTP 500 after a successful investigation result already exists
 - surfaced multi-model summary diagnostics in the runtime result shape, including `summary_fallback_used`, `summary_error`, and `summary_quality_reason`
 - clarified new-box setup guidance in both the public Initial Setup Guide and the live Configuration page so operators refresh Data Domains and run real investigations before starting SPL Optimization
@@ -162,24 +145,73 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - persisted auto-detected `SPLUNK_WEB_URL` during Configuration saves so working handoff targets remain stable across restarts
 - surfaced Splunk Web handoff validation explicitly in Configuration so operators can see whether `Open In Splunk` will render before they leave the page
 
-## What's New In v1.4.1
-- refined `/spl-assets` into a cleaner analyst review workspace with a stable two-column layout, stronger section hierarchy, and better lower-page composition
-- replaced table-embedded SPL scroll boxes with preview-first disclosure so full SPL opens intentionally instead of turning the asset tables into cramped code grids
-- modernized the row-level `View full SPL` control so it reads like a premium inspection chip instead of a generic secondary form button
-- kept the existing dark Splunk-adjacent aesthetic while making the top control layer, left support rail, and main work surface easier to distinguish at a glance
-- hardened the UI regression suite so MCP demo mode and Splunk Web handoff coverage remain reliable when the full test bundle is run together
+</details>
 
-## What's New In v1.4.0
-- made `LLM-Assisted MCP` the default MCP experience while retaining deterministic MCP as an explicit fallback mode
-- added clear `LLM-Assisted` vs `Deterministic` and `Live Mode` vs `Demo Mode` controls in MCP instead of a low-signal checkbox-style demo toggle
-- rebuilt Investigation UI around one decision-first center flow: `Answer Card`, `Confidence + Why`, one dominant `Primary Next Action`, key evidence, and inline SPL trust validation
-- demoted the left rail into a mirror/workspace surface so it no longer competes with the center continue action once a result is loaded
-- turned evidence values and saved timeline entities into clickable pivot staging controls that preserve structured follow-up context instead of forcing manual copy/paste
-- improved structured pivot continuity, saved-case reopening, and next-action copy so the analyst can see what changed from the prior step and when not to continue
-- tightened environment-aware query grounding to avoid leaking web-style sourcetypes into failed-login auth searches and to rank authoritative local indexes and sourcetypes more intelligently
-- added portable intent playbooks for deeper pivot recommendations across credential abuse, web hunting, endpoint network or DNS, privilege escalation, and cloud API identity investigations
-- improved the `/learning` workflow so SPL Optimization shows clearer run status, what changed this run, pending review, approved assets, and stronger operator guidance before optimization starts
-- updated the docs set with stable `v1.4.0` release notes and operator-facing highlights
+<details>
+<summary>What's New In v1.3.1</summary>
+
+- made query grounding materially more environment-native by learning field inventory per `index + sourcetype`, selecting authoritative local domains from Data Domains, and rewriting generic canonical SPL toward the live environment instead of assuming generic index names
+- fixed several analyst-facing investigation paths so successful login activity, Apache 404s, suspicious user agents, Linux session activity, Office 365 management activity, and CloudTrail activity route through the same environment-aware validation and execution flow used in the running product
+- upgraded investigation continuity into a durable case workflow with PostgreSQL-backed case memory, structured pivot context, persistent case/node ids, and an Investigation Timeline that can reopen original findings and deeper pivots without rerunning Splunk
+- added a stronger analyst reasoning surface in the Investigation Drawer, including narrative continuity, richer timeline cards, clickable step restore behavior, and stateful pivot continuation
+- hardened current assessment output so fallback summaries remain useful and evidence-aware when the final-summary model fails or times out
+
+</details>
+
+<details>
+<summary>What's New In v1.2.4</summary>
+
+- redesigned the Investigation Drawer into a sticky Splunk-first analyst workbench with action-first tabs for pivots, evidence, SPL, ATT&CK context, and decision tracing
+- added stronger investigation trust cues including left-rail phase status, improved long-running guidance, richer Splunk handoff, and row-level drill-down from evidence back into Splunk
+- turned SPL Optimization into a repository-backed workflow with reusable SPL assets, explicit approval flow, and a dedicated SPL Asset Repository review surface
+- reorganized Control Center pages around current state, next action, and working context so configuration, audit, environment coverage, and artifacts are easier to scan
+- refreshed the public screenshots so GitHub matches the current product surface
+- added persistent case timelines with saved investigation and pivot nodes, a dedicated Case Workspace, and PostgreSQL-backed case memory for reopening prior findings without rerunning Splunk
+
+</details>
+
+<details>
+<summary>What's New In v1.2.3</summary>
+
+- clarified SPL Optimization AI Engine so the operator can see which learning mode ran and why a no-gain run finished without keeping new hints
+- added explicit learned-state, benchmark cache, candidate filtering, and run-duration feedback to the Learning page
+- fixed the Learning page so `Run Optimization Cycle` is no longer blocked by the admin onboarding modal or by a client-side JavaScript parse error
+
+</details>
+
+<details>
+<summary>What's New In v1.2.1</summary>
+
+- aligned the live investigation runtime to the saved Configuration role assignments instead of falling back to process defaults
+- moved security review, evidence review, continuation review, and final summary to `Foundation-Sec-8B-Reasoning` while keeping `Qwen` for planning and `deepseek-coder-v2:lite` for SPL generation and repair
+- updated the docs, architecture graphs, and model strategy guidance to reflect the split-role investigation pipeline
+- added a canonical next-release planning document for `v1.3.0`, including persistent follow-up context as a planned standard-pivot enhancement
+- fixed the runtime configuration save flow so changing Ollama/Splunk hosts does not leave the UI stuck on `Saving...`
+
+</details>
+
+<details>
+<summary>What's New In v1.2.0</summary>
+
+- redesigned the Investigation workspace into a desktop-first two-column layout with a sticky control rail and dominant results column
+- added richer ATT&CK investigation support: hover definitions, ATT&CK pivots, follow-on technique context, persisted ATT&CK bundles, and model-backed ATT&CK validation
+- improved investigation state handling so in-progress runs show pending state and zero-row completions produce a bounded no-evidence outcome
+- improved follow-up usability with a Pivot Drawer, visually distinct follow-up execution, hidden-by-default advanced controls, and collapsed SPL sample results
+- added ATT&CK logic benchmarks for BOTSv3-oriented investigation logic validation
+- added built-in HTTPS support and masked Splunk token handling in Configuration
+- sanitized shipped defaults so environment-specific URLs and local learned assumptions are not baked into the public repo
+
+</details>
+
+<details>
+<summary>What's New In v1.1.0</summary>
+
+- SPL Optimization AI Engine with reviewable, airgapped environment-specific memory
+- Stronger Linux auth, Windows auth, Apache, and mixed-platform investigation handling
+- Improved Investigation UI result rendering, progress visibility, and operator feedback
+- Pilot benchmark pack and full-pipeline hardening harness for BOTSv3 and live-environment testing
+
+</details>
 
 ## What It Is Not
 - Autonomous response or recovery
