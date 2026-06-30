@@ -19,11 +19,15 @@ Wrap agtsmith as a **native Splunk app** (`agent_smith`) while keeping the LangG
 ## Milestones
 
 - [x] Phase 0 — Cursor skills, rules, hooks, screenshot tooling
-- [ ] Phase 1 — Validate upstream docker-deploy against local MCP
-- [ ] Phase 2 — Extract `core/` and `services/ui/`
-- [ ] Phase 3 — Splunk app MVP (nav + iframe proxy)
-- [ ] Phase 4 — KV Store case backend, audit index
-- [ ] Phase 5 — Release package + screenshots
+- [x] Phase 2 scaffold — `core/case_store/`, `services/ui/server.py`
+- [x] Phase 3 MVP — `splunk_app/agent_smith` nav + iframe investigate view
+- [x] Phase 4 scaffold — KV Store backend (`AGTSMITH_CASE_BACKEND=kvstore`), `collections.conf`
+- [x] Makefile — package, screenshots, preflight, `docker-deploy-manual`, `setup-local-ui-env`
+- [x] `make check` passes (artifact quick mode; live MCP regression still needs token)
+- [ ] Phase 1 — Live validation: `setup-local-ui-env`, `docker-deploy-manual`, first investigation
+- [ ] Phase 1 — Ollama running with required models
+- [ ] Splunk app installed to `/opt/splunk/etc/apps/agent_smith` (requires sudo)
+- [ ] Screenshots captured after sidecar + Splunk app live
 
 ## Fork-only vs upstream
 

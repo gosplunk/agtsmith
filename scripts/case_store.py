@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -216,9 +217,26 @@ def _extract_state_preview(graph_state: dict[str, Any]) -> dict[str, Any]:
 
 
 def case_store_backend() -> str:
+    explicit = str(os.getenv("AGTSMITH_CASE_BACKEND", "")).strip().lower()
+    if explicit == "kvstore":
+        return "kvstore"
     if str(os.getenv("AGTSMITH_CASE_DB_DSN", "")).strip() or str(os.getenv("AGTSMITH_CASE_DB_HOST", "")).strip():
         return "postgres"
     return "sqlite"
+
+
+_KV_BACKEND: Any = None
+
+
+def _kvstore_backend():
+    global _KV_BACKEND
+    if _KV_BACKEND is None:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from core.case_store.kvstore_backend import KvStoreCaseBackend
+
+        _KV_BACKEND = KvStoreCaseBackend()
+    return _KV_BACKEND
 
 
 def _postgres_dsn() -> str:
@@ -398,7 +416,10 @@ def _migrate_sqlite_to_postgres_if_needed(conn) -> None:
 
 
 def _connect():
-    return _postgres_connect() if case_store_backend() == "postgres" else _sqlite_connect()
+    backend = case_store_backend()
+    if backend == "kvstore":
+        raise RuntimeError("kvstore backend does not use SQL connections")
+    return _postgres_connect() if backend == "postgres" else _sqlite_connect()
 
 
 def new_case_id() -> str:
@@ -462,6 +483,28 @@ def _build_case_timeline_from_rows(rows: list[dict[str, Any]]) -> list[dict[str,
 
 
 def build_case_timeline(case_id: str) -> list[dict[str, Any]]:
+    if case_store_backend() == "kvstore":
+        store = _kvstore_backend()
+        rows = []
+        for node in store.nodes_for_case(case_id):
+            rows.append(
+                {
+                    "node_id": node.get("node_id", ""),
+                    "case_id": node.get("case_id", ""),
+                    "parent_node_id": node.get("parent_node_id", "") or "",
+                    "node_type": node.get("node_type", "investigation"),
+                    "question": node.get("question", ""),
+                    "title": node.get("title", ""),
+                    "intent": node.get("intent", ""),
+                    "supported": bool(node.get("supported", False)),
+                    "row_count": int(node.get("row_count") or 0),
+                    "created_at": int(node.get("created_at") or 0),
+                    "summary": node.get("summary", ""),
+                    "result_json": node.get("result_json", "{}"),
+                    "graph_state_json": node.get("graph_state_json", "{}"),
+                }
+            )
+        return _build_case_timeline_from_rows(rows)
     conn = _connect()
     try:
         if case_store_backend() == "postgres":
@@ -509,6 +552,25 @@ def build_case_timeline(case_id: str) -> list[dict[str, Any]]:
 
 
 def load_case_node(case_id: str, node_id: str) -> dict[str, Any] | None:
+    if case_store_backend() == "kvstore":
+        node = _kvstore_backend().get_node(case_id, node_id)
+        if not node:
+            return None
+        raw = node.get("result_json")
+        if isinstance(raw, dict):
+            result = raw
+        else:
+            try:
+                result = json.loads(str(raw or "{}"))
+            except Exception:
+                return None
+        if not isinstance(result, dict):
+            return None
+        case_context = result.get("case_context")
+        if not isinstance(case_context, dict):
+            case_context = {"case_id": case_id, "node_id": node_id}
+            result["case_context"] = case_context
+        return result
     conn = _connect()
     try:
         if case_store_backend() == "postgres":
@@ -561,6 +623,8 @@ def load_case_node(case_id: str, node_id: str) -> dict[str, Any] | None:
 
 
 def list_recent_cases(limit: int = 30) -> list[dict[str, Any]]:
+    if case_store_backend() == "kvstore":
+        return _kvstore_backend().list_cases(limit)
     conn = _connect()
     try:
         if case_store_backend() == "postgres":
@@ -623,6 +687,13 @@ def list_recent_cases(limit: int = 30) -> list[dict[str, Any]]:
 def load_case(case_id: str) -> dict[str, Any] | None:
     if not case_id:
         return None
+    if case_store_backend() == "kvstore":
+        payload = _kvstore_backend().get_case(case_id)
+        if not payload:
+            return None
+        payload = dict(payload)
+        payload["timeline"] = build_case_timeline(case_id)
+        return payload
     conn = _connect()
     try:
         if case_store_backend() == "postgres":
@@ -681,6 +752,90 @@ def persist_case_result(
     summary = str(result_body.get("summary") or "").strip()
     row_count = int(result_body.get("rows_returned") or result_body.get("total_rows") or 0)
     supported = bool(result_body.get("supported", True))
+    if case_store_backend() == "kvstore":
+        store = _kvstore_backend()
+        existing = store.get_case(case_id_final)
+        status = "complete" if supported else "blocked"
+        if existing:
+            store.upsert_case(
+                case_id_final,
+                {
+                    **existing,
+                    "status": status,
+                    "updated_at": now_ts,
+                },
+            )
+        else:
+            store.upsert_case(
+                case_id_final,
+                {
+                    "case_id": case_id_final,
+                    "session_id": session_id,
+                    "root_question": root_question,
+                    "status": status,
+                    "created_at": now_ts,
+                    "updated_at": now_ts,
+                    "node_count": 0,
+                    "latest_rows": row_count,
+                },
+            )
+        store.upsert_node(
+            node_id,
+            {
+                "node_id": node_id,
+                "case_id": case_id_final,
+                "parent_node_id": str(parent_node_id or "").strip() or "",
+                "node_type": node_type,
+                "question": question,
+                "title": title,
+                "intent": str(result_body.get("intent") or "").strip(),
+                "supported": supported,
+                "row_count": row_count,
+                "created_at": now_ts,
+                "summary": summary,
+                "result_json": json.dumps(result_body),
+                "graph_state_json": json.dumps(graph_case_state or {}),
+            },
+        )
+        timeline = build_case_timeline(case_id_final)
+        case_context = {
+            "case_id": case_id_final,
+            "node_id": node_id,
+            "parent_node_id": str(parent_node_id or "").strip() or "",
+            "node_type": node_type,
+            "timeline": timeline,
+            "backend": "kvstore",
+        }
+        result_body["case_context"] = case_context
+        graph_state = dict(graph_case_state or {})
+        graph_state["case_id"] = case_id_final
+        graph_state["current_node_id"] = node_id
+        graph_state["parent_node_id"] = str(parent_node_id or "").strip() or ""
+        pivot_context = result_body.get("pivot_context")
+        if isinstance(pivot_context, dict):
+            pivot_context["case_id"] = case_id_final
+            pivot_context["current_node_id"] = node_id
+            pivot_context["parent_node_id"] = str(parent_node_id or "").strip() or ""
+            pivot_context["graph_case_state"] = graph_state
+        store.upsert_node(
+            node_id,
+            {
+                "node_id": node_id,
+                "case_id": case_id_final,
+                "parent_node_id": str(parent_node_id or "").strip() or "",
+                "node_type": node_type,
+                "question": question,
+                "title": title,
+                "intent": str(result_body.get("intent") or "").strip(),
+                "supported": supported,
+                "row_count": row_count,
+                "created_at": now_ts,
+                "summary": summary,
+                "result_json": json.dumps(result_body),
+                "graph_state_json": json.dumps(graph_state),
+            },
+        )
+        return case_context
     conn = _connect()
     try:
         with CASE_STORE_LOCK:

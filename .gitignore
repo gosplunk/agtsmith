@@ -17,4 +17,5 @@ tmp-shots*/
 .env
 *.log
 output/
+dist/
 docs/build_log.md

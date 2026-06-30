@@ -28,9 +28,23 @@ Add output to **gitignored** `config/ui.env` (copy from `config/ui.env.example`)
 
 ## Sidecar
 
+Requires Docker Compose v2 (`docker compose`). Install if missing:
+
+```bash
+sudo apt-get install -y docker-compose-v2
+```
+
 ```bash
 export AGTSMITH_UID=$(id -u) AGTSMITH_GID=$(id -g)
 make docker-deploy-build docker-deploy-up
+```
+
+Python venv for `make check`:
+
+```bash
+sudo apt-get install -y python3.12-venv
+python3 -m venv .venv && .venv/bin/pip install -r requirements-docker.txt
+make check
 ```
 
 ## Splunk app dev

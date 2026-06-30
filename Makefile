@@ -1,4 +1,4 @@
-.PHONY: help check status snapshot all langgraph-status langgraph-policy-status langgraph-policy-snapshot langgraph-policy-trend langgraph-policy-freshness langgraph-policy-trend-freshness langgraph-policy-trend-anomaly langgraph-docs-check langgraph-artifacts-check langgraph-tool-routing-check langgraph-session-check langgraph-thresholds langgraph-ops langgraph-ops-strict langgraph-run langgraph-demo langgraph-policy-demo langgraph-tool-demo langgraph-metadata-demo langgraph-chain-demo langgraph-session-demo langgraph-demo-ready langgraph-all langgraph-all-quick langgraph-gold-build langgraph-eval-prompts langgraph-topology-eval langgraph-topology-optimize agentic-check agentic-run agentic-demo agentic-session-demo agentic-status agentic-case-report agentic-demo-ready multi-model-run multi-model-check multi-model-demo multi-model-status multi-model-demo-ready model-show model-smoke model-spl-eval model-rag-ab model-spl-quality-deep spl-hardening-benchmark spl-hardening-benchmark-botsv3 spl-hardening-benchmark-botsv3-inventory env-profile-build env-profile-check env-profile-refresh env-profile-tests env-profile-schedule-install env-profile-schedule-show sourcetype-research spl-skillpack-refresh dev ui-dev docker-build docker-up docker-down docker-logs docker-deploy-build docker-deploy-up docker-deploy-down docker-deploy-logs ollama-log-tests tdir-core-tests docs-index report-freshness refresh-reports ops prune-summary prune-snapshot prune-trend prune-freshness prune-dry-run prune-apply prune-ops
+.PHONY: help check status snapshot all langgraph-status langgraph-policy-status langgraph-policy-snapshot langgraph-policy-trend langgraph-policy-freshness langgraph-policy-trend-freshness langgraph-policy-trend-anomaly langgraph-docs-check langgraph-artifacts-check langgraph-tool-routing-check langgraph-session-check langgraph-thresholds langgraph-ops langgraph-ops-strict langgraph-run langgraph-demo langgraph-policy-demo langgraph-tool-demo langgraph-metadata-demo langgraph-chain-demo langgraph-session-demo langgraph-demo-ready langgraph-all langgraph-all-quick langgraph-gold-build langgraph-eval-prompts langgraph-topology-eval langgraph-topology-optimize agentic-check agentic-run agentic-demo agentic-session-demo agentic-status agentic-case-report agentic-demo-ready multi-model-run multi-model-check multi-model-demo multi-model-status multi-model-demo-ready model-show model-smoke model-spl-eval model-rag-ab model-spl-quality-deep spl-hardening-benchmark spl-hardening-benchmark-botsv3 spl-hardening-benchmark-botsv3-inventory env-profile-build env-profile-check env-profile-refresh env-profile-tests env-profile-schedule-install env-profile-schedule-show sourcetype-research spl-skillpack-refresh dev ui-dev docker-build docker-up docker-down docker-logs docker-deploy-build docker-deploy-up docker-deploy-down docker-deploy-logs docker-deploy-manual ollama-log-tests tdir-core-tests kvstore-case-tests docs-index report-freshness refresh-reports ops prune-summary prune-snapshot prune-trend prune-freshness prune-dry-run prune-apply prune-ops splunk-app-package splunk-app-install-local splunk-app-symlink-dev screenshots screenshots-diff local-lab-preflight setup-local-ui-env
 
 QUESTION ?= Show failed login activity in the last 24 hours
 WRITE_ARTIFACT ?= 1
@@ -10,6 +10,9 @@ POLICY_TREND_MAX_AGE_MINUTES ?= 10080
 POLICY_SUMMARY_MAX_AGE_MINUTES ?= 180
 AGENTIC_MAX_STEPS ?= 3
 FOCUS_HOST ?=
+SPLUNK_APP_VERSION ?= 0.2.0-splunk
+SPLUNK_HOME ?= /opt/splunk
+SCREENSHOT_VERSION ?= 0.2.0-splunk
 
 help:
 	@echo "Available targets:"
@@ -83,6 +86,8 @@ help:
 	@echo "  make docker-deploy-up [AGTSMITH_DEPLOY_PORT=8787] # run deployment image without host repo bind mount"
 	@echo "  make docker-deploy-down # stop/remove deployment container"
 	@echo "  make docker-deploy-logs # tail deployment container logs"
+	@echo "  make docker-deploy-manual # deploy via plain docker when compose plugin missing"
+	@echo "  make setup-local-ui-env # write config/ui.env from SPLUNK_USER/SPLUNK_PASS env"
 	@echo "  make ollama-log-tests # run unit+integration tests for remote Ollama log streaming adapter"
 	@echo "  make tdir-core-tests # run deterministic core-TDIR enrichment unit tests"
 	@echo "  make docs-index # generate consolidated docs/logs status report"
@@ -96,6 +101,12 @@ help:
 	@echo "  make prune-ops # run prune summary + snapshot + trend + freshness"
 	@echo "  make prune-dry-run # show artifact prune candidates with default retention"
 	@echo "  make prune-apply # apply artifact pruning with default retention"
+	@echo "  make splunk-app-package # build dist/agent_smith-<version>.tgz"
+	@echo "  make splunk-app-install-local # install package to SPLUNK_HOME"
+	@echo "  make splunk-app-symlink-dev # symlink splunk_app/agent_smith into SPLUNK_HOME/etc/apps"
+	@echo "  make screenshots [SCREENSHOT_VERSION=...] # Playwright UI captures"
+	@echo "  make screenshots-diff [SCREENSHOT_VERSION=...] # visual diff vs baseline"
+	@echo "  make local-lab-preflight # curl checks for local Splunk/Ollama/sidecar"
 	@echo "  (override keeps: KEEP_REGRESSION, KEEP_SNAPSHOTS, KEEP_LANGGRAPH)"
 	@echo "  (override policy anomaly threshold: POLICY_MAX_ABS_DELTA)"
 	@echo "  (override policy trend freshness threshold: POLICY_TREND_MAX_AGE_MINUTES)"
@@ -112,6 +123,8 @@ check:
 	@$(MAKE) --no-print-directory env-profile-tests
 	@echo "[check] core tdir enrichment tests"
 	@$(MAKE) --no-print-directory tdir-core-tests
+	@echo "[check] kvstore case backend tests"
+	@$(MAKE) --no-print-directory kvstore-case-tests
 	@echo "[check] complete"
 
 status:
@@ -465,6 +478,12 @@ docker-deploy-down:
 docker-deploy-logs:
 	@docker compose -f docker-compose.deploy.yml logs --tail=200 -f
 
+docker-deploy-manual:
+	@bash ./scripts/docker-deploy-manual.sh
+
+setup-local-ui-env:
+	@bash ./scripts/setup_local_ui_env.sh
+
 ollama-log-tests:
 	@echo "[ollama-log-tests] running remote log stream tests"
 	@.venv/bin/python -m unittest scripts.tests.test_ollama_log_stream_unit scripts.tests.test_ollama_log_stream_integration
@@ -474,6 +493,11 @@ tdir-core-tests:
 	@echo "[tdir-core-tests] running deterministic tdir-core unit tests"
 	@.venv/bin/python -m unittest scripts.tests.test_tdir_core
 	@echo "[tdir-core-tests] complete"
+
+kvstore-case-tests:
+	@echo "[kvstore-case-tests] running KV store case mirror tests"
+	@.venv/bin/python -m unittest scripts.tests.test_kvstore_case_backend
+	@echo "[kvstore-case-tests] complete"
 
 multi-model-run:
 	@echo "[multi-model-run] question=$(QUESTION)"
@@ -558,3 +582,32 @@ prune-apply:
 	@echo "[prune-apply] keep_regression=$(KEEP_REGRESSION) keep_snapshots=$(KEEP_SNAPSHOTS) keep_langgraph=$(KEEP_LANGGRAPH)"
 	@.venv/bin/python scripts/prune_artifacts.py --keep-regression $(KEEP_REGRESSION) --keep-snapshots $(KEEP_SNAPSHOTS) --keep-langgraph $(KEEP_LANGGRAPH) --apply
 	@echo "[prune-apply] complete"
+
+local-lab-preflight:
+	@bash ./.cursor/skills/agtsmith-local-lab/scripts/preflight.sh
+
+splunk-app-package:
+	@echo "[splunk-app-package] building dist/agent_smith-$(SPLUNK_APP_VERSION).tgz"
+	@mkdir -p dist
+	@tar -czf dist/agent_smith-$(SPLUNK_APP_VERSION).tgz -C splunk_app agent_smith
+	@echo "[splunk-app-package] complete"
+
+splunk-app-install-local: splunk-app-package
+	@echo "[splunk-app-install-local] installing to $(SPLUNK_HOME)/etc/apps"
+	@sudo -u splunk $(SPLUNK_HOME)/bin/splunk install app dist/agent_smith-$(SPLUNK_APP_VERSION).tgz -update 1
+	@echo "[splunk-app-install-local] restart Splunk to load nav: sudo -u splunk $(SPLUNK_HOME)/bin/splunk restart"
+
+splunk-app-symlink-dev:
+	@echo "[splunk-app-symlink-dev] linking $(CURDIR)/splunk_app/agent_smith -> $(SPLUNK_HOME)/etc/apps/agent_smith"
+	@sudo ln -sfn "$(CURDIR)/splunk_app/agent_smith" "$(SPLUNK_HOME)/etc/apps/agent_smith"
+	@echo "[splunk-app-symlink-dev] complete — restart Splunk to pick up changes"
+
+screenshots:
+	@echo "[screenshots] capturing version $(SCREENSHOT_VERSION)"
+	@python3 .cursor/skills/agtsmith-screenshots/scripts/capture.py --version $(SCREENSHOT_VERSION)
+	@echo "[screenshots] complete"
+
+screenshots-diff:
+	@echo "[screenshots-diff] comparing version $(SCREENSHOT_VERSION)"
+	@python3 .cursor/skills/agtsmith-screenshots/scripts/compare.py --version $(SCREENSHOT_VERSION)
+	@echo "[screenshots-diff] complete"

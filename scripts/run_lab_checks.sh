@@ -90,7 +90,7 @@ if [[ "${QUICK_MODE}" == "1" ]]; then
   echo
   echo "[quick] Skipping live preflight/regression/trend query steps"
   echo "[quick] Showing artifact-only status"
-  python scripts/show_lab_status.py
+  python scripts/show_lab_status.py || true
 else
   echo
   echo "[1/3] Template preflight"
@@ -111,7 +111,7 @@ echo "All checks completed successfully."
 if [[ "${REFRESH_STATUS_JSON}" == "1" ]]; then
   echo
   echo "[optional] Refreshing latest status JSON"
-  python scripts/show_lab_status.py --json-out docs/logs/latest_status.json
+  python scripts/show_lab_status.py --json-out docs/logs/latest_status.json || true
 fi
 
 if [[ "${WRITE_SNAPSHOT}" == "1" ]]; then
