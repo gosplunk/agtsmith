@@ -1,0 +1,13 @@
+---
+description: Splunk app packaging conventions for splunk_app/agent_smith
+globs: splunk_app/**
+alwaysApply: false
+---
+
+# Splunk App Conventions
+
+- App id: `agent_smith` under `splunk_app/agent_smith/`
+- No secrets in `default/` — use `local/` or `passwords.conf` at runtime
+- Capabilities: `agent_smith_use`, `agent_smith_admin`
+- Install target: `/opt/splunk/etc/apps/agent_smith`
+- Sidecar default: `http://127.0.0.1:8787`

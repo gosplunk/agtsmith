@@ -1,0 +1,11 @@
+---
+description: Fork boundary — Splunk-specific code stays in splunk_app/
+alwaysApply: true
+---
+
+# Fork Boundaries
+
+- `splunk_app/` — Splunk-native packaging only; not upstreamed as-is
+- `.cursor/` — fork Cursor tooling
+- Engine fixes in `scripts/` or `core/` — keep upstreamable when possible
+- When adding features, ask: does this belong in core (both Docker + Splunk) or shell only?

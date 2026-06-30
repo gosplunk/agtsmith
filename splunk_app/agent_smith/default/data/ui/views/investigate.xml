@@ -1,0 +1,16 @@
+<dashboard version="1.1" theme="dark">
+  <label>Investigate</label>
+  <description>A.G.E.N.T. Smith investigation workspace (sidecar at 127.0.0.1:8787)</description>
+  <row>
+    <panel>
+      <html>
+        <![CDATA[
+        <style>
+          .agtsmith-frame { width: 100%; height: calc(100vh - 120px); border: 0; }
+        </style>
+        <iframe class="agtsmith-frame" src="http://127.0.0.1:8787/" title="A.G.E.N.T. Smith"></iframe>
+        ]]>
+      </html>
+    </panel>
+  </row>
+</dashboard>

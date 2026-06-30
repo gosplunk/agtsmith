@@ -1,0 +1,23 @@
+version: "0.2.0-splunk"
+output_dir_template: docs/images/screenshots/v{version}
+viewport:
+  width: 1920
+  height: 1080
+targets:
+  - id: agtsmith-login
+    url: http://127.0.0.1:8787/login
+    wait_ms: 1500
+  - id: agtsmith-investigation
+    url: http://127.0.0.1:8787/
+    wait_ms: 2000
+    skip_if_unreachable: true
+  - id: splunk-home
+    url: http://127.0.0.1:8000/en-US/app/launcher/home
+    auth: splunk
+    wait_ms: 2500
+    skip_if_unreachable: true
+  - id: splunk-app-investigate
+    url: http://127.0.0.1:8000/en-US/app/agent_smith/investigate
+    auth: splunk
+    wait_ms: 3000
+    skip_if_unreachable: true

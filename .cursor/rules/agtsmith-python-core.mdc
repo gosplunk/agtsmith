@@ -1,0 +1,12 @@
+---
+description: Python core and LangGraph conventions for agtsmith engine code
+globs: "{core/**,scripts/**}"
+alwaysApply: false
+---
+
+# agtsmith Python Core
+
+- Splunk MCP calls must pass deterministic `query_policy` before execution
+- Parse MCP `result.structuredContent` as primary data; `content` is status text
+- Match upstream style: explicit prompts, no filler comments
+- Read-only Splunk — no write/delete tools in automated paths

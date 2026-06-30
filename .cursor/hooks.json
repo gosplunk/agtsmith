@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/block-secrets-commit.sh",
+        "matcher": "git (add|commit)",
+        "failClosed": false
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": ".cursor/hooks/splunk-app-edit-reminder.sh"
+      },
+      {
+        "command": ".cursor/hooks/ui-change-screenshot-hint.sh"
+      }
+    ]
+  }
+}
