@@ -1890,6 +1890,51 @@ def suggest_domains_for_question(
     return out
 
 
+DEFAULT_LAB_INDEX_ALIASES: dict[str, str] = {
+    "windows": "botsv3",
+    "windows_sysmon": "botsv3",
+    "soc_windows": "botsv3",
+    "main": "botsv3",
+    "aws": "botsv3",
+}
+
+
+def build_index_alias_map(profile: dict[str, Any] | None = None) -> dict[str, str]:
+    aliases = {str(k).strip().lower(): str(v).strip() for k, v in DEFAULT_LAB_INDEX_ALIASES.items() if str(k).strip() and str(v).strip()}
+    if isinstance(profile, dict):
+        raw = profile.get("index_aliases", {})
+        if isinstance(raw, dict):
+            for alias, canonical in raw.items():
+                alias_name = str(alias).strip().lower()
+                canonical_name = str(canonical).strip()
+                if alias_name and canonical_name:
+                    aliases[alias_name] = canonical_name
+        known = {str(row.get("index", "")).strip() for row in profile.get("indexes", []) if isinstance(row, dict)}
+        known.discard("")
+        if "botsv3" in known:
+            for legacy in ("windows", "windows_sysmon", "soc_windows", "main", "aws"):
+                aliases.setdefault(legacy, "botsv3")
+        if "linux" in known:
+            aliases.setdefault("soc_linux", "linux")
+    return aliases
+
+
+def normalize_query_index_aliases(query: str, profile: dict[str, Any] | None = None) -> str:
+    text = str(query or "").strip()
+    if not text:
+        return text
+    aliases = build_index_alias_map(profile)
+    if not aliases:
+        return text
+    for alias, canonical in sorted(aliases.items(), key=lambda item: len(item[0]), reverse=True):
+        if alias == canonical:
+            continue
+        text = re.sub(rf'index\s*=\s*"{re.escape(alias)}"', f"index={canonical}", text, flags=re.IGNORECASE)
+        text = re.sub(rf"index\s*=\s*'{re.escape(alias)}'", f"index={canonical}", text, flags=re.IGNORECASE)
+        text = re.sub(rf"\bindex\s*=\s*{re.escape(alias)}\b", f"index={canonical}", text, flags=re.IGNORECASE)
+    return text
+
+
 def extract_indexes_from_query(query: str) -> list[str]:
     q = query or ""
     # matches index=foo, index="foo", index='foo'
@@ -1953,6 +1998,10 @@ def validate_query_against_environment(query_args: dict[str, Any], *, profile_pa
     if not profile:
         return True, "environment_profile_missing_skip"
 
+    query = normalize_query_index_aliases(query, profile)
+    query_args = dict(query_args)
+    query_args["query"] = query
+
     st_to_idx = profile.get("sourcetype_to_indexes", {})
     if not isinstance(st_to_idx, dict):
         st_to_idx = {}
@@ -1973,13 +2022,18 @@ def validate_query_against_environment(query_args: dict[str, Any], *, profile_pa
 
     q_indexes = extract_indexes_from_query(query)
     q_sourcetypes = extract_sourcetypes_from_query(query)
+    aliases = build_index_alias_map(profile)
 
     # index check
     for idx in q_indexes:
         if idx in {"*", "_*"}:
             continue
-        if idx not in known_indexes:
-            return False, f"environment_unknown_index:{idx}"
+        if idx in known_indexes:
+            continue
+        canonical = aliases.get(str(idx).strip().lower())
+        if canonical and canonical in known_indexes:
+            continue
+        return False, f"environment_unknown_index:{idx}"
 
     # sourcetype and index pairing check
     if q_sourcetypes:

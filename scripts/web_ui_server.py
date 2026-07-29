@@ -8738,6 +8738,11 @@ APP_HTML = """<!doctype html>
     }
 
     function extractExecutedSPL(result) {
+      if (result?.generated_spl) return String(result.generated_spl);
+      if (Array.isArray(result?.selected_spl_details) && result.selected_spl_details.length) {
+        const latest = result.selected_spl_details[result.selected_spl_details.length - 1];
+        if (latest?.query) return String(latest.query);
+      }
       if (result?.query_args?.query) return String(result.query_args.query);
       if (result?.final_adjudication?.selected_args?.query) return String(result.final_adjudication.selected_args.query);
       if (result?.evidence?.query_or_args?.query) return String(result.evidence.query_or_args.query);

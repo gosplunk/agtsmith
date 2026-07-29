@@ -17,6 +17,7 @@ from environment_profile import (
     build_tag_context,
     extract_indexes_from_query,
     extract_sourcetypes_from_query,
+    normalize_query_index_aliases,
     resolve_authoritative_domains_for_question,
     suggest_domains_for_question,
     validate_query_against_environment,
@@ -885,6 +886,41 @@ class EnvironmentProfileTests(unittest.TestCase):
             )
             self.assertIn("index=botsv3", rendered)
             self.assertNotIn("index=windows", rendered)
+
+
+class IndexAliasTests(unittest.TestCase):
+    def test_normalize_query_index_aliases_windows_to_botsv3(self) -> None:
+        profile = {
+            "indexes": [{"index": "botsv3", "sourcetypes": ["XmlWinEventLog"]}],
+            "sourcetype_to_indexes": {"XmlWinEventLog": ["botsv3"]},
+        }
+        query = (
+            'search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog '
+            '(EventCode=4625 OR EventID=4625) | stats count by host'
+        )
+        normalized = normalize_query_index_aliases(query, profile)
+        self.assertIn("index=botsv3", normalized)
+        self.assertNotIn("index=windows", normalized)
+
+    def test_validate_environment_accepts_alias_index(self) -> None:
+        profile = {
+            "indexes": [{"index": "botsv3", "sourcetypes": ["XmlWinEventLog"]}],
+            "sourcetype_to_indexes": {"XmlWinEventLog": ["botsv3"]},
+            "index_aliases": {"windows": "botsv3"},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            ok, reason = validate_query_against_environment(
+                {
+                    "query": "search index=windows sourcetype=XmlWinEventLog EventCode=4625 | stats count by host",
+                    "earliest_time": "-24h",
+                    "latest_time": "now",
+                    "row_limit": 20,
+                },
+                profile_path=path,
+            )
+            self.assertTrue(ok, reason)
 
 
 if __name__ == "__main__":

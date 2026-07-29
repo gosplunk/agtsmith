@@ -48,7 +48,7 @@ from query_policy import validate_query_args
 from spl_rag_context import build_resolved_domain_hints, build_spl_rag_context
 from spl_query_repair import attempt_query_repair_once
 from tdir_core import build_tdir_case
-from environment_profile import apply_environment_query_constraints, validate_query_against_environment
+from environment_profile import apply_environment_query_constraints, load_environment_profile, normalize_query_index_aliases, validate_query_against_environment
 from intent_field_contracts import validate_query_for_intent, validate_platform_sourcetype_coherence, validate_intent_platform_scope
 from local_learning import ranked_approved_learning_records
 from runtime_config import (
@@ -458,6 +458,12 @@ def _normalize_planner_plan(candidate: dict[str, Any], question: str, *, fallbac
     known_intents = {tpl.intent for tpl in TEMPLATES}
     if raw_intent not in known_intents:
         raw_intent = mapped_template.intent
+    q_lower = question.lower()
+    if mapped_template.intent == "botsv3_named_sourcetype_overview" or (
+        "botsv3" in q_lower and "overview of sourcetype" in q_lower
+    ):
+        tool = "splunk_run_query"
+        raw_intent = "botsv3_named_sourcetype_overview"
     if raw_intent in FORCE_QUERY_INTENTS and mapped_template.intent == raw_intent:
         tool = "splunk_run_query"
     out = {
@@ -912,6 +918,11 @@ def _enforce_question_alignment(question: str, plan: dict[str, Any]) -> dict[str
         aligned["reason"] = "question_alignment_override:splunk_info"
         return aligned
 
+    if mapped_template.intent == "botsv3_named_sourcetype_overview":
+        aligned.update(_build_template_aligned_plan(question, mapped_template))
+        aligned["reason"] = "question_alignment_override:botsv3_sourcetype_overview"
+        return aligned
+
     if "metadata" in q and any(x in q for x in ("host", "hosts", "source", "sources", "sourcetype", "sourcetypes")):
         selected_tool, _reason, metadata_args, _mode = determine_splunk_tool(question, "")
         if selected_tool == "splunk_get_metadata":
@@ -1138,6 +1149,14 @@ def writer_node(state: MultiModelState) -> MultiModelState:
         "source": writer_output.get("source", "writer_model"),
     }
     normalized = _normalize_candidate(candidate, question, fallback_reason="writer_normalization_fallback")
+    normalized = _enforce_question_alignment(question, normalized)
+    normalized = _normalize_candidate(normalized, question, fallback_reason="writer_post_alignment_normalization")
+    tool_args = normalized.get("tool_args", {})
+    if isinstance(tool_args, dict) and str(tool_args.get("query", "")).strip():
+        query = normalize_query_index_aliases(str(tool_args.get("query", "")), load_environment_profile())
+        tool_args = dict(tool_args)
+        tool_args["query"] = query
+        normalized["tool_args"] = tool_args
     return {
         "writer_output": normalized,
         "final_plan": normalized if not _topology_settings().get("security_review", True) else state.get("final_plan", {}),
@@ -1400,6 +1419,10 @@ def validate_final_plan_node(state: MultiModelState) -> MultiModelState:
                     failure_reason = f"intent_contract:{contract_reason}"
                 else:
                     query_text = str(args_current.get("query", "")).strip()
+                    query_text = normalize_query_index_aliases(query_text, load_environment_profile())
+                    if query_text:
+                        args_current = dict(args_current)
+                        args_current["query"] = query_text
                     coherence_ok, coherence_reason = validate_platform_sourcetype_coherence(query_text, intent_name)
                     if not coherence_ok:
                         failure_reason = f"platform_coherence:{coherence_reason}"
@@ -1979,6 +2002,8 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
             final_conf = min(final_conf, 0.55)
         else:
             final_conf = min(final_conf, 0.50)
+    elif rows_returned == 0 and str(plan.get("selected_tool", "")).strip() == "splunk_run_query":
+        final_conf = min(final_conf, 0.55)
 
     evidence = {
         "query_or_args": plan.get("tool_args", {}),

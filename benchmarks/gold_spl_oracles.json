@@ -205,6 +205,12 @@
           "sourcetypes": ["linux_secure", "XmlWinEventLog", "access_combined", "stream:dns", "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"]
         }
       ],
+      "index_aliases": {
+        "windows": "botsv3",
+        "windows_sysmon": "botsv3",
+        "soc_windows": "botsv3",
+        "main": "botsv3"
+      },
       "sourcetype_to_indexes": {
         "auth.log": ["linux"],
         "linux_secure": ["linux", "botsv3"],
@@ -538,6 +544,50 @@
         "4625",
         "index=botsv3",
         "XmlWinEventLog"
+      ],
+      "forbidden_patterns": [
+        "linux_secure.*4625",
+        "4625.*linux_secure"
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "botsv3_overview_stream_dns_existing_lab",
+      "intent": "botsv3_named_sourcetype_overview",
+      "variant": "existing_lab",
+      "question": "Show an overview of sourcetype stream:dns in botsv3 for all time",
+      "required_substrings": [
+        "index=botsv3",
+        "sourcetype=stream:dns",
+        "stats"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "botsv3_overview_cloudtrail_existing_lab",
+      "intent": "botsv3_named_sourcetype_overview",
+      "variant": "existing_lab",
+      "question": "Show an overview of sourcetype aws:cloudtrail in botsv3 for all time",
+      "required_substrings": [
+        "index=botsv3",
+        "sourcetype=aws:cloudtrail",
+        "stats"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "windows_auth_index_alias_existing_lab",
+      "intent": "windows_auth_failures",
+      "variant": "existing_lab",
+      "question": "Show failed login activity in the last 24 hours in windows.",
+      "required_substrings": [
+        "4625",
+        "index=botsv3"
       ],
       "forbidden_patterns": [
         "linux_secure.*4625",

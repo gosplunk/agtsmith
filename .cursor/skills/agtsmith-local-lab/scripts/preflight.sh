@@ -101,6 +101,14 @@ if [[ -f "${UI_ENV_PATH}" ]]; then
   set +u
   source "${UI_ENV_PATH}" 2>/dev/null || true
   set -u
+  if [[ -n "${SPLUNK_USER:-}" && -n "${SPLUNK_PASS:-}" ]]; then
+    if ! curl -skf -o /dev/null https://127.0.0.1:8089/services/server/info \
+      -H "Authorization: Bearer ${SPLUNK_LAB_BEARER_TOKEN:-invalid}"; then
+      echo "WARN MCP bearer token rejected — run make lab-data-refresh-mcp-token"
+    else
+      echo "OK  MCP bearer token"
+    fi
+  fi
 fi
 if [[ "${LAB_DATA_ENABLED:-0}" == "1" ]]; then
   HEC_URL="${SPLUNK_HEC_URL:-https://127.0.0.1:8088/services/collector/event}"

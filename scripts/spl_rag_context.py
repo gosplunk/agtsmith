@@ -56,6 +56,10 @@ QUESTION_HINTS: dict[str, tuple[str, ...]] = {
     "apache_404": ("access_combined", "404", "timechart", "status", "web"),
     "powershell": ("eventcode=4688", "powershell", "process_command_line", "encodedcommand"),
     "indexes": ("index", "stats", "metadata"),
+    "botsv3_overview": ("botsv3", "sourcetype", "stats", "overview"),
+    "cloudtrail": ("cloudtrail", "aws", "eventname", "botsv3"),
+    "stream_dns": ("stream:dns", "dns", "reply_code", "spath"),
+    "sysmon": ("sysmon", "xmlwineventlog", "eventcode", "process"),
 }
 
 
@@ -316,9 +320,19 @@ def _build_local_learning_context(question: str, *, max_chars: int = 700) -> str
     return text
 
 
-def _question_hints(question: str) -> list[str]:
-    q = question.lower()
+def _question_hints(question: str, *, intent: str = "") -> list[str]:
+    q = f"{question} {intent}".lower()
     hints = {"search", "stats"}
+    intent_hint_map = {
+        "botsv3_named_sourcetype_overview": "botsv3_overview",
+        "stream_dns_activity": "stream_dns",
+        "aws_vpc_flow_activity": "cloudtrail",
+        "windows_sysmon_network_activity": "sysmon",
+        "windows_process_activity": "sysmon",
+    }
+    mapped = intent_hint_map.get(str(intent or "").strip(), "")
+    if mapped and mapped in QUESTION_HINTS:
+        hints.update(v.lower() for v in QUESTION_HINTS[mapped])
     for key, vals in QUESTION_HINTS.items():
         if key in q:
             hints.update(v.lower() for v in vals)
@@ -449,7 +463,7 @@ def build_spl_rag_context(
     max_chars: int = 1600,
     profile_path: str | Path = PROFILE_PATH_DEFAULT,
 ) -> str:
-    hints = _question_hints(question)
+    hints = _question_hints(question, intent=intent)
     ranked: list[tuple[int, str, str]] = []
     for src in RAG_SOURCES:
         text = _read_text(src)

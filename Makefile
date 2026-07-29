@@ -486,9 +486,13 @@ spl-autonomy-check: check check-gold-oracles
 	@$(MAKE) --no-print-directory investigation-e2e
 	@echo "[spl-autonomy-check] complete"
 
-spl-autonomy-nightly: env-profile-refresh
+spl-autonomy-nightly: lab-data-refresh-mcp-token env-profile-refresh
+	@if docker inspect -f '{{.State.Running}}' agtsmith-ui-deploy 2>/dev/null | grep -q true; then $(MAKE) --no-print-directory docker-deploy-hotpatch; fi
 	@if [ "$${LAB_DATA_ENABLED:-0}" = "1" ]; then $(MAKE) --no-print-directory lab-data-generate lab-data-verify; fi
 	@$(MAKE) --no-print-directory spl-autonomy-check
+	@$(MAKE) --no-print-directory spl-hardening-benchmark-botsv3-inventory
+	@echo "[spl-autonomy-nightly] classify benchmark failures"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/spl_improvement_loop.py --report artifacts/benchmark/botsv3_inventory/spl_hardening_benchmark_latest.json || true
 	@echo "[spl-autonomy-nightly] full closed loop with optional promotion"
 	@PYTHONPATH=.:scripts .venv/bin/python scripts/spl_autonomy_loop.py \
 		--out-dir $(SPL_AUTONOMY_OUT) \
@@ -498,12 +502,12 @@ spl-autonomy-nightly: env-profile-refresh
 
 spl-hardening-benchmark-botsv3:
 	@echo "[spl-hardening-benchmark-botsv3] running BOTSv3 all-time benchmark"
-	@.venv/bin/python scripts/run_spl_hardening_benchmark.py --cases benchmarks/spl_cases_botsv3.json --out-dir artifacts/benchmark/botsv3
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_spl_hardening_benchmark.py --cases benchmarks/spl_cases_botsv3.json --out-dir artifacts/benchmark/botsv3
 	@echo "[spl-hardening-benchmark-botsv3] complete"
 
 spl-hardening-benchmark-botsv3-inventory:
 	@echo "[spl-hardening-benchmark-botsv3-inventory] running planner-backed BOTSv3 sourcetype inventory benchmark"
-	@.venv/bin/python scripts/run_spl_hardening_benchmark.py --cases AUTO_BOTSV3_INVENTORY --use-planner --out-dir artifacts/benchmark/botsv3_inventory
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_spl_hardening_benchmark.py --cases AUTO_BOTSV3_INVENTORY --use-planner --out-dir artifacts/benchmark/botsv3_inventory
 	@echo "[spl-hardening-benchmark-botsv3-inventory] complete"
 
 env-profile-build:

@@ -68,6 +68,13 @@ def _question_tokens(question: str, *, intent: str = "") -> set[str]:
             token = str(value).strip().lower()
             if token:
                 tokens.add(token)
+    intent_name = str(intent or "").strip().lower()
+    if intent_name == "botsv3_named_sourcetype_overview":
+        tokens.update({"botsv3", "sourcetype", "overview", "stats", "head"})
+    elif intent_name in {"stream_dns_activity", "windows_sysmon_dns_activity"}:
+        tokens.update({"dns", "stream", "spath", "reply_code"})
+    elif intent_name in {"windows_auth_failures", "failed_login_activity"}:
+        tokens.update({"4625", "xmlwineventlog", "logon", "failed"})
     return tokens
 
 
