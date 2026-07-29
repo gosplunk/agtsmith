@@ -81,7 +81,8 @@ help:
 	@echo "  make spl-improvement-loop [SPL_IMPROVEMENT_REPORT=...] # classify benchmark failures into learning candidates"
 	@echo "  make spl-offline-docs-index # build SPL RAG index from Splunk Offline Docs search-index.json"
 	@echo "  make spl-benchmark-compare CURRENT=... # compare run JSON against baseline manifest"
-	@echo "  make spl-autonomy-check # check + gold oracles + live-domain offline + pilot_live_20 + investigation E2E"
+	@echo "  make spl-multi-layout-matrix # offline gold oracle matrix across profile fixtures"
+	@echo "  make lab-data-matrix-bootstrap # provision+verify all lab layouts then run matrix"
 	@echo "  make spl-autonomy-nightly # env refresh + autonomy loop with --promote"
 	@echo "  make env-profile-build [FOCUS_HOST=<linux-host>] # rebuild append-only environment profile from Splunk MCP (+ optional host focus)"
 	@echo "  make env-profile-check # fail if environment profile is missing/stale"
@@ -435,8 +436,26 @@ live-domain-benchmark-offline:
 
 check-gold-oracles:
 	@echo "[check-gold-oracles] validating gold SPL oracles offline"
-	@.venv/bin/python scripts/check_gold_spl_oracles.py
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/check_gold_spl_oracles.py
 	@echo "[check-gold-oracles] complete"
+
+spl-multi-layout-matrix:
+	@echo "[spl-multi-layout-matrix] offline gold oracle matrix across profile fixtures"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_multi_layout_matrix.py \
+		--out artifacts/benchmark/multi_layout_matrix_latest.json
+	@echo "[spl-multi-layout-matrix] complete"
+
+lab-data-matrix-bootstrap:
+	@echo "[lab-data-matrix-bootstrap] bootstrap each lab layout and run offline matrix"
+	@for layout in existing_lab multi_index_ideal minimal_ci; do \
+		echo "[lab-data-matrix-bootstrap] layout=$$layout"; \
+		$(MAKE) --no-print-directory lab-data-provision LAB_DATA_LAYOUT=$$layout || exit 1; \
+		$(MAKE) --no-print-directory lab-data-generate LAB_DATA_LAYOUT=$$layout || exit 1; \
+		$(MAKE) --no-print-directory lab-data-verify LAB_DATA_LAYOUT=$$layout || exit 1; \
+	done
+	@$(MAKE) --no-print-directory env-profile-refresh
+	@$(MAKE) --no-print-directory spl-multi-layout-matrix
+	@echo "[lab-data-matrix-bootstrap] complete"
 
 check-gold-oracles-live:
 	@echo "[check-gold-oracles-live] validating gold SPL oracles against live environment profile when present"
@@ -478,18 +497,22 @@ spl-benchmark-compare:
 		--current "$(CURRENT)"
 	@echo "[spl-benchmark-compare] complete"
 
-spl-autonomy-check: check check-gold-oracles
+spl-autonomy-check: check check-gold-oracles spl-multi-layout-matrix
 	@echo "[spl-autonomy-check] live-domain offline + pilot hardening subset + investigation E2E"
 	@if [ "$${LAB_DATA_ENABLED:-0}" = "1" ]; then $(MAKE) --no-print-directory lab-data-verify; fi
+	@if [ "$${SPL_AUTONOMY_STRICT_PROFILE:-0}" = "1" ]; then $(MAKE) --no-print-directory env-profile-check; fi
 	@$(MAKE) --no-print-directory live-domain-benchmark-offline
 	@$(MAKE) --no-print-directory spl-hardening-benchmark CASES=$(SPL_AUTONOMY_CASES) OUT=$(SPL_AUTONOMY_OUT)/check
 	@$(MAKE) --no-print-directory investigation-e2e
+	@if [ "$${SPL_AUTONOMY_LIVE_MCP:-0}" = "1" ]; then $(MAKE) --no-print-directory live-domain-benchmark; fi
 	@echo "[spl-autonomy-check] complete"
 
 spl-autonomy-nightly: lab-data-refresh-mcp-token env-profile-refresh
+	@SPL_AUTONOMY_STRICT_PROFILE=1 $(MAKE) --no-print-directory env-profile-check
 	@if docker inspect -f '{{.State.Running}}' agtsmith-ui-deploy 2>/dev/null | grep -q true; then $(MAKE) --no-print-directory docker-deploy-hotpatch; fi
 	@if [ "$${LAB_DATA_ENABLED:-0}" = "1" ]; then $(MAKE) --no-print-directory lab-data-generate lab-data-verify; fi
-	@$(MAKE) --no-print-directory spl-autonomy-check
+	@SPL_AUTONOMY_LIVE_MCP=1 $(MAKE) --no-print-directory spl-autonomy-check
+	@$(MAKE) --no-print-directory live-domain-benchmark
 	@$(MAKE) --no-print-directory spl-hardening-benchmark-botsv3-inventory
 	@echo "[spl-autonomy-nightly] classify benchmark failures"
 	@PYTHONPATH=.:scripts .venv/bin/python scripts/spl_improvement_loop.py --report artifacts/benchmark/botsv3_inventory/spl_hardening_benchmark_latest.json || true
@@ -518,7 +541,9 @@ env-profile-build:
 
 env-profile-check:
 	@echo "[env-profile-check] checking profile freshness"
-	@$(LAB_DATA_RUN) .venv/bin/python scripts/check_environment_profile_freshness.py --max-age-minutes 11520
+	@max_age=$${ENV_PROFILE_MAX_AGE_MINUTES:-11520}; \
+	if [ "$${SPL_AUTONOMY_STRICT_PROFILE:-0}" = "1" ]; then max_age=720; fi; \
+	$(LAB_DATA_RUN) .venv/bin/python scripts/check_environment_profile_freshness.py --max-age-minutes $$max_age
 	@echo "[env-profile-check] complete"
 
 LAB_DATA_LAYOUT ?= existing_lab

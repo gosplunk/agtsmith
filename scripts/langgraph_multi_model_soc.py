@@ -1884,17 +1884,47 @@ def _derive_platform_coverage(plan: dict[str, Any], rows: list[dict[str, Any]] |
         if isinstance(row, dict) and str(row.get("platform", "")).strip()
     }
     query_platforms: set[str] = set()
+    branch_status: list[dict[str, Any]] = []
+    segments = _subsearch_segments_for_coverage(query)
+    for segment in segments:
+        platform = "unknown"
+        if 'eval platform="linux"' in segment or "index=linux" in segment or 'source="/var/log/auth.log"' in segment or "linux_secure" in segment:
+            platform = "linux"
+            query_platforms.add("linux")
+        if 'eval platform="windows"' in segment or "index=windows" in segment or "index=windows_sysmon" in segment or "eventcode=4625" in segment or "xmlwineventlog" in segment:
+            platform = "windows" if platform == "unknown" else platform
+            query_platforms.add("windows")
+        branch_rows = sum(
+            1
+            for row in rows_list
+            if isinstance(row, dict) and str(row.get("platform", "")).strip().lower() == platform
+        ) if platform != "unknown" else 0
+        branch_status.append({"platform": platform, "queried": platform != "unknown", "rows_returned": branch_rows})
     if 'eval platform="linux"' in query or "index=linux" in query or 'source="/var/log/auth.log"' in query or 'source="/var/log/secure"' in query:
         query_platforms.add("linux")
     if 'eval platform="windows"' in query or "index=windows" in query or "index=windows_sysmon" in query or "eventcode=4625" in query:
         query_platforms.add("windows")
+    total_rows = len(rows_list)
     return {
         "query_platforms": sorted(query_platforms),
         "row_platforms": sorted(row_platforms),
         "platforms": sorted(query_platforms | row_platforms),
         "cross_platform_query": len(query_platforms) > 1,
         "cross_platform_results": len(row_platforms) > 1,
+        "branch_status": branch_status,
+        "zero_row_warning": total_rows == 0 and bool(query_platforms),
     }
+
+
+def _subsearch_segments_for_coverage(query: str) -> list[str]:
+    import re
+
+    parts = re.split(r"\|\s*append\s*\[\s*search\s+", query, flags=re.IGNORECASE)
+    segments = [parts[0].strip()]
+    for part in parts[1:]:
+        branch = part.rsplit("]", 1)[0] if "]" in part else part
+        segments.append(f"search {branch}".strip())
+    return [segment for segment in segments if segment]
 
 
 def _enforce_platform_coverage_in_summary(summary: str, coverage: dict[str, Any]) -> str:

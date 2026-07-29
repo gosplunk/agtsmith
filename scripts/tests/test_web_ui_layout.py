@@ -77,8 +77,13 @@ def _install_stub_modules() -> None:
     stubs["investigation_playbooks"] = mod
 
     mod = types.ModuleType("environment_profile")
+    mod.INDEX_ALIASES_OVERRIDE_PATH = Path("/tmp/index_aliases_override.json")
     mod.load_environment_profile = lambda *args, **kwargs: {}
     mod.suggest_domains_for_question = lambda *args, **kwargs: []
+    mod.load_index_alias_overrides = lambda *args, **kwargs: {}
+    mod.save_index_alias_overrides = lambda aliases, **kwargs: Path("/tmp/index_aliases_override.json")
+    mod.infer_index_aliases_from_profile = lambda *args, **kwargs: {}
+    mod.build_index_alias_map = lambda *args, **kwargs: {}
     stubs["environment_profile"] = mod
 
     mod = types.ModuleType("runtime_config")
@@ -149,7 +154,8 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertIn('Configure UI configure-ui-p3', html)
         self.assertIn('Advanced: Per-Stage Overrides', html)
         self.assertIn('id="cfg-model-planner-fallback"', html)
-        self.assertIn('Reset to v1.5.1 Defaults', html)
+        self.assertIn('Index Alias Mapping', html)
+        self.assertIn('id="cfg-index-alias-json"', html)
 
     def test_configure_page_script_is_valid_javascript(self) -> None:
         html = wus._configure_page_body_rendered()

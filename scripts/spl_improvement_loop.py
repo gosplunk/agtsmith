@@ -25,6 +25,29 @@ def _template_query_for_question(question: str) -> str:
     return str(args.get("query", "")).strip()
 
 
+def _failure_has_live_mcp_evidence(row: dict[str, Any]) -> bool:
+    if bool(row.get("live_mcp_verified")):
+        return True
+    if bool(row.get("mcp_executed")):
+        return True
+    try:
+        if int(row.get("rows_returned", 0)) > 0:
+            return True
+    except Exception:
+        pass
+    failure_class = classify_failure(row)
+    if failure_class in {
+        "intent_contract_failure",
+        "query_antipattern",
+        "policy_failure",
+        "platform_coherence",
+        "environment_failure",
+        "sourcetype_coherence",
+    }:
+        return True
+    return False
+
+
 def propose_candidate_from_failure(row: dict[str, Any], *, min_pass_score: int = DEFAULT_MIN_PASS_SCORE) -> dict[str, Any] | None:
     try:
         score = int(row.get("score", 0))
@@ -34,6 +57,8 @@ def propose_candidate_from_failure(row: dict[str, Any], *, min_pass_score: int =
         return None
 
     failure_class = classify_failure(row)
+    if not _failure_has_live_mcp_evidence(row) and failure_class in {"empty_result", "field_coverage_gap", "row_count_low"}:
+        return None
     intent = str(row.get("expected_intent") or row.get("actual_intent") or row.get("intent") or "").strip()
     question = str(row.get("question", "")).strip()
     query = str(row.get("query", "")).strip()

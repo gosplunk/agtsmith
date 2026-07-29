@@ -17,7 +17,10 @@ from environment_profile import (
     build_tag_context,
     extract_indexes_from_query,
     extract_sourcetypes_from_query,
+    infer_index_aliases_from_profile,
+    load_index_alias_overrides,
     normalize_query_index_aliases,
+    save_index_alias_overrides,
     resolve_authoritative_domains_for_question,
     suggest_domains_for_question,
     validate_query_against_environment,
@@ -901,6 +904,29 @@ class IndexAliasTests(unittest.TestCase):
         normalized = normalize_query_index_aliases(query, profile)
         self.assertIn("index=botsv3", normalized)
         self.assertNotIn("index=windows", normalized)
+
+    def test_infer_index_aliases_soc_windows(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "soc_linux", "sourcetypes": ["linux_secure"]},
+                {"index": "soc_windows", "sourcetypes": ["XmlWinEventLog"]},
+            ],
+            "sourcetype_to_indexes": {
+                "linux_secure": ["soc_linux"],
+                "XmlWinEventLog": ["soc_windows"],
+            },
+        }
+        aliases = infer_index_aliases_from_profile(profile)
+        self.assertEqual(aliases.get("windows"), "soc_windows")
+        self.assertEqual(aliases.get("soc_windows"), "soc_windows")
+
+    def test_save_and_load_index_alias_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "aliases.json"
+            save_index_alias_overrides({"windows": "prod_win", "main": "aws_prod"}, path=path)
+            loaded = load_index_alias_overrides(path=path)
+            self.assertEqual(loaded.get("windows"), "prod_win")
+            self.assertEqual(loaded.get("main"), "aws_prod")
 
     def test_validate_environment_accepts_alias_index(self) -> None:
         profile = {

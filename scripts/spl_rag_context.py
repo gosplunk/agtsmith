@@ -16,7 +16,9 @@ from pathlib import Path
 from environment_profile import (
     PROFILE_PATH_DEFAULT,
     build_environment_context,
+    build_index_alias_map,
     build_tag_context,
+    load_environment_profile,
     resolve_authoritative_domains_for_question,
 )
 from local_learning import approved_learning_records
@@ -422,6 +424,11 @@ def build_resolved_domain_hints(
         preview = ", ".join(sts[:4])
         style_text = ",".join(styles) if styles else "unknown"
         lines.append(f"- index={idx} platform={style_text} sourcetypes={preview}")
+    profile = load_environment_profile(profile_path)
+    aliases = build_index_alias_map(profile)
+    if aliases:
+        alias_preview = ", ".join(f"{alias}->{canonical}" for alias, canonical in list(aliases.items())[:6])
+        lines.append(f"[INDEX_ALIASES] {alias_preview}")
     text = "\n".join(lines)
     if len(text) > max_chars:
         text = text[:max_chars]

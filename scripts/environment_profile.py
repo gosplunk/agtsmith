@@ -13,6 +13,7 @@ from botsv3_catalog import BOTSV3_SOURCETYPES
 _PROFILE_REPO_ROOT = Path(__file__).resolve().parents[1]
 PROFILE_PATH_DEFAULT = _PROFILE_REPO_ROOT / "artifacts/environment/environment_profile_latest.json"
 PROFILE_PATH_LEGACY = _PROFILE_REPO_ROOT / "docs/logs/environment_profile_latest.json"
+INDEX_ALIASES_OVERRIDE_PATH = _PROFILE_REPO_ROOT / "artifacts/environment/index_aliases_override.json"
 
 SRC_PRETRAINED = "https://docs.splunk.com/Documentation/Splunk/9.4.2/Data/Listofpretrainedsourcetypes"
 SRC_WIN_ADDON = "https://docs.splunk.com/Documentation/WindowsAddOn/8.1.2/User/SourcetypesandCIMdatamodelinfo"
@@ -265,6 +266,62 @@ KNOWN_SOURCETYPE_SEMANTICS: dict[str, dict[str, Any]] = {
 }
 
 
+def load_index_alias_overrides(path: str | Path = INDEX_ALIASES_OVERRIDE_PATH) -> dict[str, str]:
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    out: dict[str, str] = {}
+    for alias, canonical in payload.items():
+        alias_name = str(alias).strip().lower()
+        canonical_name = str(canonical).strip()
+        if alias_name and canonical_name:
+            out[alias_name] = canonical_name
+    return out
+
+
+def save_index_alias_overrides(
+    aliases: dict[str, str],
+    *,
+    path: str | Path = INDEX_ALIASES_OVERRIDE_PATH,
+) -> Path:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    normalized: dict[str, str] = {}
+    for alias, canonical in (aliases or {}).items():
+        alias_name = str(alias).strip().lower()
+        canonical_name = str(canonical).strip()
+        if alias_name and canonical_name:
+            normalized[alias_name] = canonical_name
+    p.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return p
+
+
+def _merge_profile_index_aliases(profile: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(profile, dict):
+        return {}
+    merged = dict(profile)
+    explicit = merged.get("index_aliases", {})
+    explicit_map: dict[str, str] = {}
+    if isinstance(explicit, dict):
+        for alias, canonical in explicit.items():
+            alias_name = str(alias).strip().lower()
+            canonical_name = str(canonical).strip()
+            if alias_name and canonical_name:
+                explicit_map[alias_name] = canonical_name
+    overrides = load_index_alias_overrides()
+    if overrides:
+        explicit_map.update(overrides)
+    if explicit_map:
+        merged["index_aliases"] = explicit_map
+    return merged
+
+
 def load_environment_profile(path: str | Path = PROFILE_PATH_DEFAULT) -> dict[str, Any]:
     p = Path(path)
     if not p.exists():
@@ -275,7 +332,9 @@ def load_environment_profile(path: str | Path = PROFILE_PATH_DEFAULT) -> dict[st
             return {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        return _merge_profile_index_aliases(data)
     except Exception:
         return {}
 
@@ -1890,33 +1949,67 @@ def suggest_domains_for_question(
     return out
 
 
-DEFAULT_LAB_INDEX_ALIASES: dict[str, str] = {
-    "windows": "botsv3",
-    "windows_sysmon": "botsv3",
-    "soc_windows": "botsv3",
-    "main": "botsv3",
-    "aws": "botsv3",
-}
+def _pick_canonical_index(known: set[str], candidates: tuple[str, ...]) -> str | None:
+    lower_map = {name.lower(): name for name in known if name}
+    for candidate in candidates:
+        match = lower_map.get(candidate.lower())
+        if match:
+            return match
+    return None
+
+
+def infer_index_aliases_from_profile(profile: dict[str, Any] | None) -> dict[str, str]:
+    """Derive logical index aliases from profile metadata and explicit mappings."""
+    if not isinstance(profile, dict):
+        return {}
+    aliases: dict[str, str] = {}
+    raw = profile.get("index_aliases", {})
+    if isinstance(raw, dict):
+        for alias, canonical in raw.items():
+            alias_name = str(alias).strip().lower()
+            canonical_name = str(canonical).strip()
+            if alias_name and canonical_name:
+                aliases[alias_name] = canonical_name
+
+    known = {
+        str(row.get("index", "")).strip()
+        for row in profile.get("indexes", [])
+        if isinstance(row, dict) and str(row.get("index", "")).strip()
+    }
+    if not known:
+        return aliases
+
+    windows_idx = _pick_canonical_index(known, ("soc_windows", "windows", "wineventlog", "win"))
+    if windows_idx:
+        for legacy in ("windows", "windows_sysmon", "soc_windows", "wineventlog"):
+            aliases.setdefault(legacy, windows_idx)
+
+    linux_idx = _pick_canonical_index(known, ("soc_linux", "linux"))
+    if linux_idx:
+        aliases.setdefault("soc_linux", linux_idx)
+
+    aws_idx = _pick_canonical_index(known, ("aws_cloudtrail", "aws_prod", "cloudtrail", "aws"))
+    if aws_idx:
+        for legacy in ("aws", "main", "cloudtrail"):
+            aliases.setdefault(legacy, aws_idx)
+
+    if len(known) == 1:
+        only_index = next(iter(known))
+        for legacy in ("windows", "windows_sysmon", "soc_windows", "main", "aws", "linux", "soc_linux"):
+            aliases.setdefault(legacy, only_index)
+    else:
+        botsv3_idx = _pick_canonical_index(known, ("botsv3",))
+        if botsv3_idx and not windows_idx:
+            for legacy in ("windows", "windows_sysmon", "soc_windows", "main", "aws"):
+                aliases.setdefault(legacy, botsv3_idx)
+        if linux_idx and _pick_canonical_index(known, ("linux",)) and linux_idx.lower() != "linux":
+            aliases.setdefault("linux", _pick_canonical_index(known, ("linux",)) or linux_idx)
+
+    return aliases
 
 
 def build_index_alias_map(profile: dict[str, Any] | None = None) -> dict[str, str]:
-    aliases = {str(k).strip().lower(): str(v).strip() for k, v in DEFAULT_LAB_INDEX_ALIASES.items() if str(k).strip() and str(v).strip()}
-    if isinstance(profile, dict):
-        raw = profile.get("index_aliases", {})
-        if isinstance(raw, dict):
-            for alias, canonical in raw.items():
-                alias_name = str(alias).strip().lower()
-                canonical_name = str(canonical).strip()
-                if alias_name and canonical_name:
-                    aliases[alias_name] = canonical_name
-        known = {str(row.get("index", "")).strip() for row in profile.get("indexes", []) if isinstance(row, dict)}
-        known.discard("")
-        if "botsv3" in known:
-            for legacy in ("windows", "windows_sysmon", "soc_windows", "main", "aws"):
-                aliases.setdefault(legacy, "botsv3")
-        if "linux" in known:
-            aliases.setdefault("soc_linux", "linux")
-    return aliases
+    return infer_index_aliases_from_profile(profile if isinstance(profile, dict) else {})
 
 
 def normalize_query_index_aliases(query: str, profile: dict[str, Any] | None = None) -> str:

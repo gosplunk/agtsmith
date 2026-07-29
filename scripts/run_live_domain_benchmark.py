@@ -25,6 +25,7 @@ from minimal_question_to_answer import (
     template_to_query_args,
 )
 from query_policy import validate_query_args
+from spl_autonomy_manifest import build_manifest
 
 try:
     from lab_data.config import read_verify_manifest
@@ -789,6 +790,7 @@ def run_benchmark(
     completed = [row for row in results if row.get("status") == "completed"]
     avg_score = round(sum(row["comparison"]["score"] for row in completed) / max(1, len(completed)), 1)
     report = {
+        **build_manifest(extra={"benchmark_type": "live_domain", "skip_mcp": skip_mcp}),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "benchmark_path": str(benchmark_path),
         "profile_path": str(profile_path),

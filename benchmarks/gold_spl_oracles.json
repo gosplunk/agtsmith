@@ -1,5 +1,5 @@
 {
-  "variants": ["live_lab", "live_multi_index", "botsv3_single_index", "live_lab_real_profile", "existing_lab"],
+  "variants": ["live_lab", "live_multi_index", "botsv3_single_index", "live_lab_real_profile", "existing_lab", "minimal_ci", "cloud_only"],
   "profile_fixtures": {
     "live_lab": {
       "timestamp_utc": "2026-07-28T00:00:00+00:00",
@@ -270,6 +270,78 @@
             "interesting_field_examples": [
               {"field": "EventCode", "sample_values": ["3"], "count": 10},
               {"field": "DestinationIp", "sample_values": ["10.0.0.20"], "count": 10}
+            ]
+          }
+        }
+      }
+    },
+    "minimal_ci": {
+      "timestamp_utc": "2026-07-28T00:00:00+00:00",
+      "indexes": [
+        {
+          "index": "agtsmith_test",
+          "sourcetypes": ["auth.log", "linux_secure", "XmlWinEventLog", "access_combined"]
+        }
+      ],
+      "sourcetype_to_indexes": {
+        "auth.log": ["agtsmith_test"],
+        "linux_secure": ["agtsmith_test"],
+        "XmlWinEventLog": ["agtsmith_test"],
+        "access_combined": ["agtsmith_test"]
+      },
+      "index_sourcetype_field_inventory": {
+        "agtsmith_test": {
+          "auth.log": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "XmlWinEventLog": {
+            "interesting_field_examples": [
+              {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+              {"field": "EventCode", "sample_values": ["4625"], "count": 10}
+            ]
+          }
+        }
+      }
+    },
+    "cloud_only": {
+      "timestamp_utc": "2026-07-28T00:00:00+00:00",
+      "indexes": [
+        {
+          "index": "aws_prod",
+          "sourcetypes": ["aws:cloudtrail"]
+        },
+        {
+          "index": "o365_prod",
+          "sourcetypes": ["o365:management:activity"]
+        }
+      ],
+      "index_aliases": {
+        "main": "aws_prod",
+        "aws": "aws_prod",
+        "cloudtrail": "aws_prod"
+      },
+      "sourcetype_to_indexes": {
+        "aws:cloudtrail": ["aws_prod"],
+        "o365:management:activity": ["o365_prod"]
+      },
+      "index_sourcetype_field_inventory": {
+        "aws_prod": {
+          "aws:cloudtrail": {
+            "interesting_field_examples": [
+              {"field": "eventSource", "sample_values": ["iam.amazonaws.com"], "count": 10},
+              {"field": "eventName", "sample_values": ["CreateUser"], "count": 10},
+              {"field": "sourceIPAddress", "sample_values": ["203.0.113.10"], "count": 10}
+            ]
+          }
+        },
+        "o365_prod": {
+          "o365:management:activity": {
+            "interesting_field_examples": [
+              {"field": "Operation", "sample_values": ["UserLoggedIn"], "count": 10},
+              {"field": "UserId", "sample_values": ["alice@example.com"], "count": 10}
             ]
           }
         }
@@ -594,6 +666,73 @@
         "4625.*linux_secure"
       ],
       "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "failed_login_activity_minimal_ci",
+      "intent": "failed_login_activity",
+      "variant": "minimal_ci",
+      "question": "Show failed logon activity in the last 24 hours",
+      "required_substrings": [
+        "eval platform=\"linux\"",
+        "4625",
+        "index=agtsmith_test"
+      ],
+      "forbidden_patterns": [
+        "linux_secure.*4625",
+        "4625.*linux_secure"
+      ],
+      "min_branches": 2,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "linux_auth_failures_minimal_ci",
+      "intent": "linux_auth_failures",
+      "variant": "minimal_ci",
+      "question": "Show linux auth failures in the last 24 hours",
+      "required_substrings": [
+        "Failed password",
+        "index=agtsmith_test"
+      ],
+      "forbidden_patterns": [
+        "4625",
+        "EventCode=4625"
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "aws_cloudtrail_activity_cloud_only",
+      "intent": "aws_cloudtrail_activity",
+      "variant": "cloud_only",
+      "question": "Show AWS CloudTrail API activity in the last 24 hours",
+      "required_substrings": [
+        "index=aws_prod",
+        "aws:cloudtrail",
+        "stats"
+      ],
+      "forbidden_patterns": [
+        "index=main",
+        "index=linux",
+        "4625"
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "failed_login_activity_live_multi_index_forbidden_mix",
+      "intent": "failed_login_activity",
+      "variant": "live_multi_index",
+      "question": "Show failed logon activity in the last 24 hours",
+      "required_substrings": [
+        "index=soc_linux",
+        "4625"
+      ],
+      "forbidden_patterns": [
+        "linux_secure[^|\\]]*(?:4625|4624|eventcode=4625|eventid=4625)",
+        "(?:4625|4624|eventcode=4625|eventid=4625)[^|\\]]*linux_secure"
+      ],
+      "min_branches": 2,
       "allow_zero_rows": true
     }
   ]

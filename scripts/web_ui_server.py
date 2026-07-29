@@ -62,7 +62,15 @@ from ollama_ops_monitor import (
     collect_ops_snapshot,
     ollama_log_config_status,
 )
-from environment_profile import load_environment_profile, suggest_domains_for_question
+from environment_profile import (
+    INDEX_ALIASES_OVERRIDE_PATH,
+    build_index_alias_map,
+    infer_index_aliases_from_profile,
+    load_environment_profile,
+    load_index_alias_overrides,
+    save_index_alias_overrides,
+    suggest_domains_for_question,
+)
 from investigation_playbooks import playbook_for_intent, playbook_target_order, playbook_targets_for_intent
 from runtime_config import (
     DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER,
@@ -8775,6 +8783,16 @@ APP_HTML = """<!doctype html>
       const gaps = [];
       const crossPlatform = source.includes('append [') || new Set(platforms).size > 1;
       if (crossPlatform) coverageStatus = rows > 0 ? 'Cross-platform coverage attempted' : 'Cross-platform coverage attempted with no evidence';
+      const branchStatus = Array.isArray(result?.platform_coverage?.branch_status) ? result.platform_coverage.branch_status : [];
+      if (branchStatus.length) {
+        const branchNotes = branchStatus.map((row) => {
+          const platform = String(row?.platform || 'unknown');
+          const branchRows = Number(row?.rows_returned || 0);
+          return branchRows > 0 ? `${platform}: ${branchRows} row(s)` : `${platform}: no rows`;
+        });
+        coverageStatus = `${coverageStatus} (${branchNotes.join('; ')})`;
+      }
+      if (result?.platform_coverage?.zero_row_warning) gaps.push('All queried platform branches returned zero rows in this time window.');
       if (summaryText.includes('windows security logon failures were queried') || summaryText.includes('no windows')) gaps.push('Windows coverage was queried but returned no matching evidence in this time window.');
       if (summaryText.includes('visibility gap') || summaryText.includes('indexing issue') || summaryText.includes('data or indexing issue')) gaps.push('The investigation narrative indicates a telemetry or indexing visibility concern.');
       return {
@@ -15092,6 +15110,18 @@ def _configure_page_body() -> str:
             <div class="cfg-note">Run again only when Splunk data changes materially: new indexes, sourcetypes, tags, or after reconnecting MCP to a different environment.</div>
           </div>
         </div>
+        <div class="cfg-section-card accent-ground" style="margin-top:14px;">
+          <h3 class="cfg-section-title" style="margin-top:0;">Index Alias Mapping</h3>
+          <p class="cfg-help">Map legacy or logical index names (for example <code>windows</code>, <code>main</code>) to the canonical indexes discovered in your Splunk environment. Aliases apply immediately to SPL generation and validation.</p>
+          <label class="cfg-model-label" for="cfg-index-alias-json">Alias map (JSON object)</label>
+          <textarea id="cfg-index-alias-json" class="cfg-row textarea cfg-field" rows="6" placeholder='{"windows":"prod_win","main":"aws_prod"}'></textarea>
+          <div class="cfg-actions">
+            <button id="cfg-index-alias-load" class="btn-secondary" type="button">Load Aliases</button>
+            <button id="cfg-index-alias-save" type="button">Save Aliases</button>
+            <span id="cfg-index-alias-status" class="cfg-status">Not loaded.</span>
+          </div>
+          <pre id="cfg-index-alias-effective" class="cfg-pre">Effective aliases will appear here.</pre>
+        </div>
       </div>
       <aside class="cfg-ground-aside">
         <div class="cfg-section-card">
@@ -16704,6 +16734,54 @@ def _configure_page_body() -> str:
       await cfgPollEnvRefresh();
     };
   }
+  async function cfgLoadIndexAliases(){
+    const status = cfg$('cfg-index-alias-status');
+    const resp = await fetch('/api/environment/index-aliases');
+    const data = await resp.json();
+    if(!resp.ok){
+      if(status) status.textContent = data.error || `load failed (${resp.status})`;
+      return;
+    }
+    const overrides = data.overrides || {};
+    const effective = data.effective_aliases || {};
+    if(cfg$('cfg-index-alias-json')){
+      cfg$('cfg-index-alias-json').value = JSON.stringify(overrides, null, 2);
+    }
+    if(cfg$('cfg-index-alias-effective')){
+      cfg$('cfg-index-alias-effective').textContent = JSON.stringify(effective, null, 2);
+    }
+    if(status) status.textContent = `Loaded ${Object.keys(overrides).length} override(s); ${Object.keys(effective).length} effective alias(es).`;
+  }
+  if(cfg$('cfg-index-alias-load')){
+    cfg$('cfg-index-alias-load').onclick = cfgLoadIndexAliases;
+  }
+  if(cfg$('cfg-index-alias-save')){
+    cfg$('cfg-index-alias-save').onclick = async () => {
+      const status = cfg$('cfg-index-alias-status');
+      let aliases = {};
+      try {
+        aliases = JSON.parse(String(cfg$('cfg-index-alias-json')?.value || '{}'));
+      } catch (err) {
+        if(status) status.textContent = `Invalid JSON: ${err}`;
+        return;
+      }
+      const resp = await fetch('/api/environment/index-aliases', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({aliases})
+      });
+      const data = await resp.json();
+      if(!resp.ok){
+        if(status) status.textContent = data.error || `save failed (${resp.status})`;
+        return;
+      }
+      if(cfg$('cfg-index-alias-effective')){
+        cfg$('cfg-index-alias-effective').textContent = JSON.stringify(data.effective_aliases || {}, null, 2);
+      }
+      if(status) status.textContent = data.saved_path ? `Saved aliases to ${data.saved_path}` : 'Aliases saved.';
+    };
+  }
+  cfgLoadIndexAliases().catch(() => {});
   cfg$('cfg-edge-save').onclick = async () => { await cfgSave('edge'); };
   cfg$('cfg-edge-validate').onclick = cfgValidateEdge;
   cfg$('cfg-validate').onclick = cfgValidate;
@@ -20826,6 +20904,49 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(HTTPStatus.OK, payload)
 
+    def _api_environment_index_aliases_get(self) -> None:
+        profile = load_environment_profile(ENV_PROFILE_PATH)
+        overrides = load_index_alias_overrides()
+        effective = build_index_alias_map(profile) if profile else overrides
+        self._json(
+            HTTPStatus.OK,
+            {
+                "override_path": str(INDEX_ALIASES_OVERRIDE_PATH),
+                "overrides": overrides,
+                "effective_aliases": effective,
+                "profile_index_aliases": profile.get("index_aliases", {}) if isinstance(profile, dict) else {},
+                "inferred_aliases": infer_index_aliases_from_profile(profile) if profile else {},
+            },
+        )
+
+    def _api_environment_index_aliases_post(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except Exception as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": f"invalid_json:{type(exc).__name__}"})
+            return
+        raw_aliases = payload.get("aliases", payload)
+        if not isinstance(raw_aliases, dict):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "aliases_must_be_object"})
+            return
+        cleaned: dict[str, str] = {}
+        for alias, canonical in raw_aliases.items():
+            alias_name = str(alias).strip().lower()
+            canonical_name = str(canonical).strip()
+            if alias_name and canonical_name:
+                cleaned[alias_name] = canonical_name
+        path = save_index_alias_overrides(cleaned)
+        profile = load_environment_profile(ENV_PROFILE_PATH)
+        self._json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "saved_path": str(path),
+                "overrides": cleaned,
+                "effective_aliases": build_index_alias_map(profile) if profile else cleaned,
+            },
+        )
+
     def _api_environment_hint(self, parsed: Any) -> None:
         query = parse_qs(parsed.query)
         question = str(query.get("question", [""])[0]).strip()
@@ -21026,6 +21147,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/environment/profile":
             self._api_environment_profile()
+            return
+        if parsed.path == "/api/environment/index-aliases":
+            self._api_environment_index_aliases_get()
             return
         if parsed.path == "/api/environment/hint":
             self._api_environment_hint(parsed)
@@ -21305,6 +21429,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._api_environment_wipe_refresh_post()
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        if parsed.path == "/api/environment/index-aliases":
+            if not self._require_auth(api_mode=True):
+                return
+            try:
+                self._api_environment_index_aliases_post()
             except Exception as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
             return

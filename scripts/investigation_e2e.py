@@ -16,6 +16,7 @@ from http.cookiejar import CookieJar
 from pathlib import Path
 
 from runtime_config import UI_ENV_PATH, parse_env_file, write_env_file
+from spl_autonomy_manifest import build_manifest, write_run_manifest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT_ROOT = PROJECT_ROOT / "artifacts" / "spl_autonomy"
@@ -416,10 +417,12 @@ def main() -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = out_root / "runs" / stamp
     run_dir.mkdir(parents=True, exist_ok=True)
+    write_run_manifest(run_dir, extra={"check": "investigation_e2e"})
     report_path = run_dir / "investigation_e2e_report.json"
     screenshot_path = run_dir / "investigation_e2e_failure.png"
 
     report: dict[str, object] = {
+        **build_manifest(extra={"check": "investigation_e2e"}),
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "base_url": base_url,
         "question": FAILED_LOGON_QUESTION,
