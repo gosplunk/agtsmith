@@ -37,21 +37,22 @@ def main() -> int:
     parser.add_argument("--threshold", type=float, default=0.02)
     args = parser.parse_args()
 
-    current = REPO_ROOT / "docs/images/screenshots" / f"v{args.version}"
+    version_dir = args.version if str(args.version).startswith("v") else f"v{args.version}"
+    current = REPO_ROOT / "docs/images/screenshots" / version_dir
     if not current.is_dir():
         print(f"Missing {current}", file=sys.stderr)
         return 1
 
     baseline_name = args.baseline
     if not baseline_name:
-        # default: try v1.4.1 upstream screenshots
-        baseline_name = "v1.4.1"
+        # default: compare against prior README screenshot set (override with --baseline)
+        baseline_name = "v1.5.1"
     baseline = REPO_ROOT / "docs/images/screenshots" / baseline_name
     if not baseline.is_dir():
         print(f"No baseline at {baseline} — skipping diff", file=sys.stderr)
         return 0
 
-    diff_dir = REPO_ROOT / "output/playwright/diff" / f"v{args.version}"
+    diff_dir = REPO_ROOT / "output/playwright/diff" / version_dir
     failures = 0
     for png in sorted(current.glob("*.png")):
         ref = baseline / png.name

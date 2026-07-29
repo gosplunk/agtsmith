@@ -78,20 +78,20 @@ LangGraph no longer works alone for continuity. The live product now persists a 
 - the Investigation Timeline can show how evidence and confidence changed over time
 
 ## 4. Current Model Architecture
-The current SPL path is intentionally split across specialized roles.
+The current SPL path is intentionally split across specialized roles (`v1.5.1` defaults).
 
 Primary model roles:
-- `Planner`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
-- `SPL Writer`: `deepseek-coder-v2:lite`
-- `Query Repair`: `deepseek-coder-v2:lite`
+- `Planner`: `TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M` (fallback: `ministral-3:3b`)
+- `SPL Writer` / `Query Repair`: `granite4:3b`
 - `Security Review / Evidence Review / Continuation Review / Final Summary`: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
-- `Peer Review`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
+- `Peer Review`: `gemma3:4b` (both peer slots)
 
 Current reasoning for that split:
-- Qwen is better at intent interpretation and adjudication between competing plans
-- DeepSeek-Coder is better at practical query composition
+- Ministral-3B-Reasoning is better at intent interpretation and structured search planning
+- Granite 4 is better at practical SPL composition and repair under RAG grounding
 - Foundation-Sec is better at security-oriented critique, evidence judgment, continuation decisions, and analyst-facing security summaries
-- deterministic validation is still trusted more than either model
+- Gemma 3 provides US peer diversity when writer and security reviewer disagree
+- deterministic validation is still trusted more than any model
 
 This keeps the project from asking one model to:
 - understand the question

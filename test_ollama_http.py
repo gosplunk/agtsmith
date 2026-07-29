@@ -3,7 +3,7 @@ import json
 from scripts.runtime_config import get_ollama_host
 
 OLLAMA_HOST = get_ollama_host()
-MODEL_NAME = "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+MODEL_NAME = "granite4:3b"
 
 payload = {
     "model": MODEL_NAME,

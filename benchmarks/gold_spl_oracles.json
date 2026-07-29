@@ -1,0 +1,550 @@
+{
+  "variants": ["live_lab", "live_multi_index", "botsv3_single_index", "live_lab_real_profile", "existing_lab"],
+  "profile_fixtures": {
+    "live_lab": {
+      "timestamp_utc": "2026-07-28T00:00:00+00:00",
+      "indexes": [
+        {
+          "index": "soc_linux",
+          "sourcetypes": ["linux_secure", "auth.log", "access_combined"]
+        },
+        {
+          "index": "soc_windows",
+          "sourcetypes": ["XmlWinEventLog:Security", "XmlWinEventLog"]
+        }
+      ],
+      "sourcetype_to_indexes": {
+        "linux_secure": ["soc_linux"],
+        "auth.log": ["soc_linux"],
+        "access_combined": ["soc_linux"],
+        "XmlWinEventLog:Security": ["soc_windows"],
+        "XmlWinEventLog": ["soc_windows"]
+      },
+      "index_sourcetype_field_inventory": {
+        "soc_linux": {
+          "linux_secure": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "auth.log": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "access_combined": {
+            "interesting_field_examples": [
+              {"field": "clientip", "sample_values": ["10.0.0.5"], "count": 10},
+              {"field": "status", "sample_values": ["404"], "count": 10}
+            ]
+          }
+        },
+        "soc_windows": {
+          "XmlWinEventLog:Security": {
+            "interesting_field_examples": [
+              {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+              {"field": "IpAddress", "sample_values": ["10.0.0.5"], "count": 10},
+              {"field": "EventCode", "sample_values": ["4625"], "count": 10}
+            ]
+          }
+        }
+      }
+    },
+    "live_multi_index": {
+      "timestamp_utc": "2026-07-28T00:00:00+00:00",
+      "indexes": [
+        {
+          "index": "soc_linux",
+          "sourcetypes": ["linux_secure", "auth.log", "access_combined", "apache:error"]
+        },
+        {
+          "index": "soc_windows",
+          "sourcetypes": ["XmlWinEventLog:Security", "XmlWinEventLog"]
+        }
+      ],
+      "sourcetype_to_indexes": {
+        "linux_secure": ["soc_linux"],
+        "auth.log": ["soc_linux"],
+        "access_combined": ["soc_linux"],
+        "apache:error": ["soc_linux"],
+        "XmlWinEventLog:Security": ["soc_windows"],
+        "XmlWinEventLog": ["soc_windows"]
+      },
+      "index_sourcetype_field_inventory": {
+        "soc_linux": {
+          "linux_secure": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "auth.log": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "access_combined": {
+            "interesting_field_examples": [
+              {"field": "clientip", "sample_values": ["10.0.0.5"], "count": 10},
+              {"field": "status", "sample_values": ["404"], "count": 10}
+            ]
+          }
+        },
+        "soc_windows": {
+          "XmlWinEventLog:Security": {
+            "interesting_field_examples": [
+              {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+              {"field": "IpAddress", "sample_values": ["10.0.0.5"], "count": 10},
+              {"field": "EventCode", "sample_values": ["4625"], "count": 10}
+            ]
+          }
+        }
+      }
+    },
+    "botsv3_single_index": {
+      "timestamp_utc": "2026-07-28T00:00:00+00:00",
+      "indexes": [
+        {
+          "index": "botsv3",
+          "sourcetypes": ["linux_secure", "XmlWinEventLog", "WinEventLog:Security", "access_combined"]
+        }
+      ],
+      "sourcetype_to_indexes": {
+        "linux_secure": ["botsv3"],
+        "XmlWinEventLog": ["botsv3"],
+        "WinEventLog:Security": ["botsv3"],
+        "access_combined": ["botsv3"]
+      },
+      "index_sourcetype_field_inventory": {
+        "botsv3": {
+          "linux_secure": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "XmlWinEventLog": {
+            "interesting_field_examples": [
+              {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+              {"field": "EventCode", "sample_values": ["4625"], "count": 10}
+            ]
+          },
+          "access_combined": {
+            "interesting_field_examples": [
+              {"field": "clientip", "sample_values": ["10.0.0.5"], "count": 10},
+              {"field": "status", "sample_values": ["404"], "count": 10}
+            ]
+          }
+        }
+      }
+    },
+    "live_lab_real_profile": {
+      "timestamp_utc": "2026-07-28T00:00:00+00:00",
+      "indexes": [
+        {
+          "index": "linux",
+          "sourcetypes": ["auth.log", "linux_secure", "syslog", "access_combined"]
+        },
+        {
+          "index": "botsv3",
+          "sourcetypes": ["linux_secure", "XmlWinEventLog", "access_combined", "stream:dns", "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"]
+        }
+      ],
+      "sourcetype_to_indexes": {
+        "auth.log": ["linux"],
+        "linux_secure": ["linux", "botsv3"],
+        "syslog": ["linux"],
+        "access_combined": ["linux", "botsv3"],
+        "XmlWinEventLog": ["botsv3"],
+        "stream:dns": ["botsv3"],
+        "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational": ["botsv3"]
+      },
+      "index_sourcetype_field_inventory": {
+        "linux": {
+          "auth.log": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "linux_secure": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          }
+        },
+        "botsv3": {
+          "linux_secure": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "XmlWinEventLog": {
+            "interesting_field_examples": [
+              {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+              {"field": "EventCode", "sample_values": ["4625"], "count": 10}
+            ]
+          }
+        }
+      }
+    },
+    "existing_lab": {
+      "timestamp_utc": "2026-07-28T00:00:00+00:00",
+      "indexes": [
+        {
+          "index": "linux",
+          "sourcetypes": ["auth.log", "linux_secure", "syslog", "access_combined"]
+        },
+        {
+          "index": "botsv3",
+          "sourcetypes": ["linux_secure", "XmlWinEventLog", "access_combined", "stream:dns", "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"]
+        }
+      ],
+      "sourcetype_to_indexes": {
+        "auth.log": ["linux"],
+        "linux_secure": ["linux", "botsv3"],
+        "syslog": ["linux"],
+        "access_combined": ["linux", "botsv3"],
+        "XmlWinEventLog": ["botsv3"],
+        "stream:dns": ["botsv3"],
+        "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational": ["botsv3"]
+      },
+      "index_sourcetype_field_inventory": {
+        "linux": {
+          "auth.log": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "linux_secure": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "access_combined": {
+            "interesting_field_examples": [
+              {"field": "clientip", "sample_values": ["10.0.0.5"], "count": 10},
+              {"field": "status", "sample_values": ["404"], "count": 10}
+            ]
+          }
+        },
+        "botsv3": {
+          "linux_secure": {
+            "interesting_field_examples": [
+              {"field": "user", "sample_values": ["root"], "count": 10},
+              {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10}
+            ]
+          },
+          "XmlWinEventLog": {
+            "interesting_field_examples": [
+              {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+              {"field": "EventCode", "sample_values": ["4625"], "count": 10}
+            ]
+          },
+          "access_combined": {
+            "interesting_field_examples": [
+              {"field": "clientip", "sample_values": ["10.0.0.5"], "count": 10},
+              {"field": "status", "sample_values": ["404"], "count": 10}
+            ]
+          },
+          "stream:dns": {
+            "interesting_field_examples": [
+              {"field": "query", "sample_values": ["example.com"], "count": 10},
+              {"field": "reply_code", "sample_values": ["NOERROR"], "count": 10}
+            ]
+          },
+          "XmlWinEventLog:Microsoft-Windows-Sysmon/Operational": {
+            "interesting_field_examples": [
+              {"field": "EventCode", "sample_values": ["3"], "count": 10},
+              {"field": "DestinationIp", "sample_values": ["10.0.0.20"], "count": 10}
+            ]
+          }
+        }
+      }
+    }
+  },
+  "oracles": [
+    {
+      "id": "failed_login_activity_live_lab",
+      "intent": "failed_login_activity",
+      "variant": "live_lab",
+      "question": "Show failed logon activity in the last 24 hours",
+      "required_substrings": [
+        "eval platform=\"linux\"",
+        "4625",
+        "stats count by platform",
+        "index=soc_linux"
+      ],
+      "forbidden_patterns": [
+        "linux_secure.*4625",
+        "4625.*linux_secure"
+      ],
+      "min_branches": 2,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "failed_login_activity_botsv3_single_index",
+      "intent": "failed_login_activity",
+      "variant": "botsv3_single_index",
+      "question": "Show failed logon activity in the last 24 hours",
+      "required_substrings": [
+        "eval platform=\"linux\"",
+        "4625",
+        "stats count by platform",
+        "index=botsv3"
+      ],
+      "forbidden_patterns": [
+        "linux_secure.*4625",
+        "4625.*linux_secure"
+      ],
+      "min_branches": 2,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "linux_auth_failures_live_lab",
+      "intent": "linux_auth_failures",
+      "variant": "live_lab",
+      "question": "Show linux auth failures in the last 24 hours",
+      "required_substrings": [
+        "Failed password",
+        "stats count by host",
+        "index=soc_linux"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "linux_auth_failures_botsv3_single_index",
+      "intent": "linux_auth_failures",
+      "variant": "botsv3_single_index",
+      "question": "Show linux auth failures in the last 24 hours",
+      "required_substrings": [
+        "Failed password",
+        "stats count by host",
+        "index=botsv3"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "windows_auth_failures_live_lab",
+      "intent": "windows_auth_failures",
+      "variant": "live_lab",
+      "question": "Show windows auth failures in the last 24 hours",
+      "required_substrings": [
+        "4625",
+        "index=soc_windows",
+        "XmlWinEventLog"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "windows_auth_failures_botsv3_single_index",
+      "intent": "windows_auth_failures",
+      "variant": "botsv3_single_index",
+      "question": "Show windows auth failures in the last 24 hours",
+      "required_substrings": [
+        "4625",
+        "index=botsv3",
+        "XmlWinEventLog"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "linux_privilege_escalation_live_lab",
+      "intent": "linux_privilege_escalation",
+      "variant": "live_lab",
+      "question": "Show linux privilege escalation attempts in the last 24 hours",
+      "required_substrings": [
+        "sudo",
+        "stats count by host",
+        "index=soc_linux"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "linux_privilege_escalation_botsv3_single_index",
+      "intent": "linux_privilege_escalation",
+      "variant": "botsv3_single_index",
+      "question": "Show linux privilege escalation attempts in the last 24 hours",
+      "required_substrings": [
+        "sudo",
+        "stats count by host",
+        "index=botsv3"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "apache_access_top_ips_live_lab",
+      "intent": "apache_access_top_ips",
+      "variant": "live_lab",
+      "question": "Show apache access top ips in the last 24 hours",
+      "required_substrings": [
+        "access_combined",
+        "stats count by clientip",
+        "index=soc_linux"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "apache_access_top_ips_botsv3_single_index",
+      "intent": "apache_access_top_ips",
+      "variant": "botsv3_single_index",
+      "question": "Show apache access top ips in the last 24 hours",
+      "required_substrings": [
+        "access_combined",
+        "stats count by clientip",
+        "index=botsv3"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "failed_login_activity_live_multi_index",
+      "intent": "failed_login_activity",
+      "variant": "live_multi_index",
+      "question": "Show failed logon activity in the last 24 hours",
+      "required_substrings": [
+        "eval platform=\"linux\"",
+        "4625",
+        "stats count by platform",
+        "index=soc_linux"
+      ],
+      "forbidden_patterns": [
+        "linux_secure.*4625",
+        "4625.*linux_secure"
+      ],
+      "min_branches": 2,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "linux_auth_failures_live_multi_index",
+      "intent": "linux_auth_failures",
+      "variant": "live_multi_index",
+      "question": "Show linux auth failures in the last 24 hours",
+      "required_substrings": [
+        "Failed password",
+        "stats count by host",
+        "index=soc_linux"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "windows_auth_failures_live_multi_index",
+      "intent": "windows_auth_failures",
+      "variant": "live_multi_index",
+      "question": "Show windows auth failures in the last 24 hours",
+      "required_substrings": [
+        "4625",
+        "index=soc_windows",
+        "XmlWinEventLog"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "failed_logons_linux_only_real_profile",
+      "intent": "linux_auth_failures",
+      "variant": "live_lab_real_profile",
+      "question": "Failed logons in the last 24 hours",
+      "required_substrings": [
+        "Failed password",
+        "index=linux",
+        "sourcetype=auth.log"
+      ],
+      "forbidden_patterns": [
+        "4625",
+        "EventCode=4625",
+        "EventID=4625",
+        "\\| append \\["
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "linux_auth_failures_existing_lab",
+      "intent": "linux_auth_failures",
+      "variant": "existing_lab",
+      "question": "Show failed SSH login activity in the last 24 hours on my linux systems",
+      "required_substrings": [
+        "Failed password",
+        "index=linux",
+        "auth.log"
+      ],
+      "forbidden_patterns": [
+        "4625",
+        "EventCode=4625"
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "apache_404_spike_existing_lab",
+      "intent": "apache_404_spike",
+      "variant": "existing_lab",
+      "question": "Show 404 spike from Apache access logs in the last 24 hours",
+      "required_substrings": [
+        "404",
+        "access_combined",
+        "timechart"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "apache_access_top_ips_existing_lab",
+      "intent": "apache_access_top_ips",
+      "variant": "existing_lab",
+      "question": "What are the top source IPs hitting our web servers in the last 24 hours?",
+      "required_substrings": [
+        "access_combined",
+        "clientip",
+        "stats"
+      ],
+      "forbidden_patterns": [],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "windows_auth_failures_existing_lab",
+      "intent": "windows_auth_failures",
+      "variant": "existing_lab",
+      "question": "Show Windows failed logon events (EventCode 4625) in the last 24 hours",
+      "required_substrings": [
+        "4625",
+        "index=botsv3",
+        "XmlWinEventLog"
+      ],
+      "forbidden_patterns": [
+        "linux_secure.*4625",
+        "4625.*linux_secure"
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    }
+  ]
+}

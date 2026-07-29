@@ -1,12 +1,12 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.4.1`
+Current release: `v1.5.1`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
 This repository is published as a clean starting point. It ships with example configuration, not live environment secrets or local runtime state.
 
-For a short operator-facing summary of what changed in `v1.4.1`, read [v1.4.1 Release Highlights](docs/project/v1_4_1_delta.md).
+For a short operator-facing summary of what changed in `v1.5.1`, read [v1.5.1 Release Highlights](docs/project/v1_5_1_delta.md).
 
 ## Start Here
 If you are trying to get the platform running for the first time, read the [Initial Setup Guide](docs/runbooks/initial_setup.md) alongside the quick start below.
@@ -52,46 +52,50 @@ Then:
 - run the first investigation
 
 ## Screenshots
-These screenshots reflect the current `v1.4.x` interface. The images below were captured from the `v1.4.0` build and remain representative of `v1.4.1`.
+These screenshots reflect the current `v1.5.1` interface and the split-role model stack (Ministral planner, Granite writer, Gemma peers, Foundation-Sec review).
 
 ### Login
-`v1.4.0` login flow for the analyst console.
+`v1.5.1` login flow for the analyst console.
 
-![A.G.E.N.T. Smith v1.4.0 login](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-login.png)
+![A.G.E.N.T. Smith v1.5.1 login](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-login.png)
 
 ### Investigation Workspace
-`v1.4.0` Splunk-first investigation workflow with a decision-first answer card, confidence-backed recommendation, one primary next action, and inline trust validation.
+`v1.5.1` Splunk-first investigation workflow with a decision-first answer card, confidence-backed recommendation, one primary next action, and inline trust validation.
 
-![A.G.E.N.T. Smith v1.4.0 investigation workspace](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-investigation.png)
+![A.G.E.N.T. Smith v1.5.1 investigation workspace](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-investigation.png)
 
 ### Architecture View
-`v1.4.0` system architecture and role separation view for the bounded Splunk investigation pipeline.
+`v1.5.1` system architecture and role separation view for the bounded Splunk investigation pipeline.
 
-![A.G.E.N.T. Smith v1.4.0 architecture view](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-architecture.png)
+![A.G.E.N.T. Smith v1.5.1 architecture view](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-architecture.png)
 
 ### Data Domains And Personalization
-`v1.4.0` environment-aware Data Domains view showing local index and sourcetype discovery, current coverage, and grounded planning support built from the live Splunk environment.
+`v1.5.1` environment-aware Data Domains view showing local index and sourcetype discovery, current coverage, and grounded planning support built from the live Splunk environment.
 
-![A.G.E.N.T. Smith v1.4.0 Data Domains personalization view](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-data-domains.png)
+![A.G.E.N.T. Smith v1.5.1 Data Domains personalization view](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-data-domains.png)
 
 ### SPL Optimization AI Engine
-`v1.4.0` SPL Optimization AI Engine showing run controls, what changed this run, repository state, and reusable SPL asset workflow.
+`v1.5.1` SPL Optimization AI Engine showing run controls, what changed this run, repository state, and reusable SPL asset workflow.
 
-![A.G.E.N.T. Smith v1.4.0 SPL Optimization AI Engine](docs/images/screenshots/v1.4.0/agtsmith-v1.4.0-learning.png)
+![A.G.E.N.T. Smith v1.5.1 SPL Optimization AI Engine](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-learning.png)
 
 ## How It Works
 The default SPL path is a split-role pipeline:
 
 1. `Planner`
-   - default: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
+   - default: `TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M` (FR / Mistral AI — Ministral-3B-Reasoning)
+   - fallback: `ministral-3:3b`
    - interprets the question and builds a structured search plan
 2. `SPL Writer`
-   - default: `deepseek-coder-v2:lite`
+   - default: `granite4:3b` (US / IBM)
    - turns the plan into bounded read-only SPL
-3. `Security Reviewer`
+3. `Peer Reviewers`
+   - default: `gemma3:4b` (US / Google)
+   - adjudicate writer vs security reviewer when needed
+4. `Security Reviewer`
    - default: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
    - performs security-oriented critique before deterministic validation
-4. `Evidence Reviewer / Final Summary`
+5. `Evidence Reviewer / Final Summary`
    - default: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
    - judges returned evidence quality and produces the analyst-facing narrative
 
@@ -106,12 +110,30 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - Grounded in local environment metadata, Data Domains, and curated SPL references
 - Built to be tuned empirically with benchmarks and evals
 
-## What's New In v1.4.1
+## What's New In v1.5.1
+- promoted **`TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M`** as the default **planner** with **`ministral-3:3b`** fallback after the 24-model planner bake-off
+- kept **`granite4:3b`** as the default SPL **writer** and repair model (94.83 MCP hardening; 94.4 offline RAG)
+- planner structured output now uses Ollama **`/api/chat`** with JSON format and primary→fallback→template retry in LangGraph
+
+## What's New In v1.5.0
+- promoted **`granite4:3b`** as the default SPL writer and repair model; shifted peer reviewers to **`gemma3:4b`**
+- centralized model defaults in `scripts/runtime_config.py` with documented `v1.4.x` rollback constants
+
+## What's New In v1.4.2
+- fixed first-run bootstrap so fresh installs always open `/setup/first-run` instead of an unusable login screen when `SOC_UI_AUTH_INITIALIZED=0` or placeholder example passwords are present
+- updated local Splunk MCP token minting for Splunk MCP Server 1.x encrypted tokens and corrected base64 token parsing in `config/ui.env`
+- improved same-host Docker deploy so the controller can reach local Ollama and Splunk over `127.0.0.1`
+
+<details>
+<summary>What's New In v1.4.1</summary>
+
 - refined `/spl-assets` into a cleaner analyst review workspace with a stable two-column layout, stronger section hierarchy, and better lower-page composition
 - replaced table-embedded SPL scroll boxes with preview-first disclosure so full SPL opens intentionally instead of turning the asset tables into cramped code grids
 - modernized the row-level `View full SPL` control so it reads like a premium inspection chip instead of a generic secondary form button
 - kept the existing dark Splunk-adjacent aesthetic while making the top control layer, left support rail, and main work surface easier to distinguish at a glance
 - hardened the UI regression suite so MCP demo mode and Splunk Web handoff coverage remain reliable when the full test bundle is run together
+
+</details>
 
 <details>
 <summary>What's New In v1.4.0</summary>
@@ -393,23 +415,26 @@ For the current planned-release view, including committed next-step work and kno
 6. `docs/architecture/system_design.md`
 7. `docs/project/next_release_plan.md`
 
-## Default Model Assignments
+## Default Model Assignments (v1.5.1)
 ```bash
-export OLLAMA_MODEL_QUERY_PLANNER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-export OLLAMA_MODEL_QUERY_WRITER="deepseek-coder-v2:lite"
+export OLLAMA_MODEL_QUERY_PLANNER="TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M"
+export OLLAMA_MODEL_QUERY_PLANNER_FALLBACK="ministral-3:3b"
+export OLLAMA_MODEL_QUERY_WRITER="granite4:3b"
+export OLLAMA_MODEL_QUERY_REPAIR="granite4:3b"
 export OLLAMA_MODEL_SECURITY_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 export OLLAMA_MODEL_EVIDENCE_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
-export OLLAMA_MODEL_PEER_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-export OLLAMA_MODEL_PEER_REVIEWER_2="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+export OLLAMA_MODEL_PEER_REVIEWER="gemma3:4b"
+export OLLAMA_MODEL_PEER_REVIEWER_2="gemma3:4b"
 export OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 export OLLAMA_MODEL_FINAL_SUMMARY="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
-export OLLAMA_MODEL_QUERY_REPAIR="deepseek-coder-v2:lite"
 ```
 
 Pull the default local model set:
 ```bash
-ollama pull hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
-ollama pull deepseek-coder-v2:lite
+ollama pull TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M
+ollama pull ministral-3:3b
+ollama pull granite4:3b
+ollama pull gemma3:4b
 ollama pull hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
 ```
 

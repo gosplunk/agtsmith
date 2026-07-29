@@ -12,19 +12,211 @@ DEFAULT_SPLUNK_MCP_URL = "https://127.0.0.1:8089/services/mcp"
 DEFAULT_SPLUNK_BASE_URL = "https://127.0.0.1:8089"
 DEFAULT_EDGE_LLM_ROLE = "edge_router_splitter"
 DEFAULT_EDGE_LLM_TIMEOUT_SEC = "60"
-DEFAULT_MODEL_QUERY_PLANNER = "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-DEFAULT_MODEL_QUERY_WRITER = "deepseek-coder-v2:lite"
+
+# v1.5.x stack — split planner / writer (2026-07-23 bake-off on RTX 1000 Ada).
+# Bake-off winner (artifact): HF EnlistedGhost Ministral-3B-Reasoning Q5_K_M (59.68 avg).
+# Production default: TechyShishy Ministral-3B-Reasoning Q4_K_M — same model family; EnlistedGhost GGUF crashes Ollama here.
+DEFAULT_MODEL_QUERY_PLANNER = "TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M"
+PLANNER_BAKEOFF_WINNER_ARTIFACT = "hf.co/EnlistedGhost/Ministral-3-3B-Reasoning-2512-GGUF:Q5_K_M"
+DEFAULT_MODEL_QUERY_PLANNER_FALLBACK = "ministral-3:3b"
+DEFAULT_MODEL_QUERY_WRITER = "granite4:3b"
+DEFAULT_MODEL_US_PEER = "gemma3:4b"
 DEFAULT_MODEL_REASONING = "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 DEFAULT_MODEL_SECURITY_REVIEWER = DEFAULT_MODEL_REASONING
 DEFAULT_MODEL_EVIDENCE_REVIEWER = DEFAULT_MODEL_REASONING
-DEFAULT_MODEL_PEER_REVIEWER = DEFAULT_MODEL_QUERY_PLANNER
-DEFAULT_MODEL_PEER_REVIEWER_2 = DEFAULT_MODEL_QUERY_PLANNER
+DEFAULT_MODEL_PEER_REVIEWER = DEFAULT_MODEL_US_PEER
+DEFAULT_MODEL_PEER_REVIEWER_2 = DEFAULT_MODEL_US_PEER
 DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER = DEFAULT_MODEL_REASONING
 DEFAULT_MODEL_FINAL_SUMMARY = DEFAULT_MODEL_REASONING
 DEFAULT_MODEL_QUERY_REPAIR = DEFAULT_MODEL_QUERY_WRITER
 
+MODEL_ASSIGNMENT_KEYS = [
+    "OLLAMA_MODEL_QUERY_PLANNER",
+    "OLLAMA_MODEL_QUERY_WRITER",
+    "OLLAMA_MODEL_QUERY_REPAIR",
+    "OLLAMA_MODEL_EVIDENCE_REVIEWER",
+    "OLLAMA_MODEL_SECURITY_REVIEWER",
+    "OLLAMA_MODEL_PEER_REVIEWER",
+    "OLLAMA_MODEL_PEER_REVIEWER_2",
+    "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER",
+    "OLLAMA_MODEL_FINAL_SUMMARY",
+]
+
+# Pulled alongside role assignments but not a separate LangGraph role key.
+MODEL_PULL_EXTRA_KEYS = [
+    "OLLAMA_MODEL_QUERY_PLANNER_FALLBACK",
+]
+
+DEFAULT_MODEL_ASSIGNMENTS: dict[str, str] = {
+    "OLLAMA_MODEL_QUERY_PLANNER": DEFAULT_MODEL_QUERY_PLANNER,
+    "OLLAMA_MODEL_QUERY_PLANNER_FALLBACK": DEFAULT_MODEL_QUERY_PLANNER_FALLBACK,
+    "OLLAMA_MODEL_QUERY_WRITER": DEFAULT_MODEL_QUERY_WRITER,
+    "OLLAMA_MODEL_QUERY_REPAIR": DEFAULT_MODEL_QUERY_REPAIR,
+    "OLLAMA_MODEL_EVIDENCE_REVIEWER": DEFAULT_MODEL_EVIDENCE_REVIEWER,
+    "OLLAMA_MODEL_SECURITY_REVIEWER": DEFAULT_MODEL_SECURITY_REVIEWER,
+    "OLLAMA_MODEL_PEER_REVIEWER": DEFAULT_MODEL_PEER_REVIEWER,
+    "OLLAMA_MODEL_PEER_REVIEWER_2": DEFAULT_MODEL_PEER_REVIEWER_2,
+    "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER": DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER,
+    "OLLAMA_MODEL_FINAL_SUMMARY": DEFAULT_MODEL_FINAL_SUMMARY,
+}
+
+
+def expected_ollama_models(values: dict[str, str] | None = None) -> list[str]:
+    """Unique Ollama tags required for the active or default model stack."""
+    ordered: list[str] = []
+    for key in (*MODEL_ASSIGNMENT_KEYS, *MODEL_PULL_EXTRA_KEYS):
+        configured = str(values.get(key, "")).strip() if values else ""
+        model = configured or str(DEFAULT_MODEL_ASSIGNMENTS.get(key, "")).strip()
+        if model and model not in ordered:
+            ordered.append(model)
+    return ordered
+
+
+MODEL_ROLE_FAMILIES: list[dict[str, object]] = [
+    {
+        "id": "planning",
+        "title": "Planning",
+        "description": "Interpret analyst intent and search strategy before SPL generation.",
+        "accent": "#38bdf8",
+        "stage_count": 2,
+        "core": True,
+        "assignments": [
+            {"env_key": "OLLAMA_MODEL_QUERY_PLANNER", "label": "Reasoning Planner", "primary": True},
+            {"env_key": "OLLAMA_MODEL_QUERY_PLANNER_FALLBACK", "label": "Planner Fallback", "optional": True},
+        ],
+    },
+    {
+        "id": "generation",
+        "title": "Generation",
+        "description": "Write and repair bounded read-only SPL.",
+        "accent": "#14b8a6",
+        "stage_count": 2,
+        "core": True,
+        "assignments": [
+            {
+                "env_key": "OLLAMA_MODEL_QUERY_WRITER",
+                "label": "SPL Writer & Repair",
+                "primary": True,
+                "mirror_keys": ["OLLAMA_MODEL_QUERY_REPAIR"],
+            },
+        ],
+    },
+    {
+        "id": "peer_review",
+        "title": "Peer Review",
+        "description": "Adjudicate writer vs security reviewer when queries stay contested.",
+        "accent": "#f59e0b",
+        "stage_count": 2,
+        "core": True,
+        "assignments": [
+            {
+                "env_key": "OLLAMA_MODEL_PEER_REVIEWER",
+                "label": "Peer Reviewers 1 & 2",
+                "primary": True,
+                "mirror_keys": ["OLLAMA_MODEL_PEER_REVIEWER_2"],
+            },
+        ],
+    },
+    {
+        "id": "analysis",
+        "title": "Analysis & Summary",
+        "description": "Security review, evidence checks, continuation, and final narrative.",
+        "accent": "#a78bfa",
+        "stage_count": 4,
+        "core": False,
+        "assignments": [
+            {
+                "env_key": "OLLAMA_MODEL_SECURITY_REVIEWER",
+                "label": "Review & Summary",
+                "primary": True,
+                "mirror_keys": [
+                    "OLLAMA_MODEL_EVIDENCE_REVIEWER",
+                    "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER",
+                    "OLLAMA_MODEL_FINAL_SUMMARY",
+                ],
+            },
+        ],
+    },
+]
+
+
+def _family_env_keys(family: dict[str, object]) -> list[str]:
+    keys: list[str] = []
+    for assignment in family.get("assignments", []):
+        if not isinstance(assignment, dict):
+            continue
+        env_key = str(assignment.get("env_key", "")).strip()
+        if env_key:
+            keys.append(env_key)
+        for mirror in assignment.get("mirror_keys", []):
+            mirror_key = str(mirror).strip()
+            if mirror_key:
+                keys.append(mirror_key)
+    return keys
+
+
+def apply_model_family_assignments(values: dict[str, str]) -> dict[str, str]:
+    """Expand family-level assignments into all mirrored runtime role keys."""
+    updated = {str(key): str(value).strip() for key, value in values.items()}
+    for family in MODEL_ROLE_FAMILIES:
+        for assignment in family.get("assignments", []):
+            if not isinstance(assignment, dict):
+                continue
+            env_key = str(assignment.get("env_key", "")).strip()
+            if not env_key:
+                continue
+            model = str(updated.get(env_key, "")).strip()
+            if not model:
+                continue
+            for mirror in assignment.get("mirror_keys", []):
+                mirror_key = str(mirror).strip()
+                if mirror_key:
+                    updated[mirror_key] = model
+    return updated
+
+
+def model_stack_summary(values: dict[str, str] | None = None) -> dict[str, object]:
+    """Summarize unique tags, role count, and core vs optional pulls."""
+    source = values or {}
+    expected = expected_ollama_models(source)
+    core_tags: list[str] = []
+    optional_tags: list[str] = []
+    for family in MODEL_ROLE_FAMILIES:
+        family_tags: list[str] = []
+        for env_key in _family_env_keys(family):
+            tag = str(source.get(env_key, "")).strip() or str(DEFAULT_MODEL_ASSIGNMENTS.get(env_key, "")).strip()
+            if tag and tag not in family_tags:
+                family_tags.append(tag)
+        if bool(family.get("core")):
+            core_tags.extend(tag for tag in family_tags if tag not in core_tags)
+        else:
+            optional_tags.extend(tag for tag in family_tags if tag not in optional_tags and tag not in core_tags)
+    role_count = len(MODEL_ASSIGNMENT_KEYS) + len(MODEL_PULL_EXTRA_KEYS)
+    return {
+        "unique_tag_count": len(expected),
+        "role_count": role_count,
+        "core_tags": core_tags,
+        "optional_tags": optional_tags,
+        "families": MODEL_ROLE_FAMILIES,
+    }
+
+# v1.4.x legacy defaults (documented for rollback / upstream parity).
+LEGACY_V14_MODEL_QUERY_PLANNER = "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+LEGACY_V14_MODEL_QUERY_WRITER = "deepseek-coder-v2:lite"
+LEGACY_V14_MODEL_PEER_REVIEWER = LEGACY_V14_MODEL_QUERY_PLANNER
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 UI_ENV_PATH = PROJECT_ROOT / "config" / "ui.env"
+
+# Values that must come from config/ui.env when present — shell exports truncate MCP tokens at '='.
+UI_ENV_PREFERRED_KEYS = frozenset(
+    {
+        "SPLUNK_LAB_BEARER_TOKEN",
+        "SPLUNK_HEC_TOKEN",
+        "SPLUNK_PASS",
+        "SPLUNK_PASSWORD",
+    }
+)
 
 
 def display_path(path: Path) -> str:
@@ -98,12 +290,20 @@ def parse_env_file(path: Path | None = None) -> tuple[list[str], dict[str, str]]
 
 
 def _get_config_value(name: str, default: str = "") -> str:
-    explicit = str(os.getenv(name, "")).strip()
-    if explicit:
-        return explicit
+    env_val = str(os.getenv(name, "")).strip()
     _lines, values = parse_env_file()
-    if name in values:
-        return values[name]
+    file_val = str(values.get(name, "")).strip()
+
+    if name in UI_ENV_PREFERRED_KEYS and file_val:
+        # Parent shells often export a truncated SPLUNK_LAB_BEARER_TOKEN (split at first '=').
+        if not env_val or len(file_val) > len(env_val):
+            return file_val
+        return env_val
+
+    if env_val:
+        return env_val
+    if file_val:
+        return file_val
     return default
 
 

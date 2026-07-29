@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.5.1
+
+- promoted **`TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M`** as the default **planner** after the 24-model RTX 1000 Ada bake-off (Ministral-3B-Reasoning; **`ministral-3:3b`** fallback via `OLLAMA_MODEL_QUERY_PLANNER_FALLBACK`)
+- kept **`granite4:3b`** as the default SPL **writer** and repair model (94.83 MCP hardening, 94.4 offline RAG)
+- planner calls now use Ollama **`/api/chat`** with `format: json`; LangGraph tries primary planner then fallback before deterministic template fallback
+- shared structured Ollama helper in `ollama_client.py`; updated `config/ui.env`, Control Center defaults, Makefile `model-show`, and operator docs
+
+## v1.5.0
+
+- promoted **`granite4:3b`** (US / IBM) as the default SPL writer and repair model after the RTX 1000 Ada bake-off (94.83 MCP hardening, 94.4 offline RAG score)
+- shifted peer reviewers to **`gemma3:4b`** (US / Google); security, evidence, continuation, and summary remain **Foundation-Sec-8B** (US / Foundation)
+- centralized v1.5 model defaults in `scripts/runtime_config.py` with documented `LEGACY_V14_*` rollback constants for the prior Qwen + DeepSeek profile
+- updated `config/ui.env.example`, Control Center model defaults, Makefile `model-show`, and operator docs for the US-primary stack
+
+## v1.4.2
+
+- fixed first-run bootstrap detection so fresh deployments with `SOC_UI_AUTH_INITIALIZED=0` or example placeholder passwords always land on `/setup/first-run` instead of a login screen with unknown credentials
+- hardened local Splunk MCP token minting for Splunk MCP Server 1.x encrypted tokens and corrected token parsing when values contain base64 `=` characters
+- improved same-host Docker deploy connectivity by using host networking for the controller container and exposing PostgreSQL on `127.0.0.1:5432`
+
 ## v1.4.1
 
 - refined the SPL Asset Repository into a cleaner scan-first analyst workspace with a stable two-column layout, stronger visual hierarchy, and better lower-page composition

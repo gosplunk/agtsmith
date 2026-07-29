@@ -53,7 +53,7 @@ Open http://127.0.0.1:8000 → Apps → A.G.E.N.T. Smith → Investigate
 ```bash
 make check
 make spl-hardening-benchmark   # live MCP
-make screenshots SCREENSHOT_VERSION=0.2.0-splunk
+make screenshots SCREENSHOT_VERSION=v1.5.1
 ```
 
 ## 7. KV Store mode (optional)

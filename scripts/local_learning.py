@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from environment_profile import load_environment_profile
+from query_templates import TEMPLATES
 from runtime_config import (
     DEFAULT_MODEL_QUERY_PLANNER,
     DEFAULT_MODEL_QUERY_WRITER,
@@ -43,7 +44,11 @@ ALLOWED_KINDS = {
     "post_result_pivot_hint",
     "spl_pattern_asset",
 }
-BROAD_INTENTS = {"failed_login_activity"}
+BROAD_INTENTS = {
+    template.intent
+    for template in TEMPLATES
+    if "cross_domain" in getattr(template, "tags", ())
+}
 INTENT_TO_DOMAIN = {
     "failed_login_activity": "cross_platform_auth",
     "linux_auth_failures": "linux_auth",

@@ -7,6 +7,8 @@ import json
 import os
 import queue
 import re
+import shlex
+import subprocess
 import threading
 import time
 from collections import deque
@@ -319,6 +321,163 @@ class RemoteLogSource:
             backoff = 1.0
             self._emit_status("reconnecting", detail=f"retry_in={backoff:.1f}s")
             time.sleep(backoff)
+
+
+class LocalLogSource:
+    """Tail local Ollama logs via journalctl, docker logs, or a custom command."""
+
+    def __init__(
+        self,
+        *,
+        command: list[str],
+        params: StreamParams,
+        buffer_size: int = DEFAULT_BUFFER_SIZE,
+    ) -> None:
+        self.command = command
+        self.params = params
+        self.buffer: deque[dict[str, Any]] = deque(maxlen=buffer_size)
+        self.subscribers: dict[int, queue.Queue[dict[str, Any]]] = {}
+        self._lock = threading.Lock()
+        self._next_subscriber_id = 1
+        self._started = False
+        self._stop = False
+        self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen[str] | None = None
+
+    def start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            self._thread = threading.Thread(target=self._run, name="local-ollama-log-source", daemon=True)
+            self._thread.start()
+
+    def subscribe(self) -> tuple[int, queue.Queue[dict[str, Any]]]:
+        q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=2000)
+        with self._lock:
+            sid = self._next_subscriber_id
+            self._next_subscriber_id += 1
+            self.subscribers[sid] = q
+        return sid, q
+
+    def unsubscribe(self, sid: int) -> None:
+        with self._lock:
+            self.subscribers.pop(sid, None)
+
+    def get_recent(self, n: int = 200) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self.buffer)[-max(0, n) :]
+
+    def _emit(self, event: dict[str, Any], *, save_log: bool = False) -> None:
+        if save_log:
+            with self._lock:
+                self.buffer.append(event)
+        with self._lock:
+            subscribers = list(self.subscribers.values())
+        for q in subscribers:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(event)
+                except Exception:
+                    pass
+
+    def _emit_status(self, state: str, detail: str = "") -> None:
+        self._emit(
+            {
+                "type": "status",
+                "state": state,
+                "detail": detail,
+                "ts": utc_now_iso(),
+            },
+            save_log=False,
+        )
+
+    def _emit_error(self, code: str, message: str, *, retry_in_seconds: float | None = None) -> None:
+        self._emit(
+            {
+                "type": "error",
+                "code": code,
+                "message": redact_secrets(message),
+                "retry_in_seconds": retry_in_seconds,
+                "ts": utc_now_iso(),
+            },
+            save_log=False,
+        )
+
+    def _normalize_line_event(self, raw_line: str) -> dict[str, Any]:
+        line = redact_secrets(raw_line.rstrip("\n"))
+        return {
+            "type": "log",
+            "line": line,
+            "level": infer_level(line),
+            "ts": utc_now_iso(),
+            "ingest_ts": utc_now_iso(),
+            "raw": {},
+        }
+
+    def _stream_once(self) -> None:
+        self._emit_status("connecting", detail=" ".join(shlex.quote(part) for part in self.command))
+        self._proc = subprocess.Popen(
+            self.command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert self._proc.stdout is not None
+        self._emit_status("connected", detail="local_log_stream_connected")
+        for raw_line in self._proc.stdout:
+            if self._stop:
+                break
+            entry = self._normalize_line_event(raw_line)
+            if line_matches_filters(entry, level=self.params.level, grep=self.params.grep):
+                self._emit(entry, save_log=True)
+        code = self._proc.wait(timeout=1)
+        if code not in (0, None) and not self._stop:
+            raise RuntimeError(f"local_log_exit_{code}")
+
+    def _run(self) -> None:
+        backoff = 1.0
+        max_backoff = 30.0
+        while not self._stop:
+            try:
+                self._stream_once()
+                if self._stop:
+                    break
+                self._emit_status("disconnected", detail="local_stream_closed")
+            except Exception as exc:
+                self._emit_error("local_stream_exception", str(exc), retry_in_seconds=backoff)
+                self._emit_status("reconnecting", detail=f"retry_in={backoff:.1f}s")
+                time.sleep(backoff)
+                backoff = min(max_backoff, backoff * 2)
+                continue
+            backoff = 1.0
+            self._emit_status("reconnecting", detail=f"retry_in={backoff:.1f}s")
+            time.sleep(backoff)
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+
+class LocalLogSourceRegistry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sources: dict[tuple[str, int, str, str], LocalLogSource] = {}
+
+    def get_source(self, mode: str, command: list[str], params: StreamParams) -> LocalLogSource:
+        key = (mode, params.tail, params.level, params.grep)
+        with self._lock:
+            source = self._sources.get(key)
+            if source is None:
+                source = LocalLogSource(command=command, params=params, buffer_size=DEFAULT_BUFFER_SIZE)
+                source.start()
+                self._sources[key] = source
+            return source
 
 
 class RemoteLogSourceRegistry:

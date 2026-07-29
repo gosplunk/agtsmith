@@ -24,7 +24,7 @@ class QueryTemplate:
 TEMPLATES: tuple[QueryTemplate, ...] = (
     QueryTemplate(
         intent="failed_login_activity",
-        keywords=("failed login", "failed authentication", "authentication failure"),
+        keywords=("failed login", "failed logon", "failed logons", "failed logins", "failed authentication", "authentication failure"),
         query=(
             "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
             "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\" OR \"FAILED SU\") "

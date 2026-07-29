@@ -4,8 +4,8 @@
 This page is the reader's starting point. It does not try to explain the whole platform again. It tells you which document to read next based on what you need.
 
 ## Start Here
-If you want the short explanation of what changed in `v1.4.1`, read:
-- [`docs/project/v1_4_1_delta.md`](/docs/view?path=project/v1_4_1_delta.md)
+If you want the short explanation of what changed in `v1.5.1`, read:
+- [`docs/project/v1_5_1_delta.md`](/docs/view?path=project/v1_5_1_delta.md)
 
 If you want the shortest explanation of what A.G.E.N.T. Smith is, read:
 - [`docs/whitepapers/project_one_page_white_paper.md`](/docs/view?path=whitepapers/project_one_page_white_paper.md)
@@ -32,10 +32,13 @@ If you want the live workflow view in the UI, open:
 - Security engineer or architect:
   - [`docs/whitepapers/technical_deep_dive.md`](/docs/view?path=whitepapers/technical_deep_dive.md)
   - [`docs/architecture/system_design.md`](/docs/view?path=architecture/system_design.md)
+  - [`docs/architecture/two_model_spl_pipeline.md`](/docs/view?path=architecture/two_model_spl_pipeline.md)
+  - [`docs/model_strategy.md`](/docs/view?path=model_strategy.md)
   - [`docs/architecture/network_diagram.md`](/docs/view?path=architecture/network_diagram.md)
 - Operator or installer:
   - [`docs/runbooks/initial_setup.md`](/docs/view?path=runbooks/initial_setup.md)
   - [`docs/runbooks/health_check.md`](/docs/view?path=runbooks/health_check.md)
+  - [`docs/runbooks/laptop_model_profile.md`](/docs/view?path=runbooks/laptop_model_profile.md)
   - [`docs/runbooks/weekly_maintenance.md`](/docs/view?path=runbooks/weekly_maintenance.md)
 
 ## What Exists Today
@@ -46,7 +49,7 @@ If you want the live workflow view in the UI, open:
 - Query audit log showing who ran which investigation
   - admin-only visibility
 - Splunk MCP-backed read-only investigations
-- Multi-model review workflow
+- Multi-model review workflow with split planner / writer roles (`v1.5.1` defaults)
 - Bounded agentic continuation workflow
 - Executed SPL, sampled rows, and model transparency in the UI
 - Data Domains and environment-aware SPL personalization
@@ -65,8 +68,10 @@ If you want the live workflow view in the UI, open:
 2. [`docs/whitepapers/technical_deep_dive.md`](/docs/view?path=whitepapers/technical_deep_dive.md)
 3. [`docs/runbooks/initial_setup.md`](/docs/view?path=runbooks/initial_setup.md)
 4. [`docs/runbooks/health_check.md`](/docs/view?path=runbooks/health_check.md)
-5. [`docs/architecture/system_design.md`](/docs/view?path=architecture/system_design.md)
-6. [`docs/architecture/langgraph_eval_optimization.md`](/docs/view?path=architecture/langgraph_eval_optimization.md)
+5. [`docs/architecture/two_model_spl_pipeline.md`](/docs/view?path=architecture/two_model_spl_pipeline.md)
+6. [`docs/model_strategy.md`](/docs/view?path=model_strategy.md)
+7. [`docs/architecture/system_design.md`](/docs/view?path=architecture/system_design.md)
+8. [`docs/architecture/langgraph_eval_optimization.md`](/docs/view?path=architecture/langgraph_eval_optimization.md)
 
 ## Advanced Material
 The `docs/reference/` tree is the advanced knowledge and RAG support library. It is useful for model grounding and implementation work, but it is not the main reader path for understanding the platform.

@@ -75,7 +75,7 @@ def generate_candidate(model: str, question: str, *, rag_context: str = "", time
     }
 
 
-def score_with_policy(candidate: dict[str, Any], required_terms: list[str]) -> tuple[int, dict[str, Any]]:
+def score_with_policy(candidate: dict[str, Any], required_terms: list[str], *, question: str = "") -> tuple[int, dict[str, Any]]:
     base_score, base_notes = score_candidate(candidate, required_terms)
     query_args = {
         "query": candidate.get("query", ""),
@@ -135,8 +135,8 @@ def main() -> int:
         for run_idx in range(1, max(1, args.runs) + 1):
             vanilla = generate_candidate(args.model, question, rag_context="")
             rag = generate_candidate(args.model, question, rag_context=rag_ctx)
-            v_score, v_meta = score_with_policy(vanilla, terms)
-            r_score, r_meta = score_with_policy(rag, terms)
+            v_score, v_meta = score_with_policy(vanilla, terms, question=question)
+            r_score, r_meta = score_with_policy(rag, terms, question=question)
             rows.append(
                 {
                     "case_id": cid,

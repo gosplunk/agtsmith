@@ -1,0 +1,128 @@
+{
+  "version": "1.1",
+  "description": "Profile-driven live-domain SPL benchmark. Gold SPL is rendered at runtime from environment_profile_latest.json — never hardcoded indexes.",
+  "profile_path": "artifacts/environment/environment_profile_latest.json",
+  "render_gold_at_runtime": true,
+  "time_window_default": {
+    "earliest_time": "-24h",
+    "latest_time": "now"
+  },
+  "cases": [
+    {
+      "id": "linux_auth_failures_24h",
+      "theme": "auth",
+      "question": "Show failed SSH login attempts on Linux hosts in the last 24 hours. Identify the top source IPs, usernames targeted, and ports used.",
+      "intent": "linux_auth_failures",
+      "profile_domain_hints": {
+        "platform": "linux",
+        "use_cases": ["linux_auth_failures"],
+        "preferred_sourcetypes": ["auth.log", "linux_secure"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["Failed password", "Invalid user", "stats", "src_ip", "user"],
+      "forbidden_patterns": ["index=\\*", "index=windows", "index=botsv3"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true
+    },
+    {
+      "id": "failed_logons_phrasing_24h",
+      "theme": "auth",
+      "question": "Failed logons in the last 24 hours",
+      "intent": "linux_auth_failures",
+      "profile_domain_hints": {
+        "platform": "linux",
+        "use_cases": ["linux_auth_failures"],
+        "preferred_sourcetypes": ["auth.log", "linux_secure"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["Failed password", "stats"],
+      "forbidden_patterns": ["index=\\*", "4625", "EventCode=4625"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true
+    },
+    {
+      "id": "apache_access_top_ips_24h",
+      "theme": "web",
+      "question": "What are the top source IPs hitting our web servers in the last 24 hours?",
+      "intent": "apache_access_top_ips",
+      "profile_domain_hints": {
+        "platform": "web",
+        "use_cases": ["apache_access_top_ips"],
+        "preferred_sourcetypes": ["access_combined", "apache:access"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["access_combined", "clientip", "stats", "status"],
+      "forbidden_patterns": ["index=\\*", "index=linux"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true
+    },
+    {
+      "id": "web_traffic_phrasing_24h",
+      "theme": "web",
+      "question": "Top web traffic source IPs in the last 24 hours",
+      "intent": "apache_access_top_ips",
+      "profile_domain_hints": {
+        "platform": "web",
+        "use_cases": ["apache_access_top_ips"],
+        "preferred_sourcetypes": ["access_combined", "apache:access"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["access_combined", "stats"],
+      "forbidden_patterns": ["index=\\*"],
+      "allow_zero_rows": true,
+      "min_rows": 0
+    },
+    {
+      "id": "linux_privilege_escalation_24h",
+      "theme": "linux_priv",
+      "question": "Show sudo and privilege escalation activity on Linux hosts in the last 24 hours",
+      "intent": "linux_privilege_escalation",
+      "profile_domain_hints": {
+        "platform": "linux",
+        "use_cases": ["linux_privilege_escalation"],
+        "preferred_sourcetypes": ["auth.log", "linux_secure", "linux_audit"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["sudo", "stats", "actor", "src_ip"],
+      "forbidden_patterns": ["index=\\*", "index=windows", "index=botsv3"],
+      "allow_zero_rows": true,
+      "min_rows": 0
+    },
+    {
+      "id": "windows_failed_logon_4625_24h",
+      "theme": "windows_auth",
+      "question": "Show Windows failed logon events (EventCode 4625) in the last 24 hours",
+      "intent": "windows_auth_failures",
+      "profile_domain_hints": {
+        "platform": "windows",
+        "use_cases": ["windows_auth_failures"],
+        "preferred_sourcetypes": ["xmlwineventlog", "WinEventLog", "xmlwineventlog:security"]
+      },
+      "expected_shape": "table",
+      "required_terms": ["4625", "EventCode", "TargetUserName", "src_ip"],
+      "forbidden_patterns": ["index=\\*", "index=linux", "linux_secure"],
+      "allow_zero_rows": true,
+      "min_rows": 0,
+      "skip_if_no_windows_domain": true
+    },
+    {
+      "id": "apache_404_spike_24h",
+      "theme": "web_404",
+      "question": "Show 404 spike from Apache access logs in the last 24 hours",
+      "intent": "apache_404_spike",
+      "profile_domain_hints": {
+        "platform": "web",
+        "use_cases": ["apache_404_spike"],
+        "preferred_sourcetypes": ["access_combined", "apache:access"]
+      },
+      "expected_shape": "timechart",
+      "required_terms": ["access_combined", "404", "timechart"],
+      "forbidden_patterns": ["index=\\*", "index=linux"],
+      "allow_zero_rows": true,
+      "min_rows": 0
+    }
+  ]
+}

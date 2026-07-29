@@ -1,0 +1,73 @@
+# Logical domain -> physical index/sourcetype mappings per lab layout.
+# Used by scripts/lab_data_generate.py and lab_data_provision.py.
+# Select layout via LAB_DATA_LAYOUT env or --layout CLI.
+
+layouts:
+  existing_lab:
+    description: "Current machine — linux + botsv3 mixed"
+    indexes:
+      linux_auth:
+        index: linux
+        sourcetype: auth.log
+      linux_syslog:
+        index: linux
+        sourcetype: syslog
+      web_access:
+        index: botsv3
+        sourcetype: access_combined
+      windows_auth:
+        index: botsv3
+        sourcetype: XmlWinEventLog
+      linux_secure:
+        index: botsv3
+        sourcetype: linux_secure
+      windows_sysmon:
+        index: botsv3
+        sourcetype: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
+      stream_dns:
+        index: botsv3
+        sourcetype: stream:dns
+
+  multi_index_ideal:
+    description: "Clean platform separation — matches gold oracle live_lab fixture"
+    provision_indexes:
+      - soc_linux
+      - soc_windows
+      - agtsmith_test
+    indexes:
+      linux_auth:
+        index: soc_linux
+        sourcetype: linux_secure
+      linux_syslog:
+        index: soc_linux
+        sourcetype: syslog
+      web_access:
+        index: soc_linux
+        sourcetype: access_combined
+      web_error:
+        index: soc_linux
+        sourcetype: apache:error
+      windows_auth:
+        index: soc_windows
+        sourcetype: XmlWinEventLog:Security
+
+  minimal_ci:
+    description: "Single test index — all sourcetypes in agtsmith_test"
+    provision_indexes:
+      - agtsmith_test
+    indexes:
+      linux_auth:
+        index: agtsmith_test
+        sourcetype: auth.log
+      linux_syslog:
+        index: agtsmith_test
+        sourcetype: syslog
+      web_access:
+        index: agtsmith_test
+        sourcetype: access_combined
+      windows_auth:
+        index: agtsmith_test
+        sourcetype: XmlWinEventLog
+      linux_secure:
+        index: agtsmith_test
+        sourcetype: linux_secure

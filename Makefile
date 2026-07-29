@@ -1,4 +1,4 @@
-.PHONY: help check status snapshot all langgraph-status langgraph-policy-status langgraph-policy-snapshot langgraph-policy-trend langgraph-policy-freshness langgraph-policy-trend-freshness langgraph-policy-trend-anomaly langgraph-docs-check langgraph-artifacts-check langgraph-tool-routing-check langgraph-session-check langgraph-thresholds langgraph-ops langgraph-ops-strict langgraph-run langgraph-demo langgraph-policy-demo langgraph-tool-demo langgraph-metadata-demo langgraph-chain-demo langgraph-session-demo langgraph-demo-ready langgraph-all langgraph-all-quick langgraph-gold-build langgraph-eval-prompts langgraph-topology-eval langgraph-topology-optimize agentic-check agentic-run agentic-demo agentic-session-demo agentic-status agentic-case-report agentic-demo-ready multi-model-run multi-model-check multi-model-demo multi-model-status multi-model-demo-ready model-show model-smoke model-spl-eval model-rag-ab model-spl-quality-deep spl-hardening-benchmark spl-hardening-benchmark-botsv3 spl-hardening-benchmark-botsv3-inventory env-profile-build env-profile-check env-profile-refresh env-profile-tests env-profile-schedule-install env-profile-schedule-show sourcetype-research spl-skillpack-refresh dev ui-dev docker-build docker-up docker-down docker-logs docker-deploy-build docker-deploy-up docker-deploy-down docker-deploy-logs docker-deploy-manual ollama-log-tests tdir-core-tests kvstore-case-tests docs-index report-freshness refresh-reports ops prune-summary prune-snapshot prune-trend prune-freshness prune-dry-run prune-apply prune-ops splunk-app-package splunk-app-install-local splunk-app-symlink-dev screenshots screenshots-diff local-lab-preflight setup-local-ui-env
+.PHONY: help check status snapshot all langgraph-status langgraph-policy-status langgraph-policy-snapshot langgraph-policy-trend langgraph-policy-freshness langgraph-policy-trend-freshness langgraph-policy-trend-anomaly langgraph-docs-check langgraph-artifacts-check langgraph-tool-routing-check langgraph-session-check langgraph-thresholds langgraph-ops langgraph-ops-strict langgraph-run langgraph-demo langgraph-policy-demo langgraph-tool-demo langgraph-metadata-demo langgraph-chain-demo langgraph-session-demo langgraph-demo-ready langgraph-all langgraph-all-quick langgraph-gold-build langgraph-eval-prompts langgraph-topology-eval langgraph-topology-optimize agentic-check agentic-run agentic-demo agentic-session-demo agentic-status agentic-case-report agentic-demo-ready multi-model-run multi-model-check multi-model-demo multi-model-status multi-model-demo-ready model-show model-smoke model-spl-eval model-planner-eval model-planner-eval-hf model-planner-vram-smoke model-rag-ab model-spl-quality-deep spl-hardening-benchmark live-domain-benchmark live-domain-benchmark-offline spl-hardening-benchmark-botsv3 spl-hardening-benchmark-botsv3-inventory check-gold-oracles investigation-e2e spl-autonomy-check spl-autonomy-nightly env-profile-build env-profile-check env-profile-refresh env-profile-tests env-profile-schedule-install env-profile-schedule-show sourcetype-research spl-skillpack-refresh dev ui-dev docker-build docker-up docker-down docker-logs docker-deploy-build docker-deploy-up docker-deploy-down docker-deploy-logs docker-deploy-manual ollama-log-tests tdir-core-tests kvstore-case-tests docs-index report-freshness refresh-reports ops prune-summary prune-snapshot prune-trend prune-freshness prune-dry-run prune-apply prune-ops splunk-app-package splunk-app-install-local splunk-app-symlink-dev screenshots screenshots-diff configure-check configure-screenshots configure-screenshots-diff configure-e2e configure-tag-show configure-tag-record local-lab-preflight setup-local-ui-env
 
 QUESTION ?= Show failed login activity in the last 24 hours
 WRITE_ARTIFACT ?= 1
@@ -12,7 +12,11 @@ AGENTIC_MAX_STEPS ?= 3
 FOCUS_HOST ?=
 SPLUNK_APP_VERSION ?= 0.2.0-splunk
 SPLUNK_HOME ?= /opt/splunk
-SCREENSHOT_VERSION ?= 0.2.0-splunk
+SCREENSHOT_VERSION ?= v1.5.1
+CONFIGURE_UI_TAG ?= configure-ui-dev
+CONFIGURE_UI_BASELINE ?= configure-ui-p0
+CASES ?= benchmarks/spl_cases.json
+OUT ?= artifacts/benchmark
 
 help:
 	@echo "Available targets:"
@@ -63,14 +67,31 @@ help:
 	@echo "  make model-show # print active primary/reasoning model env configuration"
 	@echo "  make model-smoke # run connectivity smoke checks with active model env configuration"
 	@echo "  make model-spl-eval # deterministic benchmark to choose best query-writer model for SPL"
+	@echo "  make model-planner-eval # isolated planner_node benchmark for OLLAMA_MODEL_QUERY_PLANNER"
+	@echo "  make model-planner-eval-hf # HF/new-tag planner benchmark (see hf_exhaustive_research.md)"
+	@echo "  make model-planner-vram-smoke # VRAM smoke for planner candidate tags"
 	@echo "  make model-rag-ab [MODEL='...'] [RUNS=1] # A/B benchmark: vanilla vs RAG-augmented SPL writing"
 	@echo "  make model-spl-quality-deep # deep live-dataset SPL quality pass (Windows/Linux/Apache)"
 	@echo "  make spl-hardening-benchmark # MCP-backed benchmark suite against the current environment"
+	@echo "  make live-domain-benchmark # profile-driven gold vs agtsmith SPL benchmark (live lab MCP)"
 	@echo "  make spl-hardening-benchmark-botsv3 # separate BOTSv3 all-time benchmark suite"
 	@echo "  make spl-hardening-benchmark-botsv3-inventory # planner-backed overview benchmark across the full BOTSv3 sourcetype inventory"
+	@echo "  make check-gold-oracles # offline gold SPL oracle validation (no MCP)"
+	@echo "  make investigation-e2e # Playwright Investigation UI E2E (live lab)"
+	@echo "  make spl-improvement-loop [SPL_IMPROVEMENT_REPORT=...] # classify benchmark failures into learning candidates"
+	@echo "  make spl-offline-docs-index # build SPL RAG index from Splunk Offline Docs search-index.json"
+	@echo "  make spl-benchmark-compare CURRENT=... # compare run JSON against baseline manifest"
+	@echo "  make spl-autonomy-check # check + gold oracles + live-domain offline + pilot_live_20 + investigation E2E"
+	@echo "  make spl-autonomy-nightly # env refresh + autonomy loop with --promote"
 	@echo "  make env-profile-build [FOCUS_HOST=<linux-host>] # rebuild append-only environment profile from Splunk MCP (+ optional host focus)"
 	@echo "  make env-profile-check # fail if environment profile is missing/stale"
 	@echo "  make env-profile-refresh # build + freshness-check environment profile (full first-time field enrichment, then incremental maintenance)"
+	@echo "  make lab-data-refresh-mcp-token # mint MCP token (user mcp) into config/ui.env"
+	@echo "  make lab-data-provision [LAB_DATA_LAYOUT=existing_lab] # create Splunk indexes for layout profile"
+	@echo "  make lab-data-generate [LAB_DATA_LAYOUT=...] [LAB_DATA_HOURS=6] [LAB_DATA_COUNT=50] # inject fresh HEC events"
+	@echo "  make lab-data-verify # MCP verify -24h row counts per benchmark domain"
+	@echo "  make lab-data-bootstrap # provision + generate + verify + env-profile-refresh"
+	@echo "  make lab-data-install # one-shot: HEC + creds + bootstrap (requires sudo -u splunk once)"
 	@echo "  make env-profile-tests # run unit tests for environment profile parsing/validation"
 	@echo "  make env-profile-schedule-install [INTERVAL_MIN=45] # install/update cron refresh every 30-60 min"
 	@echo "  make env-profile-schedule-show # show current cron entry for profile refresh"
@@ -84,6 +105,7 @@ help:
 	@echo "  make docker-logs # tail Dockerized UI logs"
 	@echo "  make docker-deploy-build # build self-contained deployment image with code/docs/artifacts baked in"
 	@echo "  make docker-deploy-up [AGTSMITH_DEPLOY_PORT=8787] # run deployment image without host repo bind mount"
+	@echo "  make docker-deploy-hotpatch # sync repo UI into running deploy container (keeps volume creds)"
 	@echo "  make docker-deploy-down # stop/remove deployment container"
 	@echo "  make docker-deploy-logs # tail deployment container logs"
 	@echo "  make docker-deploy-manual # deploy via plain docker when compose plugin missing"
@@ -106,6 +128,11 @@ help:
 	@echo "  make splunk-app-symlink-dev # symlink splunk_app/agent_smith into SPLUNK_HOME/etc/apps"
 	@echo "  make screenshots [SCREENSHOT_VERSION=...] # Playwright UI captures"
 	@echo "  make screenshots-diff [SCREENSHOT_VERSION=...] # visual diff vs baseline"
+	@echo "  make configure-check # static/API configure page tests"
+	@echo "  make configure-screenshots [CONFIGURE_UI_TAG=...] # configure lane captures"
+	@echo "  make configure-screenshots-diff # diff configure lane screenshots"
+	@echo "  make configure-e2e # Playwright configure flow (live lab)"
+	@echo "  make configure-tag-show / configure-tag-record # Configure UI version tags"
 	@echo "  make local-lab-preflight # curl checks for local Splunk/Ollama/sidecar"
 	@echo "  (override keeps: KEEP_REGRESSION, KEEP_SNAPSHOTS, KEEP_LANGGRAPH)"
 	@echo "  (override policy anomaly threshold: POLICY_MAX_ABS_DELTA)"
@@ -121,10 +148,14 @@ check:
 	@.venv/bin/python scripts/check_query_policy.py
 	@echo "[check] environment profile helper tests"
 	@$(MAKE) --no-print-directory env-profile-tests
+	@echo "[check] gold SPL oracle validation"
+	@$(MAKE) --no-print-directory check-gold-oracles
 	@echo "[check] core tdir enrichment tests"
 	@$(MAKE) --no-print-directory tdir-core-tests
 	@echo "[check] kvstore case backend tests"
 	@$(MAKE) --no-print-directory kvstore-case-tests
+	@echo "[check] configure page tests"
+	@$(MAKE) --no-print-directory configure-check
 	@echo "[check] complete"
 
 status:
@@ -333,15 +364,17 @@ agentic-demo-ready: agentic-check agentic-demo agentic-session-demo agentic-stat
 	@echo "[agentic-demo-ready] complete"
 
 model-show:
-	@echo "=== Model Configuration ==="
-	@echo "OLLAMA_MODEL_PRIMARY=$${OLLAMA_MODEL_PRIMARY:-hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M}"
+	@echo "=== Model Configuration (v1.5.x US-primary defaults) ==="
+	@echo "OLLAMA_MODEL_PRIMARY=$${OLLAMA_MODEL_PRIMARY:-granite4:3b}"
 	@echo "OLLAMA_MODEL_REASONING=$${OLLAMA_MODEL_REASONING:-hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest}"
 	@echo "OLLAMA_MODEL_AGENTIC_SUMMARY=$${OLLAMA_MODEL_AGENTIC_SUMMARY:-$${OLLAMA_MODEL_REASONING:-hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest}}"
-	@echo "OLLAMA_MODEL_QUERY_PLANNER=$${OLLAMA_MODEL_QUERY_PLANNER:-$${OLLAMA_MODEL_PRIMARY:-hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M}}"
-	@echo "OLLAMA_MODEL_QUERY_WRITER=$${OLLAMA_MODEL_QUERY_WRITER:-deepseek-coder-v2:lite}"
+	@echo "OLLAMA_MODEL_QUERY_PLANNER=$${OLLAMA_MODEL_QUERY_PLANNER:-TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M}"
+	@echo "OLLAMA_MODEL_QUERY_PLANNER_FALLBACK=$${OLLAMA_MODEL_QUERY_PLANNER_FALLBACK:-ministral-3:3b}"
+	@echo "OLLAMA_MODEL_QUERY_WRITER=$${OLLAMA_MODEL_QUERY_WRITER:-granite4:3b}"
+	@echo "OLLAMA_MODEL_QUERY_REPAIR=$${OLLAMA_MODEL_QUERY_REPAIR:-granite4:3b}"
 	@echo "OLLAMA_MODEL_SECURITY_REVIEWER=$${OLLAMA_MODEL_SECURITY_REVIEWER:-$${OLLAMA_MODEL_REASONING:-hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest}}"
-	@echo "OLLAMA_MODEL_PEER_REVIEWER=$${OLLAMA_MODEL_PEER_REVIEWER:-$${OLLAMA_MODEL_PRIMARY:-hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M}}"
-	@echo "OLLAMA_MODEL_PEER_REVIEWER_2=$${OLLAMA_MODEL_PEER_REVIEWER_2:-$${OLLAMA_MODEL_PRIMARY:-hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M}}"
+	@echo "OLLAMA_MODEL_PEER_REVIEWER=$${OLLAMA_MODEL_PEER_REVIEWER:-gemma3:4b}"
+	@echo "OLLAMA_MODEL_PEER_REVIEWER_2=$${OLLAMA_MODEL_PEER_REVIEWER_2:-gemma3:4b}"
 	@echo "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER=$${OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER:-$${OLLAMA_MODEL_REASONING:-hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest}}"
 	@echo "OLLAMA_MODEL_FINAL_SUMMARY=$${OLLAMA_MODEL_FINAL_SUMMARY:-$${OLLAMA_MODEL_REASONING:-hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest}}"
 
@@ -355,6 +388,23 @@ model-spl-eval:
 	@.venv/bin/python scripts/evaluate_spl_writer_models.py
 	@echo "[model-spl-eval] complete"
 
+model-planner-eval:
+	@echo "[model-planner-eval] isolated planner_node benchmark (see artifacts/model_eval/planner_bakeoff/)"
+	@.venv/bin/python scripts/evaluate_planner_models.py
+	@echo "[model-planner-eval] complete"
+
+model-planner-eval-hf:
+	@echo "[model-planner-eval-hf] HF/new-tag planner benchmark (see hf_exhaustive_research.md)"
+	@.venv/bin/python scripts/evaluate_planner_models.py \
+		--models "$$(PYTHONPATH=scripts .venv/bin/python -c 'from evaluate_planner_models import DEFAULT_HF_PLANNER_MODELS; print(DEFAULT_HF_PLANNER_MODELS)')" \
+		--skip-models granite3-moe:3b
+	@echo "[model-planner-eval-hf] complete"
+
+model-planner-vram-smoke:
+	@echo "[model-planner-vram-smoke] VRAM smoke for planner candidates"
+	@.venv/bin/python scripts/smoke_planner_vram.py
+	@echo "[model-planner-vram-smoke] complete"
+
 model-rag-ab:
 	@echo "[model-rag-ab] A/B benchmark: vanilla vs RAG-augmented SPL writing"
 	@.venv/bin/python scripts/evaluate_rag_vs_vanilla_spl.py --model "$${MODEL:-$${OLLAMA_MODEL_QUERY_WRITER:-$${OLLAMA_MODEL_PRIMARY:-hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M}}}" --runs "$${RUNS:-1}"
@@ -367,8 +417,84 @@ model-spl-quality-deep:
 
 spl-hardening-benchmark:
 	@echo "[spl-hardening-benchmark] running MCP-backed hardening benchmark"
-	@.venv/bin/python scripts/run_spl_hardening_benchmark.py
+	@echo "[spl-hardening-benchmark] cases=$(CASES) out=$(OUT)"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_spl_hardening_benchmark.py --cases $(CASES) --out-dir $(OUT)
 	@echo "[spl-hardening-benchmark] complete"
+
+LIVE_DOMAIN_BENCHMARK_OUT ?= artifacts/spl_autonomy/live_benchmark
+
+live-domain-benchmark:
+	@echo "[live-domain-benchmark] profile-driven gold vs agtsmith SPL benchmark"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_live_domain_benchmark.py --out-root $(LIVE_DOMAIN_BENCHMARK_OUT) $(LIVE_DOMAIN_BENCHMARK_ARGS)
+	@echo "[live-domain-benchmark] complete"
+
+live-domain-benchmark-offline:
+	@echo "[live-domain-benchmark-offline] offline compare (no MCP execution)"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_live_domain_benchmark.py --out-root $(LIVE_DOMAIN_BENCHMARK_OUT) --skip-mcp
+	@echo "[live-domain-benchmark-offline] complete"
+
+check-gold-oracles:
+	@echo "[check-gold-oracles] validating gold SPL oracles offline"
+	@.venv/bin/python scripts/check_gold_spl_oracles.py
+	@echo "[check-gold-oracles] complete"
+
+check-gold-oracles-live:
+	@echo "[check-gold-oracles-live] validating gold SPL oracles against live environment profile when present"
+	@if [ -f artifacts/environment/environment_profile_latest.json ]; then \
+		PYTHONPATH=.:scripts .venv/bin/python scripts/check_gold_spl_oracles.py \
+			--profile artifacts/environment/environment_profile_latest.json; \
+	else \
+		echo "[check-gold-oracles-live] skip: artifacts/environment/environment_profile_latest.json not found"; \
+	fi
+	@echo "[check-gold-oracles-live] complete"
+
+investigation-e2e:
+	@echo "[investigation-e2e] Playwright Investigation UI flow"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/investigation_e2e.py
+	@echo "[investigation-e2e] complete"
+
+SPL_AUTONOMY_OUT ?= artifacts/spl_autonomy
+SPL_AUTONOMY_CASES ?= benchmarks/pilot_live_20_cases.json
+SPL_IMPROVEMENT_REPORT ?= artifacts/benchmark/spl_hardening_benchmark_latest.json
+
+spl-improvement-loop:
+	@echo "[spl-improvement-loop] classify failures and propose learning candidates"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/spl_improvement_loop.py --report $(SPL_IMPROVEMENT_REPORT)
+	@echo "[spl-improvement-loop] complete"
+
+SPL_OFFLINE_DOCS_SOURCE ?= /home/joehaga/ai_projects/Splunk4Offlinedocs/artifacts/staging/splunk_offline_docs/appserver/static/docs/manifest/search-index.json
+SPL_OFFLINE_DOCS_RAG_OUT ?= artifacts/knowledge/spl_offline_docs_rag_index.json
+
+spl-offline-docs-index:
+	@echo "[spl-offline-docs-index] building SPL-focused RAG index from offline docs"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/build_spl_offline_docs_rag_index.py --source $(SPL_OFFLINE_DOCS_SOURCE) --out $(SPL_OFFLINE_DOCS_RAG_OUT)
+	@echo "[spl-offline-docs-index] complete"
+
+spl-benchmark-compare:
+	@echo "[spl-benchmark-compare] compare current benchmark to baseline"
+	@test -n "$(CURRENT)" || (echo "ERROR: set CURRENT=path/to/spl_hardening_benchmark_latest.json" >&2; exit 1)
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/spl_benchmark_compare.py \
+		--baseline artifacts/spl_autonomy/baseline/spl_hardening_benchmark_latest.json \
+		--current "$(CURRENT)"
+	@echo "[spl-benchmark-compare] complete"
+
+spl-autonomy-check: check check-gold-oracles
+	@echo "[spl-autonomy-check] live-domain offline + pilot hardening subset + investigation E2E"
+	@if [ "$${LAB_DATA_ENABLED:-0}" = "1" ]; then $(MAKE) --no-print-directory lab-data-verify; fi
+	@$(MAKE) --no-print-directory live-domain-benchmark-offline
+	@$(MAKE) --no-print-directory spl-hardening-benchmark CASES=$(SPL_AUTONOMY_CASES) OUT=$(SPL_AUTONOMY_OUT)/check
+	@$(MAKE) --no-print-directory investigation-e2e
+	@echo "[spl-autonomy-check] complete"
+
+spl-autonomy-nightly: env-profile-refresh
+	@if [ "$${LAB_DATA_ENABLED:-0}" = "1" ]; then $(MAKE) --no-print-directory lab-data-generate lab-data-verify; fi
+	@$(MAKE) --no-print-directory spl-autonomy-check
+	@echo "[spl-autonomy-nightly] full closed loop with optional promotion"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/spl_autonomy_loop.py \
+		--out-dir $(SPL_AUTONOMY_OUT) \
+		--cases $(SPL_AUTONOMY_CASES) \
+		--promote
+	@echo "[spl-autonomy-nightly] complete"
 
 spl-hardening-benchmark-botsv3:
 	@echo "[spl-hardening-benchmark-botsv3] running BOTSv3 all-time benchmark"
@@ -383,15 +509,52 @@ spl-hardening-benchmark-botsv3-inventory:
 env-profile-build:
 	@echo "[env-profile-build] rebuilding append-only environment profile from Splunk MCP"
 	@echo "[env-profile-build] focus_host=$(FOCUS_HOST)"
-	@PYTHON_BIN=$$(if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi); \
-	$$PYTHON_BIN scripts/build_environment_profile.py --snapshot --focus-host "$(FOCUS_HOST)"
+	@$(LAB_DATA_RUN) .venv/bin/python scripts/build_environment_profile.py --snapshot --focus-host "$(FOCUS_HOST)"
 	@echo "[env-profile-build] complete"
 
 env-profile-check:
 	@echo "[env-profile-check] checking profile freshness"
-	@PYTHON_BIN=$$(if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi); \
-	$$PYTHON_BIN scripts/check_environment_profile_freshness.py --max-age-minutes 11520
+	@$(LAB_DATA_RUN) .venv/bin/python scripts/check_environment_profile_freshness.py --max-age-minutes 11520
 	@echo "[env-profile-check] complete"
+
+LAB_DATA_LAYOUT ?= existing_lab
+LAB_DATA_HOURS ?= 6
+LAB_DATA_COUNT ?= 50
+LAB_DATA_RUN = .venv/bin/python scripts/lab_data/run_lab_data.py --
+
+lab-data-provision:
+	@echo "[lab-data-provision] creating indexes for layout=$(LAB_DATA_LAYOUT)"
+	@$(LAB_DATA_RUN) .venv/bin/python scripts/lab_data_provision.py --layout "$(LAB_DATA_LAYOUT)"
+	@echo "[lab-data-provision] complete"
+
+lab-data-refresh-mcp-token:
+	@echo "[lab-data-refresh-mcp-token] mint MCP token for user mcp -> config/ui.env"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/lab_data/refresh_mcp_token.py
+	@echo "[lab-data-refresh-mcp-token] complete"
+
+lab-data-generate:
+	@echo "[lab-data-generate] injecting events layout=$(LAB_DATA_LAYOUT) hours=$(LAB_DATA_HOURS) count=$(LAB_DATA_COUNT)"
+	@$(LAB_DATA_RUN) .venv/bin/python scripts/lab_data_generate.py \
+		--layout "$(LAB_DATA_LAYOUT)" --hours "$(LAB_DATA_HOURS)" --count "$(LAB_DATA_COUNT)"
+	@echo "[lab-data-generate] complete"
+
+lab-data-verify:
+	@echo "[lab-data-verify] MCP row check for generated lab data"
+	@$(LAB_DATA_RUN) .venv/bin/python scripts/lab_data_verify.py --layout "$(LAB_DATA_LAYOUT)"
+	@echo "[lab-data-verify] complete"
+
+lab-data-cleanup:
+	@echo "[lab-data-cleanup] removing tagged generator events"
+	@$(LAB_DATA_RUN) .venv/bin/python scripts/lab_data_cleanup.py --layout "$(LAB_DATA_LAYOUT)"
+	@echo "[lab-data-cleanup] complete"
+
+lab-data-bootstrap: lab-data-refresh-mcp-token lab-data-provision lab-data-generate lab-data-verify env-profile-refresh
+	@echo "[lab-data-bootstrap] complete"
+
+lab-data-install:
+	@echo "[lab-data-install] enable HEC, configure ui.env, bootstrap lab data"
+	@bash scripts/lab_data/install_lab_data_prereqs.sh
+	@echo "[lab-data-install] complete"
 
 spl-skillpack-refresh:
 	@echo "[spl-skillpack-refresh] building SPL skillpack"
@@ -404,7 +567,7 @@ env-profile-refresh: env-profile-build env-profile-check spl-skillpack-refresh
 
 env-profile-tests:
 	@echo "[env-profile-tests] running parser/validation unit tests"
-	@.venv/bin/python -m unittest scripts.tests.test_environment_profile scripts.tests.test_spl_query_repair scripts.tests.test_intent_field_contracts
+	@PYTHONPATH=.:scripts .venv/bin/python -m unittest scripts.tests.test_environment_profile scripts.tests.test_spl_query_repair scripts.tests.test_intent_field_contracts scripts.tests.test_langgraph_coherence_wiring scripts.tests.test_lab_data_config scripts.tests.test_setup_hec
 	@echo "[env-profile-tests] complete"
 
 env-profile-schedule-install:
@@ -436,10 +599,10 @@ ui-dev:
 	@if [ -f config/ui.env ]; then \
 		echo "[ui-dev] loading runtime env from config/ui.env"; \
 		set -a; . ./config/ui.env; set +a; \
-		.venv/bin/python scripts/web_ui_server.py --host 0.0.0.0 --port 8787; \
+		PYTHONPATH=.:scripts .venv/bin/python scripts/web_ui_server.py --host 0.0.0.0 --port 8787; \
 	else \
 		echo "[ui-dev] config/ui.env not found; starting with current shell env"; \
-		.venv/bin/python scripts/web_ui_server.py --host 0.0.0.0 --port 8787; \
+		PYTHONPATH=.:scripts .venv/bin/python scripts/web_ui_server.py --host 0.0.0.0 --port 8787; \
 	fi
 
 docker-build:
@@ -467,8 +630,25 @@ docker-deploy-build:
 
 docker-deploy-up:
 	@echo "[docker-deploy-up] starting deployment image on host port $${AGTSMITH_DEPLOY_PORT:-8787}"
-	@AGTSMITH_DEPLOY_PORT=$${AGTSMITH_DEPLOY_PORT:-8787} docker compose -f docker-compose.deploy.yml up -d
-	@echo "[docker-deploy-up] complete"
+	@pids=$$(ss -ltnp 2>/dev/null | awk '/:8787 / {print $$NF}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u); \
+	if [ -n "$$pids" ]; then \
+		echo "[docker-deploy-up] stopping non-docker listener(s) on :8787: $$pids"; \
+		kill $$pids 2>/dev/null || true; \
+		sleep 1; \
+	fi
+	@docker compose -f docker-compose.deploy.yml up -d
+	@echo "[docker-deploy-up] complete (UI creds: docker volume, not host config/ui.env)"
+
+docker-deploy-hotpatch:
+	@echo "[docker-deploy-hotpatch] syncing repo UI code into agtsmith-ui-deploy (preserves /app/config volume creds)"
+	@docker cp scripts/web_ui_server.py agtsmith-ui-deploy:/app/scripts/web_ui_server.py
+	@docker cp scripts/runtime_config.py agtsmith-ui-deploy:/app/scripts/runtime_config.py
+	@docker cp scripts/ollama_ops_monitor.py agtsmith-ui-deploy:/app/scripts/ollama_ops_monitor.py
+	@docker cp scripts/ollama_log_stream.py agtsmith-ui-deploy:/app/scripts/ollama_log_stream.py
+	@docker cp ollama_client.py agtsmith-ui-deploy:/app/ollama_client.py
+	@docker cp VERSION agtsmith-ui-deploy:/app/VERSION
+	@docker restart agtsmith-ui-deploy
+	@echo "[docker-deploy-hotpatch] complete"
 
 docker-deploy-down:
 	@echo "[docker-deploy-down] stopping deployment container"
@@ -604,10 +784,50 @@ splunk-app-symlink-dev:
 
 screenshots:
 	@echo "[screenshots] capturing version $(SCREENSHOT_VERSION)"
-	@python3 .cursor/skills/agtsmith-screenshots/scripts/capture.py --version $(SCREENSHOT_VERSION)
+	@if [ -x .venv/bin/python ]; then .venv/bin/python .cursor/skills/agtsmith-screenshots/scripts/capture.py --version $(SCREENSHOT_VERSION); else python3 .cursor/skills/agtsmith-screenshots/scripts/capture.py --version $(SCREENSHOT_VERSION); fi
 	@echo "[screenshots] complete"
 
 screenshots-diff:
 	@echo "[screenshots-diff] comparing version $(SCREENSHOT_VERSION)"
-	@python3 .cursor/skills/agtsmith-screenshots/scripts/compare.py --version $(SCREENSHOT_VERSION)
+	@if [ -x .venv/bin/python ]; then .venv/bin/python .cursor/skills/agtsmith-screenshots/scripts/compare.py --version $(SCREENSHOT_VERSION); else python3 .cursor/skills/agtsmith-screenshots/scripts/compare.py --version $(SCREENSHOT_VERSION); fi
 	@echo "[screenshots-diff] complete"
+
+CONFIGURE_SCREENSHOT_VERSION ?= v1.5.2-config-p3
+CONFIGURE_PY = $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+
+configure-check:
+	@echo "[configure-check] static + API configure tests"
+	@$(CONFIGURE_PY) -m unittest scripts.tests.test_web_ui_configure scripts.tests.test_configure_ui_tag -v
+	@echo "[configure-check] complete"
+
+configure-screenshots:
+	@echo "[configure-screenshots] tag=$(CONFIGURE_UI_TAG) version=$(CONFIGURE_SCREENSHOT_VERSION)"
+	@CONFIGURE_UI_TAG=$(CONFIGURE_UI_TAG) SCREENSHOT_VERSION=$(CONFIGURE_SCREENSHOT_VERSION) \
+		$(CONFIGURE_PY) .cursor/skills/agtsmith-screenshots/scripts/capture.py \
+		--version $(CONFIGURE_SCREENSHOT_VERSION) \
+		--configure-ui-tag $(CONFIGURE_UI_TAG) \
+		--target-id configure-connect --target-id configure-models \
+		--target-id configure-validate --target-id configure-ground
+	@echo "[configure-screenshots] complete"
+
+configure-screenshots-diff:
+	@echo "[configure-screenshots-diff] current=$(CONFIGURE_SCREENSHOT_VERSION) baseline tag=$(CONFIGURE_UI_BASELINE)"
+	@$(CONFIGURE_PY) .cursor/skills/agtsmith-screenshots/scripts/compare.py \
+		--version $(CONFIGURE_SCREENSHOT_VERSION) \
+		--baseline $(CONFIGURE_UI_BASELINE)
+	@echo "[configure-screenshots-diff] complete"
+
+configure-e2e:
+	@echo "[configure-e2e] tag=$(CONFIGURE_UI_TAG)"
+	@CONFIGURE_UI_TAG=$(CONFIGURE_UI_TAG) $(CONFIGURE_PY) scripts/configure_e2e.py
+	@echo "[configure-e2e] complete"
+
+configure-tag-show:
+	@CONFIGURE_UI_TAG=$(CONFIGURE_UI_TAG) $(CONFIGURE_PY) scripts/configure_ui_tag.py show --tag $(CONFIGURE_UI_TAG)
+
+configure-tag-record:
+	@CONFIGURE_UI_TAG=$(CONFIGURE_UI_TAG) SCREENSHOT_VERSION=$(CONFIGURE_SCREENSHOT_VERSION) \
+		CONFIGURE_UI_TESTS=configure-check $(CONFIGURE_PY) scripts/configure_ui_tag.py record \
+		--tag $(CONFIGURE_UI_TAG) --screenshot-version $(CONFIGURE_SCREENSHOT_VERSION) \
+		--tests configure-check
+	@echo "[configure-tag-record] recorded artifacts/configure_ui/$(CONFIGURE_UI_TAG)/manifest.json"

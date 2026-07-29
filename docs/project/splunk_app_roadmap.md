@@ -1,6 +1,6 @@
 # Splunk App Roadmap (Fork)
 
-Upstream base: **v1.4.1** (`gosplunk/agtsmith`)
+Upstream base: **v1.5.1** (`gosplunk/agtsmith`)
 
 ## Goal
 

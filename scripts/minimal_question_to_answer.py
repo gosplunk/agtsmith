@@ -27,7 +27,7 @@ from query_templates import DEFAULT_TEMPLATE, TEMPLATES, QueryTemplate
 from runtime_config import get_ollama_host, get_runtime_secret, get_splunk_mcp_url
 
 OLLAMA_HOST = get_ollama_host()
-DEFAULT_OLLAMA_MODEL_PRIMARY = "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+DEFAULT_OLLAMA_MODEL_PRIMARY = "granite4:3b"
 DEFAULT_OLLAMA_MODEL_REASONING = "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL_PRIMARY", DEFAULT_OLLAMA_MODEL_PRIMARY)
 OLLAMA_REASONING_MODEL = os.getenv("OLLAMA_MODEL_REASONING", DEFAULT_OLLAMA_MODEL_REASONING)
@@ -36,7 +36,7 @@ OLLAMA_REASONING_MODEL = os.getenv("OLLAMA_MODEL_REASONING", DEFAULT_OLLAMA_MODE
 LAB_BEARER_TOKEN_FALLBACK = "REPLACE_WITH_SPLUNK_MCP_BEARER_TOKEN"
 
 
-def map_question_to_template(question: str) -> QueryTemplate:
+def map_question_to_template(question: str, *, profile_path: str | Path | None = None) -> QueryTemplate:
     """Map a question to one safe query template.
 
     Template list is intentionally small and explicit for baseline lab behavior.
@@ -111,7 +111,35 @@ def map_question_to_template(question: str) -> QueryTemplate:
         for template in TEMPLATES:
             if template.intent == "successful_login_activity":
                 return template
+    if platforms == {"cross_domain"} and "auth_success" in activities:
+        from environment_profile import profile_auth_routing_intent
+
+        routed_intent = profile_auth_routing_intent(
+            question,
+            **({"profile_path": profile_path} if profile_path is not None else {}),
+        )
+        if routed_intent:
+            for template in TEMPLATES:
+                if template.intent == routed_intent:
+                    return template
+        for template in TEMPLATES:
+            if template.intent == "successful_login_activity":
+                return template
     if platforms == {"windows", "linux"} and "auth_failure" in activities:
+        for template in TEMPLATES:
+            if template.intent == "failed_login_activity":
+                return template
+    if platforms == {"cross_domain"} and "auth_failure" in activities:
+        from environment_profile import profile_auth_routing_intent
+
+        routed_intent = profile_auth_routing_intent(
+            question,
+            **({"profile_path": profile_path} if profile_path is not None else {}),
+        )
+        if routed_intent:
+            for template in TEMPLATES:
+                if template.intent == routed_intent:
+                    return template
         for template in TEMPLATES:
             if template.intent == "failed_login_activity":
                 return template
@@ -152,19 +180,19 @@ def map_question_to_template(question: str) -> QueryTemplate:
             best_template = template
             best_score = score
     if best_template is not None:
-        if "windows" in dims.get("platforms", []) and best_template.intent == "successful_login_activity":
+        if "windows" in dims.get("platforms", []) and "linux" not in dims.get("platforms", []) and best_template.intent == "successful_login_activity":
             for template in TEMPLATES:
                 if template.intent == "windows_successful_logons":
                     return template
-        if "linux" in dims.get("platforms", []) and best_template.intent == "successful_login_activity":
+        if "linux" in dims.get("platforms", []) and "windows" not in dims.get("platforms", []) and best_template.intent == "successful_login_activity":
             for template in TEMPLATES:
                 if template.intent == "linux_successful_logins":
                     return template
-        if "windows" in dims.get("platforms", []) and best_template.intent == "failed_login_activity":
+        if "windows" in dims.get("platforms", []) and "linux" not in dims.get("platforms", []) and best_template.intent == "failed_login_activity":
             for template in TEMPLATES:
                 if template.intent == "windows_auth_failures":
                     return template
-        if "linux" in dims.get("platforms", []) and best_template.intent == "failed_login_activity":
+        if "linux" in dims.get("platforms", []) and "windows" not in dims.get("platforms", []) and best_template.intent == "failed_login_activity":
             for template in TEMPLATES:
                 if template.intent == "linux_auth_failures":
                     return template
@@ -207,6 +235,7 @@ def _dynamic_query_for_question(template: QueryTemplate, question: str) -> str:
             "((index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
             "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\"))"
             ") "
+            "| eval platform=case(match(index,\"(?i)linux\"),\"linux\",true(),\"windows\") "
             "| rex field=_raw \"(?i)Failed password for (?:invalid user )?(?<failed_user>[^ ]+)\" "
             "| rex field=_raw \"(?i)user=(?<pam_user>[^\\s;]+)\" "
             "| rex field=_raw \"(?i)from (?<failed_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<failed_port>\\d+)\" "
@@ -215,7 +244,7 @@ def _dynamic_query_for_question(template: QueryTemplate, question: str) -> str:
             "| eval src_ip=coalesce(src_ip,failed_src_ip,failed_rhost,\"local\") "
             "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,account,failed_user,pam_user) "
             "| eval port=coalesce(port,failed_port) "
-            "| stats count by index host source sourcetype user_name src_ip port | sort - count"
+            "| stats count by platform index host source sourcetype user_name src_ip port | sort - count"
         )
     if template.intent == "linux_privilege_escalation":
         query = template.query
@@ -319,17 +348,24 @@ def _apply_user_scope(query: str, question: str) -> str:
     return query
 
 
-def template_to_query_args(template: QueryTemplate, question: str = "", *, apply_environment: bool = True) -> dict[str, Any]:
+def template_to_query_args(
+    template: QueryTemplate,
+    question: str = "",
+    *,
+    apply_environment: bool = True,
+    profile_path: str | Path | None = None,
+) -> dict[str, Any]:
     query = template.query
     if question:
         query = _dynamic_query_for_question(template, question)
+        if query and apply_environment:
+            from environment_profile import PROFILE_PATH_DEFAULT, apply_environment_query_constraints
+
+            env_path = profile_path if profile_path is not None else PROFILE_PATH_DEFAULT
+            query = apply_environment_query_constraints(question, template.intent, query, profile_path=env_path)
         query = _apply_dataset_scope(query, question)
         query = _apply_host_scope(query, question)
         query = _apply_user_scope(query, question)
-        if query and apply_environment:
-            from environment_profile import apply_environment_query_constraints
-
-            query = apply_environment_query_constraints(question, template.intent, query)
         earliest_time, latest_time = infer_time_window(
             question,
             default_earliest=template.earliest_time,

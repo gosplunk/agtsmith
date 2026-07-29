@@ -183,6 +183,29 @@ class WebUiAuthBootstrapTests(unittest.TestCase):
             {"opsadmin": {"password": "pbkdf2_sha256$example", "role": "admin"}},
         )
 
+    def test_uninitialized_example_placeholder_password_requires_first_run(self) -> None:
+        wus.UI_ENV_PATH.write_text(
+            "\n".join(
+                [
+                    "SOC_UI_AUTH_ENABLED=1",
+                    "SOC_UI_AUTH_INITIALIZED=0",
+                    "SOC_UI_AUTH_USERNAME=opsadmin",
+                    "SOC_UI_AUTH_PASSWORD=Replace-With-A-Strong-Password",
+                    "SOC_UI_AUTH_ROLE=admin",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.environ.pop("SOC_UI_AUTH_INITIALIZED", None)
+        os.environ.pop("SOC_UI_AUTH_USERS_JSON", None)
+        os.environ.pop("SOC_UI_AUTH_USERNAME", None)
+        os.environ.pop("SOC_UI_AUTH_PASSWORD", None)
+        os.environ.pop("SOC_UI_AUTH_ROLE", None)
+
+        self.assertTrue(wus._first_run_setup_required())
+        self.assertEqual(wus._load_auth_users(), {})
+
     def test_uninitialized_blank_config_has_no_synthetic_default_user(self) -> None:
         os.environ["SOC_UI_AUTH_INITIALIZED"] = "0"
         os.environ.pop("SOC_UI_AUTH_USERS_JSON", None)

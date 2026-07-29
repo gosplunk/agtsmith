@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from environment_profile import validate_query_against_environment
+from intent_field_contracts import validate_platform_sourcetype_coherence, validate_intent_platform_scope, validate_query_for_intent
 from minimal_question_to_answer import OLLAMA_HOST, map_question_to_template, template_to_query_args
 from query_policy import validate_query_args
 from spl_rag_context import build_spl_rag_context
@@ -57,13 +58,28 @@ def _normalize_query_args(args: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _validate_query(args: dict[str, Any], *, question: str) -> tuple[bool, str]:
+def _validate_query(args: dict[str, Any], *, question: str, intent: str = "") -> tuple[bool, str]:
     ok, reason = validate_query_args(args, question=question)
     if not ok:
         return False, f"policy:{reason}"
     env_ok, env_reason = validate_query_against_environment(args)
     if not env_ok:
         return False, f"environment:{env_reason}"
+    intent_name = (intent or "").strip()
+    if not intent_name:
+        template = map_question_to_template(question)
+        intent_name = str(getattr(template, "intent", "") or "").strip()
+    if intent_name:
+        contract_ok, contract_reason = validate_query_for_intent(intent_name, args)
+        if not contract_ok:
+            return False, f"intent:{contract_reason}"
+        query_text = str(args.get("query", "")).strip()
+        coherent, coherence_reason = validate_platform_sourcetype_coherence(query_text, intent_name)
+        if not coherent:
+            return False, f"coherence:{coherence_reason}"
+        scope_ok, scope_reason = validate_intent_platform_scope(query_text, intent_name, question=question)
+        if not scope_ok:
+            return False, f"scope:{scope_reason}"
     return True, "query_valid"
 
 
@@ -73,12 +89,16 @@ def attempt_query_repair_once(
     failed_query_args: dict[str, Any],
     failure_reason: str,
     model: str,
+    intent: str = "",
     rag_max_chars: int = 1600,
     timeout: float = 180.0,
 ) -> dict[str, Any]:
     """Try one model-assisted repair pass, then deterministic template fallback."""
     candidate = _normalize_query_args(failed_query_args if isinstance(failed_query_args, dict) else {})
-    rag_context = build_spl_rag_context(question, max_chars=rag_max_chars)
+    intent_name = (intent or "").strip()
+    if not intent_name:
+        intent_name = str(getattr(map_question_to_template(question), "intent", "") or "").strip()
+    rag_context = build_spl_rag_context(question, intent=intent_name, max_chars=rag_max_chars)
     system = (
         "You are a Splunk SPL repair assistant. "
         "Repair the query so it remains read-only and passes strict policy+environment checks. "
@@ -104,6 +124,7 @@ def attempt_query_repair_once(
         f"INPUT:\n{json.dumps(payload, indent=2)}"
     )
     model_error = ""
+    coherence_failed = "coherence" in str(failure_reason).lower() or "platform_coherence" in str(failure_reason).lower()
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(
@@ -115,7 +136,7 @@ def attempt_query_repair_once(
         raw = str(body.get("response") or "").strip()
         repaired = _extract_json_object(raw)
         repaired_args = _normalize_query_args(repaired)
-        ok, reason = _validate_query(repaired_args, question=question)
+        ok, reason = _validate_query(repaired_args, question=question, intent=intent_name)
         if ok:
             return {
                 "ok": True,
@@ -127,12 +148,14 @@ def attempt_query_repair_once(
                 "raw_preview": raw[:600],
             }
         model_error = f"model_repair_invalid:{reason}"
+        coherence_failed = reason.startswith("coherence:") or reason.startswith("intent:platform_coherence")
     except Exception as exc:
         model_error = f"model_repair_exception:{type(exc).__name__}:{exc}"
+        coherence_failed = "coherence" in str(failure_reason).lower() or "platform_coherence" in str(failure_reason).lower()
 
-    # Deterministic fallback if model repair fails.
+    # Deterministic fallback if model repair fails or platform coherence is still broken.
     template_args = _normalize_query_args(template_to_query_args(map_question_to_template(question), question))
-    ok, reason = _validate_query(template_args, question=question)
+    ok, reason = _validate_query(template_args, question=question, intent=intent_name)
     if ok:
         return {
             "ok": True,
@@ -141,6 +164,16 @@ def attempt_query_repair_once(
             "repair_reason": f"template_fallback_after_{model_error or 'model_repair_failure'}",
             "validation_reason": reason,
             "source": "template_fallback_repair",
+            "raw_preview": "",
+        }
+    if coherence_failed or reason.startswith("coherence:") or reason.startswith("intent:platform_coherence"):
+        return {
+            "ok": False,
+            "args": template_args,
+            "model": model,
+            "repair_reason": f"template_fallback_still_incoherent:{reason}",
+            "validation_reason": reason,
+            "source": "template_fallback_incoherent",
             "raw_preview": "",
         }
     return {

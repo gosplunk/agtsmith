@@ -20,7 +20,7 @@ import httpx
 from runtime_config import get_ollama_host, get_splunk_base_url
 
 OLLAMA_HOST = get_ollama_host()
-DEFAULT_MODEL_NAME = "hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+DEFAULT_MODEL_NAME = "granite4:3b"
 MODEL_NAME = os.getenv("OLLAMA_MODEL_PRIMARY", DEFAULT_MODEL_NAME)
 SPLUNK_BASE = get_splunk_base_url()
 

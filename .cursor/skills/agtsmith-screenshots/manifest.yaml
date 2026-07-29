@@ -1,14 +1,26 @@
-version: "0.2.0-splunk"
-output_dir_template: docs/images/screenshots/v{version}
+version: "v1.5.1"
+output_dir_template: docs/images/screenshots/{version}
 viewport:
   width: 1920
   height: 1080
 targets:
-  - id: agtsmith-login
+  - id: login
     url: http://127.0.0.1:8787/login
     wait_ms: 1500
-  - id: agtsmith-investigation
+  - id: investigation
     url: http://127.0.0.1:8787/
+    wait_ms: 2000
+    skip_if_unreachable: true
+  - id: architecture
+    url: http://127.0.0.1:8787/architecture
+    wait_ms: 2000
+    skip_if_unreachable: true
+  - id: data-domains
+    url: http://127.0.0.1:8787/environment
+    wait_ms: 2000
+    skip_if_unreachable: true
+  - id: learning
+    url: http://127.0.0.1:8787/learning
     wait_ms: 2000
     skip_if_unreachable: true
   - id: splunk-home
@@ -21,3 +33,27 @@ targets:
     auth: splunk
     wait_ms: 3000
     skip_if_unreachable: true
+  - id: configure-connect
+    url: http://127.0.0.1:8787/configure#connect
+    auth: agtsmith
+    wait_ms: 2500
+    skip_if_unreachable: true
+    tags: [configure, lane-connect]
+  - id: configure-models
+    url: http://127.0.0.1:8787/configure#models
+    auth: agtsmith
+    wait_ms: 2500
+    skip_if_unreachable: true
+    tags: [configure, lane-models]
+  - id: configure-validate
+    url: http://127.0.0.1:8787/configure#validate
+    auth: agtsmith
+    wait_ms: 2500
+    skip_if_unreachable: true
+    tags: [configure, lane-validate]
+  - id: configure-ground
+    url: http://127.0.0.1:8787/configure#ground
+    auth: agtsmith
+    wait_ms: 2500
+    skip_if_unreachable: true
+    tags: [configure, lane-ground]

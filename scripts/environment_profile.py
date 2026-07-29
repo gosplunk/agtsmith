@@ -10,8 +10,9 @@ from typing import Any
 
 from botsv3_catalog import BOTSV3_SOURCETYPES
 
-PROFILE_PATH_DEFAULT = Path("artifacts/environment/environment_profile_latest.json")
-PROFILE_PATH_LEGACY = Path("docs/logs/environment_profile_latest.json")
+_PROFILE_REPO_ROOT = Path(__file__).resolve().parents[1]
+PROFILE_PATH_DEFAULT = _PROFILE_REPO_ROOT / "artifacts/environment/environment_profile_latest.json"
+PROFILE_PATH_LEGACY = _PROFILE_REPO_ROOT / "docs/logs/environment_profile_latest.json"
 
 SRC_PRETRAINED = "https://docs.splunk.com/Documentation/Splunk/9.4.2/Data/Listofpretrainedsourcetypes"
 SRC_WIN_ADDON = "https://docs.splunk.com/Documentation/WindowsAddOn/8.1.2/User/SourcetypesandCIMdatamodelinfo"
@@ -711,24 +712,32 @@ def _preferred_index_order(intent: str, question: str) -> list[str]:
         return ["windows_sysmon", "windows"]
     if intent_canonical in {"failed_login_activity", "successful_login_activity"}:
         return ["linux", "windows"]
+    if intent_canonical.startswith("linux_"):
+        return ["linux"]
+    if intent_canonical.startswith("windows_"):
+        return ["windows_sysmon", "windows"]
     return []
 
 
-def _index_priority_bucket(index_name: str, domain: dict[str, Any], preferred: list[str]) -> int:
+def _index_priority_bucket(index_name: str, domain: dict[str, Any], preferred: list[str]) -> tuple[int, int]:
+    """Return (preferred_bucket, tie_breaker) where lower tie_breaker is stronger."""
     if not preferred:
-        return len(preferred)
+        return (len(preferred), 1)
     idx_l = str(index_name or "").lower()
+    for pos, target in enumerate(preferred):
+        if idx_l == target.lower():
+            return (pos, 0)
     styles = {str(item).strip() for item in domain.get("styles", []) if str(item).strip()} if isinstance(domain, dict) else set()
     for pos, target in enumerate(preferred):
         if target == "_audit" and idx_l == "_audit":
-            return pos
+            return (pos, 1)
         if target == "internal" and idx_l.startswith("_"):
-            return pos
+            return (pos, 1)
         if target == "windows_sysmon" and ("sysmon" in idx_l or "windows_sysmon" in idx_l):
-            return pos
+            return (pos, 1)
         if target in styles:
-            return pos
-    return len(preferred)
+            return (pos, 1)
+    return (len(preferred), 1)
 
 
 def _domain_styles(index_name: str, sourcetypes: list[str], semantics: dict[str, Any]) -> set[str]:
@@ -845,15 +854,25 @@ def _domain_supports_intent(
             field_inventory=field_inventory,
             index_sourcetype_inventory=index_sourcetype_inventory,
         )
-        st_fields = _field_inventory_names(st_field_meta)
+        st_field_names = _field_inventory_names(st_field_meta)
         st_populated_fields = _field_inventory_populated_names(st_field_meta)
-        all_fields.update(st_fields)
+        st_known_fields = st_field_names | st_populated_fields
+        all_fields.update(st_field_names)
         all_populated_fields.update(st_populated_fields)
         st_use_cases = {str(item).strip() for item in sem.get("use_cases", []) if str(item).strip()} if isinstance(sem, dict) else set()
         st_l = str(st).strip().lower()
-        if st_l == "xmlwineventlog" and not (auth_windows_fields & st_populated_fields):
-            st_use_cases.discard("windows_auth_failures")
-            st_use_cases.discard("windows_privilege_events")
+        if st_l == "xmlwineventlog" or st_l.startswith("xmlwineventlog:"):
+            if st_known_fields:
+                if sysmon_markers & st_known_fields and not (
+                    auth_windows_fields & st_known_fields or {"Channel", "EventCode", "EventID"} & st_known_fields
+                ):
+                    st_use_cases.discard("windows_auth_failures")
+                    st_use_cases.discard("windows_privilege_events")
+                elif not (auth_windows_fields & st_known_fields) and not (
+                    {"Channel", "EventCode", "EventID"} & st_known_fields
+                ):
+                    st_use_cases.discard("windows_auth_failures")
+                    st_use_cases.discard("windows_privilege_events")
         use_cases.update(st_use_cases)
     st_joined = " ".join(str(item).lower() for item in sourcetypes)
 
@@ -880,6 +899,7 @@ def _domain_supports_intent(
             {"windows_auth_failures", "windows_privilege_events"} & use_cases
             or auth_windows_fields & all_populated_fields
             or windows_security_like
+            or "xmlwineventlog" in st_joined
             or any(tok in st_joined for tok in ("wineventlog:security", "xmlwineventlog:security"))
         )
     if intent in {"apache_access_top_ips", "apache_404_spike"}:
@@ -919,6 +939,113 @@ def _domain_supports_intent(
             or any(tok in st_joined for tok in ("xmlwineventlog", "sysmon"))
         )
     return True
+
+
+INTENT_FALLBACK_SOURCETYPES: dict[str, tuple[str, ...]] = {
+    "linux_auth_failures": ("auth.log", "linux_secure", "secure"),
+    "linux_successful_logins": ("auth.log", "linux_secure", "secure"),
+    "linux_privilege_escalation": ("auth.log", "linux_secure", "linux_audit", "auditd"),
+    "linux_privilege_escalation_activity": ("auth.log", "linux_secure", "linux_audit", "auditd"),
+    "linux_audit_activity": ("auditd", "linux_audit"),
+    "windows_auth_failures": ("xmlwineventlog:security", "xmlwineventlog", "XmlWinEventLog", "WinEventLog"),
+    "windows_successful_logons": ("xmlwineventlog:security", "xmlwineventlog", "XmlWinEventLog", "WinEventLog"),
+    "windows_process_activity": ("xmlwineventlog", "XmlWinEventLog"),
+    "apache_access_top_ips": ("access_combined", "apache:access"),
+    "apache_404_spike": ("access_combined", "apache:access"),
+    "aws_cloudtrail_activity": ("aws:cloudtrail",),
+    "aws_vpc_flow_activity": ("aws:cloudwatchlogs:vpcflow",),
+    "aad_signin_activity": ("ms:aad:signin",),
+    "o365_management_activity": ("o365:management:activity",),
+}
+
+
+def _lookup_sourcetype_indexes(st_to_indexes: dict[str, Any], sourcetype: str) -> list[str]:
+    indexes = st_to_indexes.get(sourcetype)
+    if not indexes:
+        indexes = st_to_indexes.get(str(sourcetype or "").lower())
+    if not indexes:
+        key_l = str(sourcetype or "").lower()
+        for key, idxs in st_to_indexes.items():
+            if str(key).lower() == key_l:
+                indexes = idxs
+                break
+    if not isinstance(indexes, list):
+        return []
+    return [str(item).strip() for item in indexes if str(item).strip()]
+
+
+def _fallback_domains_from_profile(
+    profile: dict[str, Any],
+    intent: str,
+    question: str,
+    *,
+    max_domains: int = 4,
+) -> list[dict[str, Any]]:
+    """When field-inventory scoring yields no domains, fall back to sourcetype_to_indexes."""
+    st_to_indexes = profile.get("sourcetype_to_indexes", {})
+    if not isinstance(st_to_indexes, dict) or not st_to_indexes:
+        return []
+
+    semantics = profile.get("sourcetype_semantics", {}) if isinstance(profile.get("sourcetype_semantics"), dict) else {}
+    indexes = profile.get("indexes", [])
+    if not isinstance(indexes, list):
+        indexes = []
+
+    target_use_cases = _intent_use_cases(intent, question)
+    preferred_sourcetypes: list[str] = []
+    seen_st: set[str] = set()
+
+    for st in INTENT_FALLBACK_SOURCETYPES.get(intent, ()):
+        key = st.lower()
+        if key not in seen_st:
+            preferred_sourcetypes.append(st)
+            seen_st.add(key)
+
+    for st, sem in sorted(semantics.items(), key=lambda item: str(item[0])):
+        if not isinstance(sem, dict):
+            continue
+        use_cases = {str(item).strip() for item in sem.get("use_cases", []) if str(item).strip()}
+        if use_cases & target_use_cases:
+            key = str(st).lower()
+            if key not in seen_st:
+                preferred_sourcetypes.append(str(st))
+                seen_st.add(key)
+
+    seen_indexes: set[str] = set()
+    domains: list[dict[str, Any]] = []
+    for st in preferred_sourcetypes:
+        for idx in _lookup_sourcetype_indexes(st_to_indexes, st):
+            if idx in seen_indexes:
+                continue
+            index_row = next(
+                (row for row in indexes if isinstance(row, dict) and str(row.get("index", "")).strip() == idx),
+                None,
+            )
+            sourcetypes = [str(item).strip() for item in (index_row or {}).get("sourcetypes", []) if str(item).strip()]
+            if not sourcetypes:
+                sourcetypes = [st]
+            elif st not in sourcetypes and not any(str(item).lower() == st.lower() for item in sourcetypes):
+                sourcetypes = [st] + sourcetypes
+            styles = _domain_styles(idx, sourcetypes, semantics)
+            matched = set()
+            for candidate_st in sourcetypes:
+                sem = semantics.get(candidate_st, {}) if isinstance(semantics, dict) else {}
+                use_cases = {str(item).strip() for item in sem.get("use_cases", []) if str(item).strip()} if isinstance(sem, dict) else set()
+                matched.update(use_cases & target_use_cases)
+            domains.append(
+                {
+                    "index": idx,
+                    "sourcetypes": sourcetypes,
+                    "styles": sorted(styles),
+                    "matched_use_cases": sorted(matched),
+                    "score": 0,
+                    "source": "profile_fallback",
+                }
+            )
+            seen_indexes.add(idx)
+            if len(domains) >= max(1, max_domains):
+                return domains
+    return domains
 
 
 def resolve_authoritative_domains_for_question(
@@ -999,11 +1126,43 @@ def resolve_authoritative_domains_for_question(
             )
         )
 
-    scored.sort(key=lambda item: item[0], reverse=True)
-    chosen = [row for score, row in scored if score > 0][: max(1, max_domains)]
-    if chosen:
-        return chosen
-    return [row for _score, row in scored[: max(1, max_domains)]]
+    preferred_order = _preferred_index_order(intent, question)
+    scored.sort(
+        key=lambda item: (
+            _index_priority_bucket(str(item[1].get("index", "")).strip(), item[1], preferred_order),
+            -item[0],
+            str(item[1].get("index", "")).strip(),
+        )
+    )
+    positive = [(score, row) for score, row in scored if score > 0]
+    pool = positive if positive else scored
+    chosen: list[dict[str, Any]] = []
+    if preferred_order:
+        used_indexes: set[str] = set()
+        for bucket_idx in range(len(preferred_order)):
+            for _score, row in pool:
+                idx = str(row.get("index", "")).strip()
+                if idx in used_indexes:
+                    continue
+                bucket, _tie = _index_priority_bucket(idx, row, preferred_order)
+                if bucket == bucket_idx:
+                    chosen.append(row)
+                    used_indexes.add(idx)
+                    break
+        for _score, row in pool:
+            idx = str(row.get("index", "")).strip()
+            if idx in used_indexes:
+                continue
+            chosen.append(row)
+            used_indexes.add(idx)
+        chosen = chosen[: max(1, max_domains)]
+    else:
+        chosen = [row for score, row in positive][: max(1, max_domains)]
+        if not chosen:
+            chosen = [row for _score, row in scored[: max(1, max_domains)]]
+    if not chosen:
+        chosen = _fallback_domains_from_profile(profile, intent, question, max_domains=max_domains)
+    return chosen
 
 
 def _format_sourcetype_term(value: str) -> str:
@@ -1032,6 +1191,94 @@ def _select_domains_by_style(domains: list[dict[str, Any]], style: str) -> list[
     return selected
 
 
+def _domain_style_set(domain: dict[str, Any]) -> set[str]:
+    styles = domain.get("styles", [])
+    if not isinstance(styles, list):
+        return set()
+    return {str(item).strip().lower() for item in styles if str(item).strip()}
+
+
+def _is_windows_only_domain(domain: dict[str, Any]) -> bool:
+    styles = _domain_style_set(domain)
+    return "windows" in styles and "linux" not in styles
+
+
+def _has_windows_only_domain(domains: list[dict[str, Any]]) -> bool:
+    return any(_is_windows_only_domain(domain) for domain in domains)
+
+
+def _has_linux_only_domain(domains: list[dict[str, Any]]) -> bool:
+    for domain in domains:
+        styles = _domain_style_set(domain)
+        if "linux" in styles and "windows" not in styles:
+            return True
+    return False
+
+
+def _question_requests_cross_platform_auth(question: str) -> bool:
+    from question_intelligence import infer_question_dimensions
+
+    platforms = set(infer_question_dimensions(question).get("platforms", []))
+    return "linux" in platforms and "windows" in platforms
+
+
+def _should_strip_cross_platform_windows_append(domains: list[dict[str, Any]], *, question: str = "") -> bool:
+    """Strip generic Windows append branches when a dedicated linux index exists without soc_windows."""
+    if _question_requests_cross_platform_auth(question):
+        return False
+    if _has_windows_only_domain(domains):
+        return False
+    return _has_linux_only_domain(domains)
+
+
+def profile_auth_routing_intent(
+    question: str,
+    *,
+    profile_path: str | Path = PROFILE_PATH_DEFAULT,
+) -> str | None:
+    """Pick auth intent from environment profile when the question is platform-agnostic."""
+    from question_intelligence import infer_question_dimensions
+
+    dims = infer_question_dimensions(question)
+    platforms = set(dims.get("platforms", []))
+    activities = set(dims.get("activities", []))
+    if platforms != {"cross_domain"}:
+        return None
+    if "auth_failure" in activities:
+        candidate_intent = "failed_login_activity"
+        fallback_linux = "linux_auth_failures"
+        fallback_windows = "windows_auth_failures"
+    elif "auth_success" in activities:
+        candidate_intent = "successful_login_activity"
+        fallback_linux = "linux_successful_logins"
+        fallback_windows = "windows_successful_logons"
+    else:
+        return None
+
+    profile = load_environment_profile(profile_path)
+    if not profile:
+        return None
+
+    domains = resolve_authoritative_domains_for_question(
+        question,
+        candidate_intent,
+        profile_path=profile_path,
+        max_domains=4,
+    )
+    if not domains:
+        return None
+
+    has_linux_only = _has_linux_only_domain(domains)
+    has_windows_only = _has_windows_only_domain(domains)
+    if has_linux_only and not has_windows_only:
+        return fallback_linux
+    if has_windows_only and not has_linux_only:
+        return fallback_windows
+    if has_linux_only and has_windows_only:
+        return candidate_intent
+    return None
+
+
 def _index_clause_for_domains(domains: list[dict[str, Any]]) -> str:
     indexes: list[str] = []
     for domain in domains:
@@ -1045,22 +1292,110 @@ def _index_clause_for_domains(domains: list[dict[str, Any]]) -> str:
     return "(" + " OR ".join(f"index={idx}" for idx in indexes) + ")"
 
 
-def _auth_sourcetype_clause(domain: dict[str, Any], semantics: dict[str, Any]) -> str:
+def _platform_sourcetype_clause(domain: dict[str, Any], platform: str, semantics: dict[str, Any]) -> str:
+    """Build a sourcetype OR-clause filtered to one platform (linux or windows)."""
     sourcetypes = [str(item).strip() for item in domain.get("sourcetypes", []) if str(item).strip()]
+    platform_l = str(platform or "").strip().lower()
     selected: list[str] = []
     for st in sourcetypes:
         sem = semantics.get(st, {}) if isinstance(semantics, dict) else {}
         use_cases = {str(item).strip() for item in sem.get("use_cases", []) if str(item).strip()} if isinstance(sem, dict) else set()
+        styles = _sourcetype_styles(st, sem)
         st_l = st.lower()
-        if (
-            {"linux_auth_failures", "windows_auth_failures", "linux_privilege_escalation", "linux_audit_activity"} & use_cases
-            or any(tok in st_l for tok in ("auth", "secure", "audit", "wineventlog", "sysmon", "security"))
-        ):
-            selected.append(st)
+        if platform_l == "linux":
+            linux_match = (
+                {"linux_auth_failures", "linux_privilege_escalation", "linux_audit_activity"} & use_cases
+                or "linux" in styles
+                or any(tok in st_l for tok in ("auth.log", "linux_secure", "auditd", "linux_audit"))
+                or (any(tok in st_l for tok in ("auth", "secure", "audit")) and "wineventlog" not in st_l and "sysmon" not in st_l)
+            )
+            if linux_match:
+                selected.append(st)
+        elif platform_l == "windows":
+            windows_match = (
+                {"windows_auth_failures", "windows_privilege_events", "windows_process_creation"} & use_cases
+                or "windows" in styles
+                or any(tok in st_l for tok in ("xmlwineventlog", "wineventlog", "sysmon"))
+            )
+            if windows_match:
+                selected.append(st)
     if not selected:
-        selected = sourcetypes[:2]
+        return ""
     terms = [_format_sourcetype_term(st) for st in selected[:4] if _format_sourcetype_term(st)]
     return "(" + " OR ".join(terms) + ")" if terms else ""
+
+
+def _auth_sourcetype_clause(domain: dict[str, Any], semantics: dict[str, Any]) -> str:
+    """Legacy combined auth clause — prefer _platform_sourcetype_clause for cross-platform queries."""
+    linux_clause = _platform_sourcetype_clause(domain, "linux", semantics)
+    windows_clause = _platform_sourcetype_clause(domain, "windows", semantics)
+    parts = [part for part in (linux_clause, windows_clause) if part]
+    if not parts:
+        sourcetypes = [str(item).strip() for item in domain.get("sourcetypes", []) if str(item).strip()]
+        terms = [_format_sourcetype_term(st) for st in sourcetypes[:2] if _format_sourcetype_term(st)]
+        return "(" + " OR ".join(terms) + ")" if terms else ""
+    if len(parts) == 1:
+        return parts[0]
+    inner = " OR ".join(part.strip("()") for part in parts)
+    return f"({inner})"
+
+
+def _rewrite_cross_platform_auth_branches(
+    rendered: str,
+    *,
+    intent: str,
+    linux_index: str,
+    windows_index: str,
+    linux_clause: str,
+    windows_clause: str,
+) -> str:
+    """Rewrite Linux vs Windows branches independently in cross-platform auth queries."""
+    if str(intent or "").strip() not in {"failed_login_activity", "successful_login_activity"}:
+        return rendered
+
+    if linux_clause and any(path in rendered.lower() for path in ("/var/log/auth.log", "/var/log/secure")):
+        rendered = re.sub(
+            r"\(source=\"/var/log/auth\.log\" OR source=\"/var/log/secure\"\)",
+            linux_clause,
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        rendered = re.sub(r"source=\"/var/log/auth\.log\"", linux_clause, rendered, flags=re.IGNORECASE)
+        rendered = re.sub(r"source=\"/var/log/secure\"", linux_clause, rendered, flags=re.IGNORECASE)
+
+    if linux_index:
+        rendered = re.sub(r"\bindex=linux\b", f"index={linux_index}", rendered, flags=re.IGNORECASE)
+
+    def _rewrite_append_block(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        if windows_index:
+            inner = re.sub(
+                r"\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=winnetmon)?\)",
+                f"index={windows_index}",
+                inner,
+                flags=re.IGNORECASE,
+            )
+            inner = re.sub(r"\bindex=windows_sysmon\b", f"index={windows_index}", inner, flags=re.IGNORECASE)
+            inner = re.sub(r"\bindex=windows\b", f"index={windows_index}", inner, flags=re.IGNORECASE)
+            inner = re.sub(r"\bindex=winnetmon\b", f"index={windows_index}", inner, flags=re.IGNORECASE)
+        if windows_clause and re.search(r"\bsourcetype=XmlWinEventLog\b", inner, flags=re.IGNORECASE):
+            inner = re.sub(r"\bsourcetype=XmlWinEventLog\b", windows_clause, inner, count=1, flags=re.IGNORECASE)
+        elif windows_clause and re.search(r"(EventCode=462[45]|EventID=462[45])", inner, flags=re.IGNORECASE):
+            if not re.search(r"\bsourcetype=", inner, flags=re.IGNORECASE):
+                inner = re.sub(r"^\s*", f"{windows_clause} ", inner, count=1)
+        return f"| append [ search {inner.strip()} ]"
+
+    rendered = re.sub(
+        r"\|\s*append\s*\[\s*search\s+(.*?)\s*\]",
+        _rewrite_append_block,
+        rendered,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if windows_clause and re.search(r"\bsourcetype=XmlWinEventLog\b", rendered, flags=re.IGNORECASE):
+        rendered = re.sub(r"\bsourcetype=XmlWinEventLog\b", windows_clause, rendered, count=1, flags=re.IGNORECASE)
+
+    return rendered
 
 
 def _preferred_sourcetype_for_intent(intent: str, domain: dict[str, Any]) -> str:
@@ -1169,22 +1504,26 @@ def apply_environment_query_constraints(
     rendered = str(query or "").strip()
     if not rendered:
         return rendered
-    if "botsv3" in str(question or "").lower():
-        return rendered
     intent = canonicalize_intent(intent, question)
 
     profile = attach_semantics(load_environment_profile(profile_path))
     semantics = profile.get("sourcetype_semantics", {}) if isinstance(profile.get("sourcetype_semantics"), dict) else {}
     domains = resolve_authoritative_domains_for_question(question, intent, profile_path=profile_path, max_domains=4)
     if not domains:
+        domains = _fallback_domains_from_profile(profile, intent, question, max_domains=4)
+    if not domains:
         return rendered
 
     primary = domains[0]
+    cross_platform_auth = str(intent or "").strip() in {"failed_login_activity", "successful_login_activity"} and _question_requests_cross_platform_auth(question)
+    has_windows_only = _has_windows_only_domain(domains)
+    windows_capable = has_windows_only or (cross_platform_auth and _select_domain_by_style(domains, "windows") is not None)
+    strip_windows_append = _should_strip_cross_platform_windows_append(domains, question=question)
     linux_domain = _select_domain_by_style(domains, "linux")
-    windows_domain = _select_domain_by_style(domains, "windows")
+    windows_domain = _select_domain_by_style(domains, "windows") if windows_capable else None
     web_domain = _select_domain_by_style(domains, "web")
     linux_domains = _select_domains_by_style(domains, "linux")
-    windows_domains = _select_domains_by_style(domains, "windows")
+    windows_domains = _select_domains_by_style(domains, "windows") if windows_capable else []
     web_domains = _select_domains_by_style(domains, "web")
     active_domain = primary
     if str(intent or "").startswith("linux_"):
@@ -1201,9 +1540,10 @@ def apply_environment_query_constraints(
     linux_index_clause = _index_clause_for_domains(linux_domains if linux_domains else ([linux_domain] if linux_domain else []))
     windows_index_clause = _index_clause_for_domains(windows_domains if windows_domains else ([windows_domain] if windows_domain else []))
     web_index_clause = _index_clause_for_domains(web_domains if web_domains else ([web_domain] if web_domain else []))
-    sourcetype_clause = _auth_sourcetype_clause(active_domain or {}, semantics)
-    linux_clause = _auth_sourcetype_clause((linux_domain or {}) if linux_bound_intent else (linux_domain or active_domain or {}), semantics)
-    windows_clause = _auth_sourcetype_clause(windows_domain or {}, semantics) if windows_domain else ""
+    linux_auth_domain = (linux_domain or {}) if linux_bound_intent else (linux_domain or active_domain or {})
+    linux_clause = _platform_sourcetype_clause(linux_auth_domain, "linux", semantics)
+    windows_clause = _platform_sourcetype_clause(windows_domain or {}, "windows", semantics) if windows_domain else ""
+    sourcetype_clause = linux_clause or _auth_sourcetype_clause(active_domain or {}, semantics)
     web_sourcetypes = [str(item).strip() for item in (web_domain or active_domain or {}).get("sourcetypes", []) if str(item).strip()]
     web_access = next((st for st in web_sourcetypes if any(tok in st.lower() for tok in ("access_combined", "apache:access", "nginx"))), "")
     web_error = next((st for st in web_sourcetypes if any(tok in st.lower() for tok in ("apache:error", "apache_error", "error"))), "")
@@ -1214,7 +1554,8 @@ def apply_environment_query_constraints(
     if active_index:
         rendered = re.sub(r"\(index=main OR index=main\)", f"index={active_index}", rendered, flags=re.IGNORECASE)
         rendered = re.sub(r"\bindex=main\b", f"index={active_index}", rendered, flags=re.IGNORECASE)
-    if windows_index_clause:
+    windows_intent = str(intent or "").strip().startswith("windows_")
+    if windows_index_clause and (windows_capable or windows_intent):
         rendered = re.sub(
             r"\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=winnetmon)?\)",
             windows_index_clause,
@@ -1224,7 +1565,17 @@ def apply_environment_query_constraints(
         rendered = re.sub(r"\bindex=windows_sysmon\b", windows_index_clause, rendered, flags=re.IGNORECASE)
         rendered = re.sub(r"\bindex=windows\b", windows_index_clause, rendered, flags=re.IGNORECASE)
         rendered = re.sub(r"\bindex=winnetmon\b", windows_index_clause, rendered, flags=re.IGNORECASE)
-    elif str(intent or "").strip() in {"failed_login_activity", "successful_login_activity"}:
+    elif windows_intent and windows_index:
+        rendered = re.sub(
+            r"\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=winnetmon)?\)",
+            f"index={windows_index}",
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        rendered = re.sub(r"\bindex=windows_sysmon\b", f"index={windows_index}", rendered, flags=re.IGNORECASE)
+        rendered = re.sub(r"\bindex=windows\b", f"index={windows_index}", rendered, flags=re.IGNORECASE)
+        rendered = re.sub(r"\bindex=winnetmon\b", f"index={windows_index}", rendered, flags=re.IGNORECASE)
+    elif str(intent or "").strip() in {"failed_login_activity", "successful_login_activity"} and strip_windows_append:
         rendered = re.sub(
             r"\|\s*append\s*\[\s*search\s+\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=winnetmon)?\).*?\]\s*",
             " ",
@@ -1245,7 +1596,16 @@ def apply_environment_query_constraints(
             flags=re.IGNORECASE,
         )
 
-    if linux_clause and any(path in rendered.lower() for path in ("/var/log/auth.log", "/var/log/secure")):
+    if str(intent or "").strip() in {"failed_login_activity", "successful_login_activity"}:
+        rendered = _rewrite_cross_platform_auth_branches(
+            rendered,
+            intent=intent,
+            linux_index=linux_index,
+            windows_index=windows_index if windows_domain else "",
+            linux_clause=linux_clause,
+            windows_clause=windows_clause,
+        )
+    elif linux_clause and any(path in rendered.lower() for path in ("/var/log/auth.log", "/var/log/secure")):
         rendered = re.sub(
             r"\(source=\"/var/log/auth\.log\" OR source=\"/var/log/secure\"\)",
             linux_clause,
@@ -1255,11 +1615,9 @@ def apply_environment_query_constraints(
         rendered = re.sub(r"source=\"/var/log/auth\.log\"", linux_clause, rendered, flags=re.IGNORECASE)
         rendered = re.sub(r"source=\"/var/log/secure\"", linux_clause, rendered, flags=re.IGNORECASE)
 
-    if windows_clause and re.search(r"\bsourcetype=XmlWinEventLog\b", rendered, flags=re.IGNORECASE):
-        replacement = windows_clause[1:-1] if windows_clause.startswith("(") and windows_clause.endswith(")") else windows_clause
-        first_term = replacement.split(" OR ")[0] if replacement else replacement
-        if first_term:
-            rendered = re.sub(r"\bsourcetype=XmlWinEventLog\b", first_term, rendered, flags=re.IGNORECASE)
+    if windows_clause and str(intent or "").strip() not in {"failed_login_activity", "successful_login_activity"}:
+        if re.search(r"\bsourcetype=XmlWinEventLog\b", rendered, flags=re.IGNORECASE):
+            rendered = re.sub(r"\bsourcetype=XmlWinEventLog\b", windows_clause, rendered, count=1, flags=re.IGNORECASE)
 
     if web_domain and str(intent or "").startswith("apache_"):
         if web_index_clause:
@@ -1498,12 +1856,13 @@ def suggest_domains_for_question(
     chosen_scored: list[tuple[int, dict[str, Any], list[str]]] = []
     if preferred_order:
         used_indexes: set[str] = set()
-        for bucket in range(len(preferred_order)):
+        for bucket_idx in range(len(preferred_order)):
             for item in scored:
                 idx = str(item[1].get("index", "")).strip()
                 if idx in used_indexes:
                     continue
-                if _index_priority_bucket(idx, item[1], preferred_order) == bucket:
+                bucket, _tie = _index_priority_bucket(idx, item[1], preferred_order)
+                if bucket == bucket_idx:
                     chosen_scored.append(item)
                     used_indexes.add(idx)
                     break

@@ -48,27 +48,41 @@ from minimal_question_to_answer import (
     template_to_query_args,
 )
 from ollama_log_stream import (
+    LocalLogSourceRegistry,
     RemoteLogSourceRegistry,
     StreamParams,
+    check_remote_health,
     format_sse,
     get_remote_health_url,
     redact_secrets,
     role_allowed,
 )
+from ollama_ops_monitor import (
+    build_local_log_command,
+    collect_ops_snapshot,
+    ollama_log_config_status,
+)
 from environment_profile import load_environment_profile, suggest_domains_for_question
 from investigation_playbooks import playbook_for_intent, playbook_target_order, playbook_targets_for_intent
 from runtime_config import (
     DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER,
+    DEFAULT_MODEL_ASSIGNMENTS,
     DEFAULT_MODEL_EVIDENCE_REVIEWER,
     DEFAULT_MODEL_FINAL_SUMMARY,
     DEFAULT_MODEL_PEER_REVIEWER,
     DEFAULT_MODEL_PEER_REVIEWER_2,
     DEFAULT_MODEL_QUERY_PLANNER,
+    DEFAULT_MODEL_QUERY_PLANNER_FALLBACK,
     DEFAULT_MODEL_QUERY_REPAIR,
     DEFAULT_MODEL_QUERY_WRITER,
     DEFAULT_MODEL_SECURITY_REVIEWER,
+    MODEL_ASSIGNMENT_KEYS,
+    MODEL_PULL_EXTRA_KEYS,
     UI_ENV_PATH,
+    apply_model_family_assignments,
     display_path,
+    expected_ollama_models,
+    model_stack_summary,
     get_edge_llm_enabled,
     get_edge_llm_host,
     get_edge_llm_model,
@@ -107,9 +121,11 @@ LOCAL_LEARNING_LOCK = ARTIFACTS_ROOT / "learning" / ".learning.lock"
 LOCAL_LEARNING_LOG = ARTIFACTS_ROOT / "learning" / "local_learning_web.log"
 LOCAL_LEARNING_STATE = ARTIFACTS_ROOT / "learning" / "local_learning_status.json"
 LOCAL_LEARNING_STALE_SECONDS = 5 * 60
+ENV_PROFILE_REFRESH_STALE_SECONDS = 2 * 60 * 60
 AUDIT_ROOT = ARTIFACTS_ROOT / "audit"
 QUERY_AUDIT_LOG = AUDIT_ROOT / "query_runs.jsonl"
 LOG_SOURCE_REGISTRY = RemoteLogSourceRegistry()
+LOCAL_LOG_SOURCE_REGISTRY = LocalLogSourceRegistry()
 SESSION_COOKIE_NAME = "soc_session"
 SESSION_TTL_SECONDS = 8 * 60 * 60
 SESSIONS: dict[str, dict[str, Any]] = {}
@@ -119,28 +135,9 @@ MCP_CHAT_MODE_LIVE = "live"
 MCP_CHAT_MODE_DEMO = "demo"
 MCP_CHAT_PIPELINE_ASSISTED = "assisted"
 MCP_CHAT_PIPELINE_DETERMINISTIC = "deterministic"
-EXPECTED_MODEL_KEYS = [
-    "OLLAMA_MODEL_QUERY_PLANNER",
-    "OLLAMA_MODEL_QUERY_WRITER",
-    "OLLAMA_MODEL_QUERY_REPAIR",
-    "OLLAMA_MODEL_EVIDENCE_REVIEWER",
-    "OLLAMA_MODEL_SECURITY_REVIEWER",
-    "OLLAMA_MODEL_PEER_REVIEWER",
-    "OLLAMA_MODEL_PEER_REVIEWER_2",
-    "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER",
-    "OLLAMA_MODEL_FINAL_SUMMARY",
-]
-DEFAULT_MODEL_ASSIGNMENTS = {
-    "OLLAMA_MODEL_QUERY_PLANNER": DEFAULT_MODEL_QUERY_PLANNER,
-    "OLLAMA_MODEL_QUERY_WRITER": DEFAULT_MODEL_QUERY_WRITER,
-    "OLLAMA_MODEL_QUERY_REPAIR": DEFAULT_MODEL_QUERY_REPAIR,
-    "OLLAMA_MODEL_EVIDENCE_REVIEWER": DEFAULT_MODEL_EVIDENCE_REVIEWER,
-    "OLLAMA_MODEL_SECURITY_REVIEWER": DEFAULT_MODEL_SECURITY_REVIEWER,
-    "OLLAMA_MODEL_PEER_REVIEWER": DEFAULT_MODEL_PEER_REVIEWER,
-    "OLLAMA_MODEL_PEER_REVIEWER_2": DEFAULT_MODEL_PEER_REVIEWER_2,
-    "OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER": DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER,
-    "OLLAMA_MODEL_FINAL_SUMMARY": DEFAULT_MODEL_FINAL_SUMMARY,
-}
+EXPECTED_MODEL_KEYS = list(MODEL_ASSIGNMENT_KEYS)
+CONFIG_MODEL_EXTRA_KEYS = list(MODEL_PULL_EXTRA_KEYS)
+DEFAULT_MODEL_ASSIGNMENTS = dict(DEFAULT_MODEL_ASSIGNMENTS)
 EDGE_CONFIG_KEYS = [
     "EDGE_LLM_ENABLED",
     "EDGE_LLM_HOST",
@@ -160,10 +157,35 @@ CONFIG_EDITABLE_KEYS = [
     "SOC_UI_AUTH_ROLE",
     *EDGE_CONFIG_KEYS,
     *EXPECTED_MODEL_KEYS,
+    *CONFIG_MODEL_EXTRA_KEYS,
 ]
 DEFAULT_UI_PASSWORDS = {"changeme123!", "SplunkLab-Only-ChangeMe!"}
+PLACEHOLDER_UI_PASSWORDS = {
+    "Replace-With-A-Strong-Password",
+    "replace-with-your-splunk-mcp-token",
+}
 PASSWORD_HASH_PREFIX = "pbkdf2_sha256:"
 LEGACY_PASSWORD_HASH_PREFIX = "pbkdf2_sha256$"
+
+
+def _looks_like_password_hash(value: str) -> bool:
+    raw = str(value or "").strip()
+    return raw.startswith(PASSWORD_HASH_PREFIX) or raw.startswith(LEGACY_PASSWORD_HASH_PREFIX)
+
+
+def _users_json_has_hashed_passwords(raw_json: str) -> bool:
+    try:
+        parsed = json.loads(raw_json)
+    except Exception:
+        return False
+    items: list[dict[str, Any]] = []
+    if isinstance(parsed, list):
+        items = [item for item in parsed if isinstance(item, dict)]
+    elif isinstance(parsed, dict):
+        items = [item for item in parsed.values() if isinstance(item, dict)]
+    if not items:
+        return False
+    return all(_looks_like_password_hash(str(item.get("password", ""))) for item in items)
 
 
 def _load_app_version() -> str:
@@ -176,6 +198,7 @@ def _load_app_version() -> str:
 
 APP_VERSION = _load_app_version()
 APP_VERSION_LABEL = APP_VERSION if APP_VERSION.startswith("v") else f"v{APP_VERSION}"
+CONFIGURE_UI_TAG = os.environ.get("CONFIGURE_UI_TAG", "configure-ui-p3")
 TOKEN_MASK_SENTINEL = "__KEEP_EXISTING_SPLUNK_TOKEN__"
 DEFAULT_MITRE_VALIDATOR_MODEL = "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 _SPLUNK_WEB_BASE_CACHE: dict[str, str] = {}
@@ -286,29 +309,15 @@ def _extract_json_object(raw_text: str) -> dict[str, Any]:
 
 
 def _call_ollama_json(*, model: str, system_prompt: str, user_payload: dict[str, Any], timeout: float = 90.0) -> dict[str, Any]:
-    ollama_host = str(get_ollama_host()).strip().rstrip("/")
-    payload = {
-        "model": model,
-        "prompt": (
-            f"{system_prompt}\n\n"
-            "Return strict JSON only. No prose.\n\n"
-            f"INPUT:\n{json.dumps(user_payload, indent=2)}"
-        ),
-        "stream": False,
-        "think": False,
-    }
-    req = urllib.request.Request(
-        f"{ollama_host}/api/generate",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    from ollama_client import call_ollama_json
+
+    return call_ollama_json(
+        model=model,
+        system_prompt=system_prompt,
+        user_payload=user_payload,
+        timeout=timeout,
+        host=str(get_ollama_host()).strip().rstrip("/"),
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    raw = str(body.get("response") or "").strip()
-    parsed = _extract_json_object(raw)
-    parsed["_raw_text_preview"] = raw[:1200]
-    return parsed
 
 
 def _mitre_validator_model() -> str:
@@ -1609,13 +1618,8 @@ def _run_structured_pivot_investigation(
     return {"meta": meta, "result": result_body}
 
 
-def _default_expected_models() -> list[str]:
-    ordered: list[str] = []
-    for key in EXPECTED_MODEL_KEYS:
-        model = str(DEFAULT_MODEL_ASSIGNMENTS.get(key, "")).strip()
-        if model and model not in ordered:
-            ordered.append(model)
-    return ordered
+def _default_expected_models(values: dict[str, str] | None = None) -> list[str]:
+    return expected_ollama_models(values)
 
 
 def _autofill_model_assignments(values: dict[str, str], available_models: list[str] | None = None) -> dict[str, str]:
@@ -1817,6 +1821,7 @@ def _global_nav(active: str) -> str:
                 ("/langgraph-graph", "LangGraph Graph", "Canonical workflow, active topology, and run path"),
                 ("/docs", "Docs", "Whitepapers, guides, and references"),
                 ("/configure", "Configuration", "Endpoints, models, validation"),
+                ("/admin/ollama-ops", "Ollama Ops", "GPU metrics and live Ollama logs"),
                 ("/cases", "Case Workspace", "Persistent cases, pivots, and branch history"),
                 ("/learning", "SPL Optimization", "AI-driven SPL improvement and review"),
                 ("/spl-assets", "SPL Asset Repository", "Approved reusable SPL assets"),
@@ -1856,31 +1861,42 @@ def _global_nav(active: str) -> str:
 
 def _control_subnav(active: str) -> str:
     items = [
-        ("/architecture", "Architecture"),
-        ("/langgraph-graph", "LangGraph Graph"),
-        ("/docs", "Docs"),
-        ("/configure", "Configuration"),
-        ("/cases", "Case Workspace"),
-        ("/learning", "SPL Optimization"),
-        ("/spl-assets", "SPL Asset Repository"),
-        ("/users", "Users"),
+        ("/architecture", "Architecture", "System flow and trust boundaries"),
+        ("/langgraph-graph", "LangGraph Graph", "Workflow topology and runtime path"),
+        ("/docs", "Docs", "Whitepapers, guides, and references"),
+        ("/configure", "Configuration", "Endpoints, models, validation"),
+        ("/admin/ollama-ops", "Ollama Ops", "GPU metrics and live Ollama logs"),
+        ("/cases", "Case Workspace", "Persistent cases and branch history"),
+        ("/learning", "SPL Optimization", "AI-driven SPL improvement and review"),
+        ("/spl-assets", "SPL Asset Repository", "Approved reusable SPL assets"),
+        ("/users", "Users", "Local users and audit trail"),
     ]
     links: list[str] = []
-    for href, label in items:
+    for href, label, copy in items:
         cls = "control-pane-link active" if href == active else "control-pane-link"
         links.append(
             f'<a class="{cls}" href="{href}">'
             f'<span class="control-pane-link-title">{html.escape(label)}</span>'
+            f'<span class="control-pane-link-copy">{html.escape(copy)}</span>'
             "</a>"
         )
     return (
-        '<section class="control-pane">'
+        '<aside class="control-pane">'
         '<div class="control-pane-head">'
         '<div class="control-pane-kicker">Control Center</div>'
         '<h2 class="control-pane-title">Navigation</h2>'
         "</div>"
         f'<div class="control-pane-links">{"".join(links)}</div>'
-        "</section>"
+        "</aside>"
+    )
+
+
+def _control_center_layout(active: str, body_html: str) -> str:
+    return (
+        '<div class="control-center-shell">'
+        f"{_control_subnav(active)}"
+        f'<div class="control-center-main">{body_html}</div>'
+        "</div>"
     )
 
 
@@ -2458,7 +2474,24 @@ def _local_learning_status() -> dict[str, Any]:
     return payload
 
 
+def _reconcile_stale_env_profile_refresh() -> None:
+    """Clear orphaned in_progress state when the background worker is no longer running."""
+    state = _read_json(ENV_PROFILE_REFRESH_STATE)
+    if not state or str(state.get("state") or "") != "in_progress":
+        return
+    if _environment_profile_refresh_in_progress():
+        return
+    pct = int(state.get("progress_pct") or 0)
+    _set_env_refresh_state(
+        "error",
+        "Data Domains refresh was interrupted (server restart or timeout). Retry Refresh Data Domains.",
+        pct,
+        "interrupted",
+    )
+
+
 def _environment_profile_refresh_status() -> dict[str, Any]:
+    _reconcile_stale_env_profile_refresh()
     state = _read_json(ENV_PROFILE_REFRESH_STATE)
     if state:
         if ENV_PROFILE_REFRESH_LOG.exists():
@@ -2688,10 +2721,18 @@ def _phase_progress_for_line(line: str) -> tuple[int, str, str] | None:
     text = line.strip()
     if not text:
         return None
-    if "[env-profile-build]" in text:
-        return (24, "env_profile_build", text)
+    if "[field-inventory]" in text:
+        match = re.search(r"\[field-inventory\]\s+(\d+)/(\d+)", text)
+        if match:
+            cur, total = int(match.group(1)), max(int(match.group(2)), 1)
+            pct = 18 + int((cur / total) * 40)
+            return (pct, "env_profile_build", text)
+    if "[env-profile-build] complete" in text:
+        return (58, "env_profile_build", text)
+    if "[env-profile-build] rebuilding" in text:
+        return (12, "env_profile_build", text)
     if "build_environment_profile.py" in text:
-        return (34, "env_profile_build", text)
+        return (20, "env_profile_build", text)
     if "[env-profile-check]" in text:
         return (60, "env_profile_check", text)
     if "check_environment_profile_freshness.py" in text:
@@ -2853,7 +2894,7 @@ def _config_snapshot() -> dict[str, Any]:
         values["EDGE_LLM_ROLE"] = get_edge_llm_role()
     if not values.get("EDGE_LLM_TIMEOUT_SEC"):
         values["EDGE_LLM_TIMEOUT_SEC"] = get_edge_llm_timeout_sec()
-    expected_models = _default_expected_models()
+    expected_models = _default_expected_models(values)
     models = [values.get(key, "") for key in EXPECTED_MODEL_KEYS if values.get(key, "").strip()]
     unique_models: list[str] = []
     for model in models:
@@ -2881,6 +2922,7 @@ def _config_snapshot() -> dict[str, Any]:
     }
     config_display = display_path(UI_ENV_PATH)
     return {
+        "configure_ui_tag": CONFIGURE_UI_TAG,
         "runtime_mode": _runtime_mode_label(),
         "config_path": config_display,
         "environment_profile_status": _environment_profile_bootstrap_state(),
@@ -2893,6 +2935,7 @@ def _config_snapshot() -> dict[str, Any]:
             "splunk_token_masked": token_masked,
         },
         "expected_models": expected_models,
+        "model_stack": model_stack_summary(values),
         "ollama_pull_commands": [f"ollama pull {model}" for model in expected_models],
         "assigned_model_pull_commands": [f"ollama pull {model}" for model in unique_models],
         "ollama_available_models": _discover_ollama_models(values.get("OLLAMA_HOST", get_ollama_host())),
@@ -2967,7 +3010,7 @@ def _validate_runtime_config(values: dict[str, str], scope: str = "full") -> dic
     summary = {"ok": 0, "warn": 0, "error": 0}
     available_models: list[str] = []
     edge_available_models: list[str] = []
-    expected_models = _default_expected_models()
+    expected_models = _default_expected_models(values)
 
     def add_result(name: str, status: str, detail: str, extra: dict[str, Any] | None = None) -> None:
         summary[status] += 1
@@ -3214,14 +3257,22 @@ def _first_run_setup_required() -> bool:
     initialized = str(os.getenv("SOC_UI_AUTH_INITIALIZED", file_values.get("SOC_UI_AUTH_INITIALIZED", ""))).strip().lower()
     if initialized in {"1", "true", "yes", "on"}:
         return False
+
     users_env = str(os.getenv("SOC_UI_AUTH_USERS_JSON", file_values.get("SOC_UI_AUTH_USERS_JSON", ""))).strip()
-    if users_env:
+    if users_env and _users_json_has_hashed_passwords(users_env):
         return False
+
     password = str(os.getenv("SOC_UI_AUTH_PASSWORD", file_values.get("SOC_UI_AUTH_PASSWORD", ""))).strip()
     username = str(os.getenv("SOC_UI_AUTH_USERNAME", file_values.get("SOC_UI_AUTH_USERNAME", ""))).strip()
+    if _looks_like_password_hash(password) and username:
+        return False
+
     if not username or not password:
         return True
-    return password in DEFAULT_UI_PASSWORDS
+    if password in DEFAULT_UI_PASSWORDS or password in PLACEHOLDER_UI_PASSWORDS:
+        return True
+    # Fresh installs ship with SOC_UI_AUTH_INITIALIZED=0 and example placeholders.
+    return True
 
 
 def _load_auth_users() -> dict[str, dict[str, str]]:
@@ -6819,6 +6870,8 @@ APP_HTML = """<!doctype html>
           <a class=\"nav-submenu-item\" href=\"/architecture\"><span class=\"nav-submenu-title\">Architecture</span><span class=\"nav-submenu-copy\">System flow and trust boundaries</span></a>
           <a class=\"nav-submenu-item\" href=\"/docs\"><span class=\"nav-submenu-title\">Docs</span><span class=\"nav-submenu-copy\">Whitepapers, guides, and references</span></a>
           <a class=\"nav-submenu-item\" href=\"/configure\"><span class=\"nav-submenu-title\">Configuration</span><span class=\"nav-submenu-copy\">Endpoints, models, validation</span></a>
+          <a class=\"nav-submenu-item\" href=\"/admin/ollama-ops\"><span class=\"nav-submenu-title\">Ollama Ops</span><span class=\"nav-submenu-copy\">GPU metrics and live Ollama logs</span></a>
+          <a class=\"nav-submenu-item\" href=\"/cases\"><span class=\"nav-submenu-title\">Case Workspace</span><span class=\"nav-submenu-copy\">Persistent cases and branch history</span></a>
           <a class=\"nav-submenu-item\" href=\"/learning\"><span class=\"nav-submenu-title\">SPL Optimization</span><span class=\"nav-submenu-copy\">AI-driven SPL improvement and review</span></a>
           <a class=\"nav-submenu-item\" href=\"/spl-assets\"><span class=\"nav-submenu-title\">SPL Asset Repository</span><span class=\"nav-submenu-copy\">Approved reusable SPL assets</span></a>
           <a class=\"nav-submenu-item\" href=\"/users\"><span class=\"nav-submenu-title\">Users</span><span class=\"nav-submenu-copy\">Local users and audit trail</span></a>
@@ -6843,7 +6896,7 @@ APP_HTML = """<!doctype html>
             <span class=\"hint-pop\">Natural-language investigation request. Keep it read-only (search/analyze/explain) for this lab flow.</span>
           </span>
         </label>
-        <textarea id=\"question\">Show failed login activity in the last 24 hours</textarea>
+        <textarea id=\"question\" data-testid=\"investigation-question\">Show failed login activity in the last 24 hours</textarea>
         <details class=\"domain-hints\">
           <summary class=\"hint-title\">Likely Data Sources (planning hint)</summary>
           <div id=\"domain-hints\" class=\"domain-list\">
@@ -6928,7 +6981,7 @@ APP_HTML = """<!doctype html>
             <p id=\"pipeline-help\" class=\"muted\"></p>
           </div>
         </details>
-        <button id=\"run\" type=\"button\" onclick=\"window.runInvestigationSafe && window.runInvestigationSafe(); return false;\" title=\"Execute selected investigation pipeline with current settings\">Run Investigation</button>
+        <button id=\"run\" type=\"button\" data-testid=\"investigation-run\" onclick=\"window.runInvestigationSafe && window.runInvestigationSafe(); return false;\" title=\"Execute selected investigation pipeline with current settings\">Run Investigation</button>
         <div id="run-progress-wrap" class="run-progress-wrap" style="display:none;">
           <div class="run-progress-meta">
             <span id="run-progress-label">Preparing investigation...</span>
@@ -7051,7 +7104,7 @@ APP_HTML = """<!doctype html>
                     </div>
                     <div id=\"spl-raw-shell\" class=\"spl-raw-shell\">
                       <div id=\"spl-raw-panel\" class=\"spl-summary-panel\">
-                        <pre id=\"spl-query\"></pre>
+                        <pre id=\"spl-query\" data-testid=\"spl-query-panel\"></pre>
                       </div>
                       <details class=\"spl-toggle\">
                         <summary>SPL Results (sample)</summary>
@@ -7087,7 +7140,7 @@ APP_HTML = """<!doctype html>
                   <div class=\"execution-monitor-meta\">
                     <div class=\"support-item\"><div class=\"support-label\">Elapsed</div><div id=\"exec-monitor-elapsed\" class=\"support-value\">0s</div></div>
                     <div class=\"support-item\"><div class=\"support-label\">Rows</div><div id=\"exec-monitor-rows\" class=\"support-value\">n/a</div></div>
-                    <div class=\"support-item\"><div class=\"support-label\">Run State</div><div id=\"exec-monitor-state\" class=\"support-value\">Idle</div></div>
+                    <div class=\"support-item\"><div class=\"support-label\">Run State</div><div id=\"exec-monitor-state\" class=\"support-value\" data-testid=\"exec-monitor-state\">Idle</div></div>
                     <div class=\"support-item\"><div class=\"support-label\">Next action</div><div id=\"exec-monitor-next\" class=\"support-value\">Enter a bounded question and run investigation.</div></div>
                   </div>
                 </div>
@@ -11465,6 +11518,81 @@ DOCS_SHELL_HTML = """<!doctype html>
       line-height:1.4;
       color:#9fb4cc;
     }}
+    .control-center-shell {{
+      display:grid;
+      grid-template-columns:280px minmax(0,1fr);
+      gap:16px;
+      align-items:start;
+    }}
+    .control-pane {{
+      position:sticky;
+      top:10px;
+      border:1px solid #244660;
+      border-radius:18px;
+      background:linear-gradient(180deg,#08182a,#07111f);
+      padding:14px;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.02);
+    }}
+    .control-pane-head {{
+      margin-bottom:12px;
+      padding-bottom:10px;
+      border-bottom:1px solid #23445f;
+    }}
+    .control-pane-kicker {{
+      font-size:11px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      color:#7dd3fc;
+      margin-bottom:4px;
+    }}
+    .control-pane-title {{
+      margin:0;
+      font-size:18px;
+      line-height:1.2;
+      color:#f8fafc;
+    }}
+    .control-pane-links {{
+      display:grid;
+      gap:8px;
+    }}
+    .control-pane-link {{
+      display:grid;
+      gap:4px;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid transparent;
+      text-decoration:none;
+      color:inherit;
+      transition:border-color .16s ease, background .16s ease;
+    }}
+    .control-pane-link:hover {{
+      border-color:#315a79;
+      background:#0b2130;
+    }}
+    .control-pane-link.active {{
+      border-color:#22c55e;
+      background:linear-gradient(180deg,#0a2514,#07160d);
+      box-shadow:0 0 0 1px rgba(34,197,94,.12);
+    }}
+    .control-pane-link-title {{
+      font-size:13px;
+      font-weight:900;
+      line-height:1.2;
+      color:#eff6ff;
+    }}
+    .control-pane-link-copy {{
+      font-size:11px;
+      line-height:1.4;
+      color:#9fb4cc;
+    }}
+    .control-center-main {{
+      min-width:0;
+    }}
+    @media (max-width: 980px) {{
+      .control-center-shell {{ grid-template-columns:1fr; }}
+      .control-pane {{ position:static; }}
+    }}
     @media (max-width: 980px) {{ .nav-version-pill{{display:none;}} }}
     .layout {{ display:grid; grid-template-columns: 320px minmax(0, 1fr); gap:0; align-items:start; }}
     .card {{
@@ -12805,8 +12933,8 @@ def _architecture_svg() -> str:
       <h3>LLM Host (Windows + RTX 3090)</h3>
       <ul>
         <li>Remote Ollama API on <code>:11434</code>.</li>
-        <li>Planner uses Qwen to interpret the question and produce a structured search plan.</li>
-        <li>SPL Writer uses DeepSeek to turn that plan into bounded read-only SPL.</li>
+        <li>Planner uses Ministral-3B-Reasoning to interpret the question and produce a structured search plan.</li>
+        <li>SPL Writer uses Granite 4 to turn that plan into bounded read-only SPL.</li>
         <li>Security Reviewer uses Foundation-Sec for security-oriented quality and safety critique.</li>
         <li>Peer Reviewer 1 only runs when the reviewer does not cleanly approve the writer output.</li>
         <li>Peer Reviewer 2 verifies or overrides that adjudication when it is needed.</li>
@@ -12962,7 +13090,7 @@ def _docs_index_body() -> str:
         <h2>Start Here</h2>
         <p>If you are new to A.G.E.N.T. Smith, begin with the business overview and then move into the technical architecture only if you need deeper detail.</p>
         <p><a href=\"/docs\">Open the business overview</a></p>
-        <p><a href=\"/docs/view?path=project/v1_4_1_delta.md\">Open the v1.4.1 release highlights</a></p>
+        <p><a href=\"/docs/view?path=project/v1_5_1_delta.md\">Open the v1.5.1 release highlights</a></p>
       </div>
       <div class=\"card\">
         <h2>How To Use This Section</h2>
@@ -12975,7 +13103,9 @@ def _docs_index_body() -> str:
         <h2>What Is This?</h2>
         <p>Use these if you want the business story, problem statement, current value, and roadmap direction.</p>
         <div class=\"guide-links\">
-          <a class=\"guide-link\" href=\"/docs/view?path=project/v1_4_1_delta.md\"><strong>v1.4.1 Release Highlights</strong><span>Short operator-facing summary of what changed in the v1.4.1 release.</span></a>
+          <a class=\"guide-link\" href=\"/docs/view?path=project/v1_5_1_delta.md\"><strong>v1.5.1 Release Highlights</strong><span>Short operator-facing summary of what changed in the v1.5.1 release.</span></a>
+          <a class=\"guide-link\" href=\"/docs/view?path=project/v1_5_0_delta.md\"><strong>v1.5.0 Release Highlights</strong><span>Writer and peer model promotion; superseded planner default in v1.5.1.</span></a>
+          <a class=\"guide-link\" href=\"/docs/view?path=project/v1_4_2_delta.md\"><strong>v1.4.2 Release Highlights</strong><span>Short operator-facing summary of what changed in the v1.4.2 release.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=whitepapers/project_one_page_white_paper.md\"><strong>What A.G.E.N.T. Smith Is</strong><span>Fastest explanation for non-technical readers.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=runbooks/initial_setup.md\"><strong>Initial Setup Guide</strong><span>Step-by-step install and configuration for a new machine.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=whitepapers/executive_white_paper.md\"><strong>Executive Summary</strong><span>Value, controls, and readiness framing for leadership.</span></a>
@@ -13166,7 +13296,7 @@ def _architecture_page_body() -> str:
 
           <text x="788" y="118" fill="#9bf7cf" font-size="12" font-weight="700" letter-spacing=".08em">PRIMARY INFERENCE</text>
           <text x="788" y="150" fill="#f5f9ff" font-size="24" font-weight="800">Primary Ollama Host</text>
-          <text x="788" y="178" fill="#bfd0df" font-size="13">Qwen plans, DeepSeek writes, Foundation-Sec</text>
+          <text x="788" y="178" fill="#bfd0df" font-size="13">Ministral plans, Granite writes, Foundation-Sec</text>
           <text x="788" y="198" fill="#bfd0df" font-size="13">reviews evidence, continuation, and summary.</text>
           <text x="788" y="226" fill="#8fb0cb" font-size="13">Main model endpoint</text>
 
@@ -13234,7 +13364,7 @@ def _architecture_page_body() -> str:
             <h3>Primary Ollama Host</h3>
             <span class="arch-step-badge">4</span>
           </div>
-          <p class="arch-endpoint-copy">Run the main model roles. Qwen plans, DeepSeek writes bounded SPL, Foundation-Sec handles the security-facing review path, and peer adjudication remains available when needed. This host remains the primary reasoning engine whether or not the edge helper exists.</p>
+          <p class="arch-endpoint-copy">Run the main model roles. Ministral plans, Granite writes bounded SPL, Foundation-Sec handles the security-facing review path, and Gemma peer adjudication remains available when needed. This host remains the primary reasoning engine whether or not the edge helper exists.</p>
           <div class="arch-endpoint-meta">Remote API on <code>:11434</code><br/>Controller -&gt; primary inference host</div>
         </section>
         <section class="arch-endpoint-card">
@@ -13305,10 +13435,10 @@ def _architecture_page_body() -> str:
           <ul>
             <li>Optional Edge Helper only runs when explicitly enabled in runtime configuration.</li>
             <li>Its narrow role is routing, split-query hints, and cheap confidence pre-checks.</li>
-            <li>Planner uses Qwen to interpret the analyst question and propose the bounded search strategy.</li>
-            <li>SPL Writer uses DeepSeek to generate bounded read-only SPL from that plan.</li>
+            <li>Planner uses Ministral-3B-Reasoning to interpret the analyst question and propose the bounded search strategy.</li>
+            <li>SPL Writer uses Granite 4 to generate bounded read-only SPL from that plan.</li>
             <li>Security Reviewer uses Foundation-Sec for security-oriented critique and safety review.</li>
-            <li>Peer Reviewer 1 and 2 stay available for adjudication when the reviewer contests or materially revises the writer output.</li>
+            <li>Peer Reviewer 1 and 2 use Gemma 3 when adjudication is needed between writer and security reviewer outputs.</li>
             <li>Evidence Reviewer uses Foundation-Sec to check returned rows against the claim set.</li>
             <li>Continuation Reviewer uses Foundation-Sec to decide whether another bounded pivot is warranted.</li>
             <li>Final Summary uses Foundation-Sec to produce the analyst-facing narrative.</li>
@@ -14187,12 +14317,17 @@ def _configure_page_body() -> str:
       box-shadow:0 16px 30px rgba(8,23,37,.34), inset 0 1px 0 rgba(255,255,255,.06);
     }
     .cfg-validate-grid{display:grid;gap:8px;}
-    .cfg-check{border:1px solid #25384d;border-radius:14px;padding:12px 14px;background:#091423;}
-    .cfg-check.ok{border-color:#166534;background:#062313;}
-    .cfg-check.warn{border-color:#a16207;background:#2a1a06;}
-    .cfg-check.error{border-color:#991b1b;background:#2a0d0d;}
-    .cfg-check-head{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:4px;}
-    .cfg-check-name{font-weight:800;color:#f8fafc;font-size:13px;}
+    .cfg-check-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;min-width:0;}
+    .cfg-check{
+      border:1px solid #294560;border-radius:16px;padding:12px 14px;background:linear-gradient(180deg,#0a1627,#07111f);
+      border-left:4px solid var(--check-accent,#315a79);box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+    }
+    .cfg-check.ok{--check-accent:#22c55e;border-color:#166534;background:linear-gradient(180deg,#0a2514,#07160d);}
+    .cfg-check.warn{--check-accent:#f59e0b;border-color:#a16207;background:linear-gradient(180deg,#241808,#151008);}
+    .cfg-check.error{--check-accent:#ef4444;border-color:#991b1b;background:linear-gradient(180deg,#240d0d,#13090b);}
+    .cfg-check-head{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:6px;}
+    .cfg-check-name{font-weight:800;color:#f8fafc;font-size:13px;display:flex;align-items:center;gap:8px;text-transform:uppercase;letter-spacing:.04em;}
+    .cfg-check-dot{width:9px;height:9px;border-radius:999px;background:var(--check-accent,#64748b);box-shadow:0 0 8px var(--check-accent,#64748b);flex:0 0 auto;}
     .cfg-check-detail{color:#d7e6f5;font-size:13px;line-height:1.45;white-space:pre-wrap;}
     .cfg-check-meta{margin-top:6px;color:#bfd3e7;font-size:12px;line-height:1.4;white-space:pre-wrap;}
     .cfg-model-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:14px;min-width:0;}
@@ -14279,6 +14414,130 @@ def _configure_page_body() -> str:
     .cfg-compare-item{border:1px solid #254059;border-radius:12px;background:#07111f;padding:9px 11px;color:#dbeafe;font-size:12px;line-height:1.5;overflow-wrap:anywhere;word-break:break-word;min-width:0;}
     .cfg-compare-item.ok{border-color:#166534;background:#062313;color:#dcfce7;}
     .cfg-compare-item.warn{border-color:#a16207;background:#2a1a06;color:#fde68a;}
+    .cfg-stack-summary{
+      display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 14px;
+      padding:12px 14px;border:1px solid #27415a;border-radius:16px;
+      background:linear-gradient(180deg,#091423,#07111f);
+    }
+    .cfg-stack-summary-copy{color:#dbeafe;font-size:13px;line-height:1.55;flex:1 1 240px;}
+    .cfg-family-shell{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,340px);gap:20px;align-items:stretch;margin-top:4px;}
+    .cfg-family-main{display:grid;gap:16px;min-width:0;align-content:start;}
+    .cfg-family-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;min-width:0;}
+    .cfg-family-tile{
+      --family-accent:#38bdf8;
+      position:relative;
+      border:1px solid color-mix(in srgb, var(--family-accent) 42%, #183246);
+      border-radius:18px;
+      background:linear-gradient(165deg, color-mix(in srgb, var(--family-accent) 9%, #0a1627) 0%, #07111f 72%);
+      padding:16px 16px 14px;
+      box-shadow:0 0 0 1px color-mix(in srgb, var(--family-accent) 10%, transparent), 0 16px 36px rgba(2,6,23,.32), inset 0 1px 0 rgba(255,255,255,.04);
+      min-width:0;min-height:292px;display:flex;flex-direction:column;
+      transition:box-shadow .2s ease, border-color .2s ease, transform .2s ease;
+    }
+    .cfg-family-tile:hover{
+      border-color:color-mix(in srgb, var(--family-accent) 58%, #183246);
+      box-shadow:0 0 0 1px color-mix(in srgb, var(--family-accent) 18%, transparent), 0 20px 40px rgba(2,6,23,.38), 0 0 36px color-mix(in srgb, var(--family-accent) 14%, transparent);
+      transform:translateY(-1px);
+    }
+    .cfg-family-tile::before{
+      content:"";display:block;height:4px;border-radius:18px 18px 0 0;margin:-16px -16px 14px;
+      background:linear-gradient(90deg, var(--family-accent), color-mix(in srgb, var(--family-accent) 55%, #ffffff));
+    }
+    .cfg-family-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;margin-bottom:6px;}
+    .cfg-family-title{margin:0;font-size:18px;font-weight:800;color:#f8fafc;letter-spacing:.01em;}
+    .cfg-family-badge{
+      display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;
+      border:1px solid color-mix(in srgb, var(--family-accent) 48%, #294560);
+      background:color-mix(in srgb, var(--family-accent) 14%, #0b2130);
+      color:var(--family-accent);font-size:11px;font-weight:800;white-space:nowrap;
+    }
+    .cfg-family-copy{color:#9fb4cc;font-size:12px;line-height:1.55;margin:0 0 10px;}
+    .cfg-family-stages{display:grid;gap:5px;margin:0 0 14px;padding:0;list-style:none;}
+    .cfg-family-stages li{
+      display:flex;align-items:center;gap:8px;color:#c7d9ee;font-size:12px;line-height:1.4;
+    }
+    .cfg-family-stages li::before{
+      content:"";width:7px;height:7px;border-radius:999px;background:var(--family-accent);flex:0 0 auto;
+    }
+    .cfg-family-slot{display:grid;gap:6px;margin-bottom:10px;margin-top:auto;}
+    .cfg-family-slot:last-child{margin-bottom:0;}
+    .cfg-family-slot.optional .cfg-family-slot-label{opacity:.88;}
+    .cfg-family-slot-label{color:#cbd5e1;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.09em;display:flex;align-items:center;gap:6px;}
+    .cfg-slot-swatch{width:8px;height:8px;border-radius:999px;background:var(--slot-accent,var(--family-accent,#38bdf8));box-shadow:0 0 8px var(--slot-accent,var(--family-accent,#38bdf8));flex:0 0 auto;}
+    .cfg-family-slot-picker{display:grid;gap:0;min-width:0;}
+    .cfg-model-chip{
+      display:flex;align-items:center;gap:8px;margin-top:6px;padding:6px 10px;border-radius:10px;
+      border:1px solid color-mix(in srgb, var(--chip-accent,#64748b) 42%, #294560);
+      background:color-mix(in srgb, var(--chip-accent,#64748b) 11%, #081525);
+      min-width:0;
+    }
+    .cfg-model-chip.empty{opacity:.5;}
+    .cfg-model-chip-dot{width:10px;height:10px;border-radius:999px;background:var(--chip-accent,#64748b);box-shadow:0 0 10px var(--chip-accent,#64748b);flex:0 0 auto;}
+    .cfg-model-chip-text{color:#e2e8f0;font-size:11px;line-height:1.35;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .cfg-model-chip-role{color:var(--chip-accent,#94a3b8);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;margin-left:auto;flex:0 0 auto;}
+    .cfg-model-legend{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px;}
+    .cfg-model-legend-item{
+      display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;
+      border:1px solid color-mix(in srgb, var(--legend-accent,#38bdf8) 45%, #294560);
+      background:color-mix(in srgb, var(--legend-accent,#38bdf8) 12%, #0b2130);
+      font-size:11px;color:#e2e8f0;max-width:100%;
+    }
+    .cfg-model-legend-dot{width:9px;height:9px;border-radius:999px;background:var(--legend-accent,#38bdf8);box-shadow:0 0 8px var(--legend-accent,#38bdf8);flex:0 0 auto;}
+    .cfg-model-legend-label{font-weight:800;color:var(--legend-accent,#bae6fd);white-space:nowrap;}
+    .cfg-model-legend-model{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px;}
+    .cfg-family-input{
+      width:100%;box-sizing:border-box;background:#06101b;color:#f8fafc;
+      border:1px solid color-mix(in srgb, var(--family-accent) 44%, #2a4a64);border-radius:14px;
+      padding:11px 13px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    }
+    .cfg-family-input:focus{
+      outline:none;border-color:var(--family-accent);
+      box-shadow:0 0 0 3px color-mix(in srgb, var(--family-accent) 20%, transparent);
+    }
+    .cfg-family-input.missing{border-color:#a16207;background:#2a1a06;}
+    .cfg-family-flow{
+      display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;
+      padding:12px 14px;border:1px dashed #315a79;border-radius:14px;color:#94a3b8;font-size:12px;font-weight:700;
+      background:rgba(8,18,32,.55);
+    }
+    .cfg-family-flow span:not(.cfg-family-flow-arrow){color:#cbd5e1;}
+    .cfg-family-flow-arrow{color:#64748b;font-size:14px;}
+    .cfg-family-inventory{
+      border:1px solid #315a79;border-radius:18px;background:linear-gradient(180deg,#0a1627,#07111f);
+      padding:16px;position:sticky;top:12px;min-width:0;align-self:stretch;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+    }
+    .cfg-family-inventory h4{margin:0 0 4px;font-size:16px;font-weight:800;color:#f8fafc;}
+    .cfg-family-inventory .cfg-help{margin-bottom:12px;font-size:12px;}
+    .cfg-inventory-table{display:grid;gap:10px;max-height:none;overflow:visible;padding-right:0;}
+    .cfg-inventory-row{
+      border:1px solid #294560;border-radius:14px;background:#081525;padding:11px 12px;
+      display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+      border-left:4px solid var(--row-accent,#315a79);
+      transition:box-shadow .16s ease, border-color .16s ease;
+    }
+    .cfg-inventory-row.missing{border-color:#a16207;background:#2a1a06;}
+    .cfg-inventory-row.highlight{
+      border-color:color-mix(in srgb, var(--row-accent,#38bdf8) 55%, #294560);
+      box-shadow:0 0 0 1px color-mix(in srgb, var(--row-accent,#38bdf8) 35%, transparent), 0 0 18px color-mix(in srgb, var(--row-accent,#38bdf8) 18%, transparent);
+    }
+    .cfg-inventory-name{
+      color:#dbeafe;font-size:12px;line-height:1.45;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+      overflow-wrap:anywhere;display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto;
+    }
+    .cfg-inventory-name-dot{width:9px;height:9px;border-radius:999px;background:var(--row-accent,#64748b);box-shadow:0 0 8px var(--row-accent,#64748b);flex:0 0 auto;}
+    .cfg-inventory-meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+    .cfg-inventory-pill{
+      display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:800;
+      border:1px solid #294560;background:#0b2130;color:#bde6ff;
+    }
+    .cfg-inventory-pill.ok{border-color:#166534;background:#062313;color:#bbf7d0;}
+    .cfg-inventory-pill.warn{border-color:#a16207;background:#2a1a06;color:#fde68a;}
+    .cfg-inventory-pill.role-planning{border-color:#38bdf8;background:rgba(56,189,248,.12);color:#bae6fd;}
+    .cfg-inventory-pill.role-generation{border-color:#14b8a6;background:rgba(20,184,166,.12);color:#99f6e4;}
+    .cfg-inventory-pill.role-peer{border-color:#f59e0b;background:rgba(245,158,11,.12);color:#fde68a;}
+    .cfg-inventory-pill.role-analysis{border-color:#a78bfa;background:rgba(167,139,250,.12);color:#ddd6fe;}
+    .cfg-model-grid-advanced{margin-top:12px;}
     .cfg-personalize-card{border:1px solid #27415a;border-radius:16px;background:linear-gradient(180deg,#091423,#07111f);padding:16px;}
     .cfg-personalize-status{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;}
     .cfg-personalize-copy{color:#dbeafe;font-size:13px;line-height:1.6;}
@@ -14314,6 +14573,170 @@ def _configure_page_body() -> str:
     .cfg-progress-track{width:100%;height:12px;border-radius:999px;border:1px solid #26435c;background:#07111f;overflow:hidden;}
     .cfg-progress-bar{height:100%;width:0%;background:linear-gradient(90deg,#22c55e,#10b981);transition:width .25s ease;}
     .cfg-progress-log{max-height:220px;}
+    .cfg-lane-nav{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin:4px 0 12px;padding:8px;border:1px solid #27415a;border-radius:16px;background:linear-gradient(180deg,#091423,#07111f);}
+    .cfg-lane-tabs{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+    .cfg-lane-health{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto;}
+    .cfg-lane-health-pill{
+      display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border-radius:999px;
+      border:1px solid #294560;background:#0b2130;color:#dbeafe;font-size:11px;font-weight:800;white-space:nowrap;
+    }
+    .cfg-lane-health-pill.ok{border-color:#166534;background:#062313;color:#bbf7d0;}
+    .cfg-lane-health-pill.warn{border-color:#a16207;background:#2a1a06;color:#fde68a;}
+    .cfg-lane-health-pill.error{border-color:#991b1b;background:#2a0d0d;color:#fecaca;}
+    .cfg-lane-health-pill.waiting{border-color:#294560;color:#94a3b8;}
+    .cfg-lane-health-sep{color:#64748b;font-size:11px;font-weight:700;user-select:none;}
+    .cfg-lane-tab{
+      display:inline-flex;align-items:center;gap:6px;padding:10px 14px;border-radius:12px;
+      border:1px solid #294560;background:#0b2130;color:#dbeafe;text-decoration:none;font-size:13px;font-weight:800;
+      transition:border-color .16s ease, background .16s ease, color .16s ease;
+    }
+    .cfg-lane-tab:hover{border-color:#60a5fa;color:#f8fafc;}
+    .cfg-lane-tab.active{border-color:#22c55e;background:linear-gradient(180deg,#0a2514,#07160d);color:#dcfce7;}
+    .cfg-lane-tab.next-step{
+      border-color:#38bdf8;color:#f0f9ff;background:linear-gradient(180deg,#0c2740,#081828);
+      box-shadow:0 0 0 1px rgba(56,189,248,.35), 0 0 18px rgba(56,189,248,.28), 0 0 36px rgba(56,189,248,.12);
+      animation:cfgLanePulse 2.2s ease-in-out infinite;
+    }
+    .cfg-lane-tab.next-step::after{
+      content:"Next →";margin-left:6px;padding:2px 8px;border-radius:999px;font-size:10px;font-weight:900;
+      letter-spacing:.06em;text-transform:uppercase;border:1px solid rgba(56,189,248,.45);
+      background:rgba(56,189,248,.14);color:#bae6fd;
+    }
+    .cfg-lane-tab.next-step.active{animation:none;border-color:#22c55e;background:linear-gradient(180deg,#0a2514,#07160d);color:#dcfce7;box-shadow:0 0 0 1px rgba(34,197,94,.35), 0 0 16px rgba(34,197,94,.22);}
+    .cfg-lane-tab.next-step.active::after{content:none;}
+    @keyframes cfgLanePulse{
+      0%,100%{box-shadow:0 0 0 1px rgba(56,189,248,.35), 0 0 14px rgba(56,189,248,.22);}
+      50%{box-shadow:0 0 0 1px rgba(56,189,248,.55), 0 0 24px rgba(56,189,248,.38), 0 0 42px rgba(56,189,248,.16);}
+    }
+    .cfg-next-action.highlight-next{
+      border-color:#38bdf8;
+      box-shadow:0 0 0 1px rgba(56,189,248,.22), 0 0 24px rgba(56,189,248,.12);
+    }
+    .cfg-models-panel > .cfg-panel{
+      border:0;border-radius:0;background:transparent;padding:0;box-shadow:none;
+    }
+    .cfg-models-panel > .cfg-panel > h2{margin:0 0 8px;font-size:28px;line-height:1.05;color:#f8fafc;font-weight:800;}
+    .cfg-models-panel > .cfg-panel > .cfg-help{margin:0 0 16px;font-size:13px;color:#9fb4cc;max-width:920px;}
+    .cfg-models-panel .cfg-tip{display:none;}
+    .cfg-shell[data-cfg-lane="models"] .cfg-hero,
+    .cfg-shell[data-cfg-lane="models"] #cfg-health-board,
+    .cfg-shell[data-cfg-lane="models"] .cfg-hero-status,
+    .cfg-shell[data-cfg-lane="models"] #cfg-next-action,
+    .cfg-shell[data-cfg-lane="validate"] .cfg-hero,
+    .cfg-shell[data-cfg-lane="validate"] #cfg-health-board,
+    .cfg-shell[data-cfg-lane="validate"] .cfg-hero-status,
+    .cfg-shell[data-cfg-lane="validate"] #cfg-next-action,
+    .cfg-shell[data-cfg-lane="ground"] .cfg-hero,
+    .cfg-shell[data-cfg-lane="ground"] #cfg-health-board,
+    .cfg-shell[data-cfg-lane="ground"] .cfg-hero-status,
+    .cfg-shell[data-cfg-lane="ground"] #cfg-next-action{display:none;}
+    .cfg-shell[data-cfg-lane="models"] .cfg-lane-nav,
+    .cfg-shell[data-cfg-lane="validate"] .cfg-lane-nav,
+    .cfg-shell[data-cfg-lane="ground"] .cfg-lane-nav{margin:0 0 14px;}
+    body.cfg-page-focus-lane .cfg-page-intro{display:none;}
+    .cfg-validate-panel > .cfg-panel,
+    .cfg-ground-panel > .cfg-panel{
+      border:0;border-radius:0;background:transparent;padding:0;box-shadow:none;
+    }
+    .cfg-validate-panel > .cfg-panel > h2,
+    .cfg-ground-panel > .cfg-panel > h2{margin:0 0 8px;font-size:28px;line-height:1.05;color:#f8fafc;font-weight:800;}
+    .cfg-validate-panel > .cfg-panel > .cfg-help,
+    .cfg-ground-panel > .cfg-panel > .cfg-help{margin:0 0 16px;font-size:13px;color:#9fb4cc;max-width:920px;}
+    .cfg-readiness-wrap.error{border-color:#991b1b;background:linear-gradient(180deg,#240d0d,#13090b);}
+    .cfg-readiness-wrap.error #cfg-validation-state-badge,
+    .cfg-readiness-wrap.error #cfg-ground-state-badge{border-color:#991b1b;background:#2a0d0d;color:#fecaca;}
+    .cfg-validation-badges,.cfg-validation-summary-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;}
+    .cfg-validate-shell,.cfg-ground-shell{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,340px);gap:20px;align-items:start;}
+    .cfg-validate-main,.cfg-ground-main{display:grid;gap:16px;min-width:0;}
+    .cfg-validate-side,.cfg-ground-aside{display:grid;gap:16px;min-width:0;align-content:start;}
+    .cfg-section-card{
+      border:1px solid #315a79;border-radius:18px;background:linear-gradient(180deg,#0a1627,#07111f);
+      padding:16px 18px;box-shadow:inset 0 1px 0 rgba(255,255,255,.03);min-width:0;
+    }
+    .cfg-section-card.accent-validate{border-color:#38bdf8;box-shadow:0 0 0 1px rgba(56,189,248,.12), inset 0 1px 0 rgba(255,255,255,.03);}
+    .cfg-section-card.accent-ground{border-color:#22c55e;box-shadow:0 0 0 1px rgba(34,197,94,.12), inset 0 1px 0 rgba(255,255,255,.03);}
+    .cfg-section-card.accent-warn{border-color:#a16207;background:linear-gradient(180deg,#241808,#151008);}
+    .cfg-section-title{margin:0 0 6px;font-size:17px;font-weight:800;color:#f8fafc;}
+    .cfg-section-card .cfg-help{margin:0 0 12px;font-size:12px;}
+    .cfg-save-hint-card p{margin:0 0 10px;color:#dbeafe;font-size:13px;line-height:1.55;}
+    .cfg-ground-steps{display:grid;gap:10px;margin:0;padding:0;list-style:none;}
+    .cfg-ground-steps li{
+      display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start;padding:10px 12px;border:1px solid #294560;border-radius:14px;background:#081525;
+    }
+    .cfg-ground-step-num{
+      width:24px;height:24px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;
+      border:1px solid #315a79;background:#0a2034;color:#dbeafe;font-size:11px;font-weight:900;
+    }
+    .cfg-ground-step-copy{color:#dbeafe;font-size:12px;line-height:1.5;}
+    .cfg-ground-step-copy strong{color:#f8fafc;}
+    .cfg-ground-primary .cfg-progress-track{height:14px;background:#06101b;}
+    .cfg-ground-aside .cfg-note{margin-top:0;}
+    @media (max-width: 1180px){.cfg-validate-shell,.cfg-ground-shell{grid-template-columns:1fr;}}
+    @media (max-width: 980px){.cfg-check-grid{grid-template-columns:1fr;}}
+    .cfg-readiness-wrap{
+      display:grid;gap:10px;margin:0 0 18px;padding:16px 18px;
+      border:1px solid #315a79;border-radius:18px;
+      background:linear-gradient(180deg,#0a1627,#07111f);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+    }
+    .cfg-readiness-wrap.ok{border-color:#166534;background:linear-gradient(180deg,#0a2514,#07160d);}
+    .cfg-readiness-wrap.warn{border-color:#a16207;background:linear-gradient(180deg,#241808,#151008);}
+    .cfg-readiness-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;}
+    .cfg-readiness-copy{color:#e2e8f0;font-size:14px;line-height:1.55;flex:1 1 240px;font-weight:600;}
+    .cfg-readiness-progress-label{color:#94a3b8;font-size:12px;font-weight:700;margin:0;}
+    .cfg-readiness-toggle{display:flex;align-items:center;gap:8px;color:#c7d9ee;font-size:12px;font-weight:700;}
+    .cfg-readiness-toggle input{width:16px;height:16px;margin:0;}
+    #cfg-readiness-pct{
+      display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;
+      border:1px solid #166534;background:#062313;color:#bbf7d0;font-size:12px;font-weight:800;
+    }
+    .cfg-readiness-wrap.warn #cfg-readiness-pct{border-color:#a16207;background:#2a1a06;color:#fde68a;}
+    .cfg-family-select:focus{
+      outline:none;border-color:var(--family-accent, #38bdf8);
+      box-shadow:0 0 0 3px color-mix(in srgb, var(--family-accent, #38bdf8) 20%, transparent);
+    }
+    .cfg-family-select.missing{border-color:#a16207;background:#2a1a06;}
+    .cfg-lane-panel{display:grid;gap:16px;min-width:0;}
+    .cfg-lane-hidden{display:none !important;}
+    .cfg-next-action{
+      border:1px solid #27415a;border-radius:18px;background:linear-gradient(180deg,#091423,#07111f);
+      padding:16px 18px;margin-bottom:4px;
+    }
+    .cfg-next-action-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:8px;}
+    .cfg-next-action-title{margin:0;font-size:19px;font-weight:800;color:#f8fafc;}
+    .cfg-next-action-detail{color:#dbeafe;font-size:14px;line-height:1.6;margin:0;}
+    .cfg-next-action-meta{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;}
+    .cfg-models-panel .cfg-readiness-wrap .cfg-progress-track{height:14px;background:#06101b;}
+    .cfg-family-select{
+      width:100%;box-sizing:border-box;background:linear-gradient(90deg, color-mix(in srgb, var(--slot-accent,var(--family-accent,#38bdf8)) 14%, #06101b), #06101b 36%);
+      color:#f1f5f9;border:1px solid color-mix(in srgb, var(--slot-accent,var(--family-accent,#38bdf8)) 52%, #2a4a64);
+      border-left:4px solid var(--slot-accent,var(--family-accent,#38bdf8));
+      border-radius:14px;padding:12px 38px 12px 13px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+      appearance:none;cursor:pointer;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%2394a3b8' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+      background-repeat:no-repeat;background-position:right 14px center;
+    }
+    .cfg-family-select.has-model{color:#f8fafc;font-weight:600;}
+    .cfg-inventory-copy{
+      appearance:none;border:1px solid #315a79;background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;
+      border-radius:10px;padding:5px 9px;font-size:11px;font-weight:800;cursor:pointer;margin-left:auto;
+    }
+    .cfg-inventory-copy:hover{border-color:#60a5fa;}
+    .cfg-sticky-footer{
+      position:sticky;bottom:0;z-index:30;display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+      margin-top:8px;padding:12px 14px;border:1px solid #27415a;border-radius:16px;
+      background:linear-gradient(180deg,rgba(9,20,35,.96),rgba(7,17,31,.98));backdrop-filter:blur(8px);
+      box-shadow:0 -8px 24px rgba(2,6,23,.28);
+    }
+    .cfg-sticky-status{
+      margin-left:auto;display:inline-flex;align-items:center;padding:6px 12px;border-radius:999px;
+      border:1px solid #294560;background:#0b2130;color:#bde6ff;font-size:12px;font-weight:700;
+      max-width:min(420px,100%);overflow-wrap:anywhere;
+    }
+    .cfg-sticky-status.ok{border-color:#166534;background:#062313;color:#bbf7d0;}
+    .cfg-sticky-status.warn{border-color:#a16207;background:#2a1a06;color:#fde68a;}
+    .cfg-sticky-status.error{border-color:#991b1b;background:#2a0d0d;color:#fecaca;}
+    .cfg-artifacts-body{padding:12px 0 4px;display:grid;gap:14px;}
     .cfg-shell button{
       margin-top:0;
       background:linear-gradient(135deg,#22c55e,#14b86a);
@@ -14341,16 +14764,27 @@ def _configure_page_body() -> str:
     .cfg-shell .btn-secondary:hover{
       box-shadow:0 16px 30px rgba(8,23,37,.34), inset 0 1px 0 rgba(255,255,255,.06);
     }
+    .cfg-sticky-footer button:disabled{opacity:.55;cursor:not-allowed;transform:none;filter:none;}
+    .cfg-readiness-bar{margin:0 0 14px;padding:12px 14px;border:1px solid #27415a;border-radius:16px;background:linear-gradient(180deg,#091423,#07111f);}
+    .cfg-readiness-bar.ok{border-color:#166534;background:linear-gradient(180deg,#0a2514,#07160d);}
+    .cfg-readiness-bar.warn{border-color:#a16207;background:linear-gradient(180deg,#241808,#151008);}
+    .cfg-pull-copy{
+      border:1px solid #315a79;background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;
+      border-radius:10px;padding:4px 8px;font-size:10px;font-weight:800;cursor:pointer;
+    }
     @media (max-width: 1120px){.cfg-grid{grid-template-columns:1fr;}.cfg-hero{grid-template-columns:1fr;}.cfg-deps-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
-    @media (max-width: 980px){.cfg-form-grid,.cfg-subgrid,.cfg-status-board,.cfg-model-grid,.cfg-compare,.cfg-deps-grid{grid-template-columns:1fr;}}
+    @media (max-width: 980px){.cfg-form-grid,.cfg-subgrid,.cfg-status-board,.cfg-model-grid,.cfg-compare,.cfg-deps-grid,.cfg-family-shell,.cfg-family-grid{grid-template-columns:1fr;}}
+    @media (max-width: 1180px){.cfg-shell[data-cfg-lane="models"] .cfg-family-shell{grid-template-columns:1fr;}}
+    @media (min-width: 981px){.cfg-shell[data-cfg-lane="models"] .cfg-family-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
   </style>
-  <h1>Configuration</h1>
-  <p class="muted">Central runtime setup for A.G.E.N.T. Smith, including Splunk MCP, the primary Ollama host, optional edge-helper routing, UI auth, tasker-role assignments, and repeatable deployment guidance for both host and Docker runtimes.</p>
+  <h1 class="cfg-page-intro">Configuration</h1>
+  <p class="muted cfg-page-intro">Central runtime setup for A.G.E.N.T. Smith, including Splunk MCP, the primary Ollama host, optional edge-helper routing, UI auth, tasker-role assignments, and repeatable deployment guidance for both host and Docker runtimes.</p>
   <div class="cfg-shell">
   <div class="cfg-hero">
     <div class="cfg-hero-card">
       <div class="statline" style="margin:0 0 10px;">
         <span class="badge">Release __APP_VERSION_LABEL__</span>
+        <span id="cfg-ui-tag" class="badge">Configure UI __CONFIGURE_UI_TAG__</span>
         <span class="badge">Stable branch</span>
       </div>
       <h2 class="cfg-hero-title">AGENT Smith runtime control center</h2>
@@ -14361,7 +14795,7 @@ def _configure_page_body() -> str:
         <span class="cfg-tip">Use this first on a new machine. It assumes Splunk is already installed and walks the rest of the setup step by step.</span>
       </div>
     </div>
-    <div class="cfg-hero-card">
+    <div class="cfg-hero-card cfg-hero-status">
       <h3 style="margin:0 0 12px;font-size:13px;color:#b9d9f6;text-transform:uppercase;letter-spacing:.09em;">Live Dependency Status</h3>
       <div id="cfg-health-board" class="cfg-status-board">
         <div class="cfg-health-card"><div class="cfg-health-head"><span class="cfg-health-name">Ollama</span><span class="cfg-health-dot"></span></div><div class="cfg-health-detail">Waiting for validation.</div></div>
@@ -14372,38 +14806,31 @@ def _configure_page_body() -> str:
       </div>
     </div>
   </div>
-  <div class="cfg-stack">
-    <div class="cfg-step" open>
-      <div class="cfg-step-body" style="margin-top:0;">
-        <div class="cfg-panel">
-          <h2>Current State</h2>
-          <p class="cfg-help">Use this section first. It answers four operator questions: is the runtime reachable, are the model roles assigned, has Data Domains started, and what should I do next?</p>
-          <div class="cfg-compare">
-            <div class="cfg-compare-card">
-              <h4>Live Endpoint Health</h4>
-              <div class="cfg-compare-list">
-                <div class="cfg-compare-item">Ollama, Splunk Base, Splunk MCP, and Data Domains health appear in the status board above.</div>
-                <div class="cfg-compare-item warn">If any card above is amber or red, validate the runtime before editing deeper settings.</div>
-              </div>
-            </div>
-            <div class="cfg-compare-card">
-              <h4>Current Role Map</h4>
-              <div class="cfg-compare-list">
-                <div class="cfg-compare-item">Planner, SPL Writer, reviewers, and summary roles are assigned in Step 3.</div>
-                <div class="cfg-compare-item">Use this page to confirm that each live role points at the model you actually intend to use.</div>
-              </div>
-            </div>
-            <div class="cfg-compare-card">
-              <h4>Next Action</h4>
-              <div class="cfg-compare-list">
-                <div class="cfg-compare-item ok">New host: open Step 1, then validate runtime endpoints in Step 2.</div>
-                <div class="cfg-compare-item">Healthy host: refresh Data Domains in Step 5, then open SPL Optimization after you have real investigations.</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+  <div id="cfg-next-action" class="cfg-next-action">
+    <div class="cfg-next-action-head">
+      <h2 class="cfg-next-action-title">Next Action</h2>
+      <span id="cfg-next-action-badge" class="cfg-badge">waiting</span>
     </div>
+    <p id="cfg-next-action-detail" class="cfg-next-action-detail">Run validation to see the recommended next step for this runtime.</p>
+    <div id="cfg-next-action-meta" class="cfg-next-action-meta"></div>
+  </div>
+  <nav id="cfg-lane-nav" class="cfg-lane-nav" aria-label="Setup lanes">
+    <div class="cfg-lane-tabs">
+      <a class="cfg-lane-tab active" href="#connect" data-lane="connect">Connect</a>
+      <a class="cfg-lane-tab" href="#models" data-lane="models">Model Stack</a>
+      <a class="cfg-lane-tab" href="#validate" data-lane="validate">Validate &amp; Save</a>
+      <a class="cfg-lane-tab" href="#ground" data-lane="ground">Ground</a>
+    </div>
+    <div id="cfg-lane-health" class="cfg-lane-health" aria-live="polite" aria-label="Dependency health summary">
+      <span class="cfg-lane-health-pill waiting">Ollama …</span>
+      <span class="cfg-lane-health-sep" aria-hidden="true">·</span>
+      <span class="cfg-lane-health-pill waiting">Splunk MCP …</span>
+      <span class="cfg-lane-health-sep" aria-hidden="true">·</span>
+      <span class="cfg-lane-health-pill waiting">models …</span>
+    </div>
+  </nav>
+  <div class="cfg-stack">
+    <section id="connect" class="cfg-lane-panel">
     <div class="cfg-step" open>
       <div class="cfg-step-label">
         <span class="cfg-step-num">1</span>
@@ -14422,7 +14849,7 @@ def _configure_page_body() -> str:
         </div>
       </div>
     </div>
-    <details class="cfg-step">
+    <details class="cfg-step" open>
       <summary>
         <div class="cfg-step-label">
           <span class="cfg-step-num">2</span>
@@ -14434,13 +14861,13 @@ def _configure_page_body() -> str:
       <div class="cfg-panel" style="padding:0;border:0;background:transparent;box-shadow:none;">
       <p class="cfg-help">These values drive the current host runtime and both Docker modes. Saving writes <code>config/ui.env</code>. In Docker, the initial Data Domains build starts only after Splunk MCP validates successfully.</p>
       <div class="cfg-form-grid">
-      <div class="cfg-row"><label for="cfg-ollama-host">OLLAMA_HOST</label><div class="cfg-example">Example URL: <code>http://192.168.1.50:11434</code></div><input id="cfg-ollama-host" placeholder="http://192.168.1.50:11434" /></div>
-      <div class="cfg-row"><label for="cfg-splunk-base">SPLUNK_BASE_URL</label><div class="cfg-example">Example URL: <code>https://192.168.1.60:8089</code></div><input id="cfg-splunk-base" placeholder="https://192.168.1.60:8089" /></div>
-      <div class="cfg-row"><label for="cfg-splunk-web">SPLUNK_WEB_URL</label><div class="cfg-example">Optional override. If blank, A.G.E.N.T. Smith auto-detects <code>https://HOST:8000</code> first, then <code>http://HOST:8000</code> from the configured Splunk host.</div><input id="cfg-splunk-web" placeholder="https://192.168.1.60:8000" /></div>
-      <div class="cfg-row wide"><label for="cfg-splunk-mcp">SPLUNK_MCP_URL</label><div class="cfg-example">Example URL: <code>https://192.168.1.60:8089/services/mcp</code></div><input id="cfg-splunk-mcp" placeholder="https://192.168.1.60:8089/services/mcp" /></div>
+      <div class="cfg-row"><label for="cfg-ollama-host">Primary Ollama host</label><div class="cfg-example">Env: <code>OLLAMA_HOST</code> — Example: <code>http://192.168.1.50:11434</code></div><input id="cfg-ollama-host" placeholder="http://192.168.1.50:11434" /></div>
+      <div class="cfg-row"><label for="cfg-splunk-base">Splunk management API</label><div class="cfg-example">Env: <code>SPLUNK_BASE_URL</code> — Example: <code>https://192.168.1.60:8089</code></div><input id="cfg-splunk-base" placeholder="https://192.168.1.60:8089" /></div>
+      <div class="cfg-row"><label for="cfg-splunk-web">Splunk Web URL (optional)</label><div class="cfg-example">Env: <code>SPLUNK_WEB_URL</code> — Auto-detects port 8000 when blank.</div><input id="cfg-splunk-web" placeholder="https://192.168.1.60:8000" /></div>
+      <div class="cfg-row wide"><label for="cfg-splunk-mcp">Splunk MCP endpoint</label><div class="cfg-example">Env: <code>SPLUNK_MCP_URL</code> — Example: <code>https://192.168.1.60:8089/services/mcp</code></div><input id="cfg-splunk-mcp" placeholder="https://192.168.1.60:8089/services/mcp" /></div>
       <div class="cfg-row wide">
-        <label for="cfg-splunk-token">SPLUNK_LAB_BEARER_TOKEN</label>
-        <div class="cfg-example">Stored server-side for the runtime. The field stays masked unless you explicitly reveal or replace it.</div>
+        <label for="cfg-splunk-token">Splunk MCP bearer token</label>
+        <div class="cfg-example">Env: <code>SPLUNK_LAB_BEARER_TOKEN</code> — Stored server-side; masked unless revealed.</div>
         <input id="cfg-splunk-token" type="password" placeholder="Bearer token value" autocomplete="off" />
         <div id="cfg-splunk-token-view" class="cfg-secret-view" aria-live="polite"></div>
         <div id="cfg-token-note" class="cfg-secret-note" style="display:none;">Token is revealed in a wrapped read-only view. Hide it to return to the compact masked editor or replace it.</div>
@@ -14454,49 +14881,95 @@ def _configure_page_body() -> str:
       <h3>UI Access</h3>
       <div class="cfg-row"><label for="cfg-auth-enabled">SOC_UI_AUTH_ENABLED</label><div class="cfg-example">Keep this enabled for a guarded multi-user UI. First-run setup creates the initial user automatically.</div><div class="cfg-select-wrap"><select id="cfg-auth-enabled"><option value="1">1</option><option value="0">0</option></select></div></div>
       </div>
-      <div class="cfg-actions">
-        <button id="cfg-save">Save Configuration</button>
-        <button id="cfg-validate" class="btn-secondary">Validate Current Config</button>
-        <button id="cfg-mcp-probe" class="btn-secondary">Test MCP Query</button>
-        <span id="cfg-status" class="cfg-status">Loading current values...</span>
-      </div>
-      <div class="cfg-note">
-        Save updates <code>config/ui.env</code>. Restart guidance is shown on the right for host runtime, Docker wrapper, and deployment image.
-      </div>
-      <h3>Validation Checker</h3>
-      <p class="cfg-help">This runs bounded live checks against the current values and confirms whether the Ollama endpoint, expected models, Splunk base URL, and Splunk MCP endpoint are reachable. In Docker, a successful MCP check also kicks off the first Data Domains build if it has not been created yet.</p>
-      <div id="cfg-validation-summary" class="cfg-badges"></div>
-      <div id="cfg-validation-results" class="cfg-validate-grid">
-        <div class="cfg-note">No validation has been run yet.</div>
-      </div>
-      <div style="margin-top:12px;">
-        <h3 style="margin:0 0 6px;">MCP Query Probe</h3>
-        <p class="cfg-help">This runs a real bounded MCP tool call using the current draft values, without requiring a save first. It is meant to answer a simple question: will the configured MCP endpoint actually execute a live request right now?</p>
-        <div id="cfg-mcp-probe-results" class="cfg-validate-grid">
-          <div class="cfg-note">No MCP probe has been run yet.</div>
-        </div>
-      </div>
+      <span id="cfg-status" class="cfg-status" style="display:none;">Loading current values...</span>
      </div>
      </div>
     </details>
     <details class="cfg-step">
       <summary>
         <div class="cfg-step-label">
-          <span class="cfg-step-num">3</span>
-          <div class="cfg-step-title">Model Role Map</div>
+          <span class="cfg-step-num">+</span>
+          <div class="cfg-step-title">Optional Edge Routing</div>
         </div>
         <span class="cfg-step-toggle"></span>
       </summary>
       <div class="cfg-step-body">
       <div class="cfg-panel" style="padding:0;border:0;background:transparent;box-shadow:none;">
-    <p class="cfg-help">These model slots are used by the primary inference pipeline. If the primary Ollama endpoint is reachable, the selectors below are populated from the currently installed model list. Saving a model name here only assigns that role; it does not install the model. The optional edge-helper model is configured separately in Step 4.</p>
-    <div id="cfg-model-compare" class="cfg-compare">
-      <div class="cfg-compare-card"><h4>Expected</h4><div id="cfg-expected-list" class="cfg-compare-list"></div></div>
-      <div class="cfg-compare-card"><h4>Installed</h4><div id="cfg-installed-list" class="cfg-compare-list"></div></div>
-      <div class="cfg-compare-card"><h4>Missing</h4><div id="cfg-missing-list" class="cfg-compare-list"></div></div>
+      <p class="cfg-help">Optional edge-hosted routing helper. Leave disabled unless you need split-query hints on a secondary Ollama host.</p>
+      <div class="cfg-form-grid">
+      <div class="cfg-row"><label for="cfg-edge-enabled">EDGE_LLM_ENABLED</label><div class="cfg-select-wrap"><select id="cfg-edge-enabled"><option value="0">0</option><option value="1">1</option></select></div></div>
+      <div class="cfg-row"><label for="cfg-edge-role">EDGE_LLM_ROLE</label><input id="cfg-edge-role" placeholder="edge_router_splitter" /></div>
+      <div class="cfg-row"><label for="cfg-edge-host">EDGE_LLM_HOST</label><input id="cfg-edge-host" placeholder="http://192.168.1.70:11434" /></div>
+      <div class="cfg-row"><label for="cfg-edge-timeout">EDGE_LLM_TIMEOUT_SEC</label><input id="cfg-edge-timeout" placeholder="60" /></div>
+      <div class="cfg-row wide"><label for="cfg-edge-model">EDGE_LLM_MODEL</label><input id="cfg-edge-model" list="cfg-edge-models-list" placeholder="qwen2.5:1.5b" /></div>
+      </div>
+      <div class="cfg-actions">
+        <button id="cfg-edge-save">Save Edge Helper</button>
+        <button id="cfg-edge-validate" class="btn-secondary">Validate Edge Helper</button>
+        <span id="cfg-edge-status" class="cfg-status">No edge validation has been run yet.</span>
+      </div>
+      <div id="cfg-edge-validation-results" class="cfg-validate-grid"><div class="cfg-note">No edge validation has been run yet.</div></div>
+      <pre id="cfg-edge-checks" class="cfg-pre"></pre>
+      <div id="cfg-edge-model-picks" class="cfg-model-picks"></div>
+      <pre id="cfg-edge-pull" class="cfg-pre"></pre>
+      <datalist id="cfg-edge-models-list"></datalist>
+      </div>
+      </div>
+    </details>
+    </section>
+    <section id="models" class="cfg-lane-panel cfg-lane-hidden cfg-models-panel">
+    <div class="cfg-panel">
+    <h2>Model Stack</h2>
+    <p class="cfg-help">Assign one model per role family using the dropdowns below. Sub-stages inherit automatically unless you open Advanced overrides.</p>
+    <div id="cfg-model-legend" class="cfg-model-legend" aria-label="Assigned model color map"></div>
+    <div class="cfg-readiness-wrap">
+      <div class="cfg-readiness-head">
+        <div id="cfg-readiness-copy" class="cfg-readiness-copy">Assign the four families, then validate to confirm installed tags.</div>
+        <label id="cfg-core-only-toggle" class="cfg-readiness-toggle">
+          <input id="cfg-core-only-mode" type="checkbox" checked />
+          Core-only validation
+        </label>
+      </div>
+      <div class="cfg-progress-head">
+        <span class="cfg-readiness-progress-label">Model readiness</span>
+        <span id="cfg-readiness-pct" class="cfg-badge">0%</span>
+      </div>
+      <div class="cfg-progress-track"><div id="cfg-readiness-bar" class="cfg-progress-bar"></div></div>
     </div>
-    <div class="cfg-model-grid">
+    <div id="cfg-stack-summary" class="cfg-stack-summary" style="display:none;"></div>
+    <div class="cfg-family-shell">
+      <div class="cfg-family-main">
+        <div id="cfg-family-grid" class="cfg-family-grid"></div>
+        <div class="cfg-family-flow" aria-hidden="true">
+          <span>Question</span><span class="cfg-family-flow-arrow">→</span>
+          <span>Plan</span><span class="cfg-family-flow-arrow">→</span>
+          <span>SPL</span><span class="cfg-family-flow-arrow">→</span>
+          <span>Review</span><span class="cfg-family-flow-arrow">→</span>
+          <span>Answer</span>
+        </div>
+        <div class="cfg-actions" style="margin-top:0;">
+          <button id="cfg-family-reset" class="btn-secondary" type="button">Reset to v1.5.1 Defaults</button>
+        </div>
+      </div>
+      <aside class="cfg-family-inventory">
+        <h4>Installed on Ollama</h4>
+        <p class="cfg-help" style="margin-bottom:10px;">Live inventory from the configured Ollama host. Tags in your stack that are not installed are highlighted.</p>
+        <div id="cfg-inventory-table" class="cfg-inventory-table"></div>
+      </aside>
+    </div>
+    <details class="cfg-advanced" id="cfg-model-advanced">
+      <summary>
+        <div>
+          <div class="cfg-advanced-title">Advanced: Per-Stage Overrides</div>
+          <div class="cfg-advanced-copy">Only use this when one sub-stage needs a different model than its family assignment.</div>
+        </div>
+        <span class="cfg-advanced-toggle"></span>
+      </summary>
+      <div class="cfg-advanced-body">
+        <div id="cfg-override-note" class="cfg-note" style="display:none;"></div>
+        <div class="cfg-model-grid cfg-model-grid-advanced">
       <div class="cfg-model-card role-security"><h4>Planner</h4><p>Interprets analyst intent, likely data sources, and search strategy before SPL generation.</p><div class="cfg-model-picker"><div><label class="cfg-model-label" for="cfg-model-planner">Assigned model</label><input id="cfg-model-planner" class="cfg-model-input" list="cfg-models-list" /></div><div><label class="cfg-model-label">Installed models</label><div id="cfg-model-planner-picks" class="cfg-model-picks"></div></div></div></div>
+      <div class="cfg-model-card role-security"><h4>Planner Fallback</h4><p>Used when the reasoning planner fails to return valid JSON.</p><div class="cfg-model-picker"><div><label class="cfg-model-label" for="cfg-model-planner-fallback">Assigned model</label><input id="cfg-model-planner-fallback" class="cfg-model-input" list="cfg-models-list" /></div><div><label class="cfg-model-label">Installed models</label><div id="cfg-model-planner-fallback-picks" class="cfg-model-picks"></div></div></div></div>
       <div class="cfg-model-card role-query-writer"><h4>SPL Writer</h4><p>Turns the structured plan into bounded read-only SPL or a bounded MCP retrieval call.</p><div class="cfg-model-picker"><div><label class="cfg-model-label" for="cfg-model-query-writer">Assigned model</label><input id="cfg-model-query-writer" class="cfg-model-input" list="cfg-models-list" /></div><div><label class="cfg-model-label">Installed models</label><div id="cfg-model-query-writer-picks" class="cfg-model-picks"></div></div></div></div>
       <div class="cfg-model-card role-repair"><h4>Query Repair</h4><p>Used when the reviewer or validation path requests a bounded rewrite of the SPL before final approval.</p><div class="cfg-model-picker"><div><label class="cfg-model-label" for="cfg-model-repair">Assigned model</label><input id="cfg-model-repair" class="cfg-model-input" list="cfg-models-list" /></div><div><label class="cfg-model-label">Installed models</label><div id="cfg-model-repair-picks" class="cfg-model-picks"></div></div></div></div>
       <div class="cfg-model-card role-evidence"><h4>Evidence Reviewer</h4><p>Checks whether conclusions are supported by the returned rows.</p><div class="cfg-model-picker"><div><label class="cfg-model-label" for="cfg-model-evidence">Assigned model</label><input id="cfg-model-evidence" class="cfg-model-input" list="cfg-models-list" /></div><div><label class="cfg-model-label">Installed models</label><div id="cfg-model-evidence-picks" class="cfg-model-picks"></div></div></div></div>
@@ -14505,9 +14978,58 @@ def _configure_page_body() -> str:
       <div class="cfg-model-card role-peer2"><h4>Peer Reviewer 2</h4><p>Conditional second adjudication pass that validates or overrides the first peer-review decision.</p><div class="cfg-model-picker"><div><label class="cfg-model-label" for="cfg-model-peer2">Assigned model</label><input id="cfg-model-peer2" class="cfg-model-input" list="cfg-models-list" /></div><div><label class="cfg-model-label">Installed models</label><div id="cfg-model-peer2-picks" class="cfg-model-picks"></div></div></div></div>
       <div class="cfg-model-card role-continuation"><h4>Continuation Reviewer</h4><p>Decides whether deeper investigation is worth another bounded pivot.</p><div class="cfg-model-picker"><div><label class="cfg-model-label" for="cfg-model-continuation">Assigned model</label><input id="cfg-model-continuation" class="cfg-model-input" list="cfg-models-list" /></div><div><label class="cfg-model-label">Installed models</label><div id="cfg-model-continuation-picks" class="cfg-model-picks"></div></div></div></div>
       <div class="cfg-model-card role-summary"><h4>Final Summary</h4><p>Produces the analyst-facing narrative after evidence and gates are complete.</p><div class="cfg-model-picker"><div><label class="cfg-model-label" for="cfg-model-summary">Assigned model</label><input id="cfg-model-summary" class="cfg-model-input" list="cfg-models-list" /></div><div><label class="cfg-model-label">Installed models</label><div id="cfg-model-summary-picks" class="cfg-model-picks"></div></div></div></div>
-    </div>
+        </div>
+      </div>
+    </details>
     <datalist id="cfg-models-list"></datalist>
-    <div class="cfg-tip">Recommended flow: pick a model already visible from Ollama, save the assignment, then use the generated pull commands below to install anything that is missing.</div>
+    <div class="cfg-tip">Assign the four families, validate, then copy pull commands for any missing tags from the inventory panel.</div>
+    </div>
+    </section>
+    <section id="validate" class="cfg-lane-panel cfg-lane-hidden cfg-validate-panel">
+    <div class="cfg-panel">
+    <h2>Validate &amp; Save</h2>
+    <p class="cfg-help">Run live checks against draft values, probe MCP, then save when validation reports zero errors.</p>
+    <div id="cfg-validation-status" class="cfg-readiness-wrap">
+      <div class="cfg-readiness-head">
+        <div id="cfg-validation-copy" class="cfg-readiness-copy">Run validation from the sticky footer to check live dependencies.</div>
+        <span id="cfg-validation-state-badge" class="cfg-badge">waiting</span>
+      </div>
+      <div id="cfg-validation-summary" class="cfg-validation-badges"></div>
+    </div>
+    <div class="cfg-validate-shell">
+      <div class="cfg-validate-main">
+        <div class="cfg-section-card accent-validate">
+          <h3 class="cfg-section-title">Live Validation</h3>
+          <p class="cfg-help">Checks Ollama, Splunk MCP, model assignments, and Data Domains initialization.</p>
+          <div id="cfg-validation-results" class="cfg-check-grid">
+            <div class="cfg-note">No validation has been run yet.</div>
+          </div>
+        </div>
+      </div>
+      <aside class="cfg-validate-side">
+        <div class="cfg-section-card">
+          <h3 class="cfg-section-title">MCP Query Probe</h3>
+          <p class="cfg-help">Runs a bounded MCP tool call using current draft values without requiring a save first.</p>
+          <div id="cfg-mcp-probe-results" class="cfg-validate-grid">
+            <div class="cfg-note">No MCP probe has been run yet.</div>
+          </div>
+        </div>
+        <div class="cfg-section-card cfg-save-hint-card">
+          <h3 class="cfg-section-title">Save Configuration</h3>
+          <p>Save updates <code>config/ui.env</code> when validation reports no blocking errors.</p>
+          <p class="cfg-note">Use <strong>Validate</strong>, <strong>Test MCP</strong>, and <strong>Save</strong> in the sticky footer. Setup artifacts remain in the drawer below.</p>
+        </div>
+      </aside>
+    </div>
+    <details class="cfg-advanced" id="cfg-setup-artifacts" style="margin-top:18px;">
+      <summary>
+        <div>
+          <div class="cfg-advanced-title">Setup Artifacts</div>
+          <div class="cfg-advanced-copy">Pull commands, MCP JSON, connectivity checks, and restart guidance.</div>
+        </div>
+        <span class="cfg-advanced-toggle"></span>
+      </summary>
+      <div class="cfg-advanced-body">
     <div class="cfg-subgrid">
       <div>
         <h3>Generated Ollama Pull Commands</h3>
@@ -14522,76 +15044,34 @@ def _configure_page_body() -> str:
         <pre id="cfg-restart" class="cfg-pre"></pre>
       </div>
     </div>
+      </div>
+    </details>
     </div>
-    </details>
-    <details class="cfg-step">
-      <summary>
-        <div class="cfg-step-label">
-          <span class="cfg-step-num">4</span>
-          <div class="cfg-step-title">Optional Edge Routing</div>
-        </div>
-        <span class="cfg-step-toggle"></span>
-      </summary>
-      <div class="cfg-step-body">
-      <div class="cfg-panel" style="padding:0;border:0;background:transparent;box-shadow:none;">
-      <p class="cfg-help">This is optional. Leave it disabled if you want the primary inference host to handle all planning, writing, and review stages. Enable it only when you want a small edge-hosted model to assist with question routing, split-query hints, or cheap confidence pre-checks.</p>
-      <div class="cfg-form-grid">
-      <div class="cfg-row"><label for="cfg-edge-enabled">EDGE_LLM_ENABLED</label><div class="cfg-example">Use <code>0</code> to leave the edge helper out of the runtime entirely.</div><div class="cfg-select-wrap"><select id="cfg-edge-enabled"><option value="0">0</option><option value="1">1</option></select></div></div>
-      <div class="cfg-row"><label for="cfg-edge-role">EDGE_LLM_ROLE</label><div class="cfg-example">Recommended: <code>edge_router_splitter</code></div><input id="cfg-edge-role" placeholder="edge_router_splitter" /></div>
-      <div class="cfg-row"><label for="cfg-edge-host">EDGE_LLM_HOST</label><div class="cfg-example">Example URL: <code>http://192.168.1.70:11434</code></div><input id="cfg-edge-host" placeholder="http://192.168.1.70:11434" /></div>
-      <div class="cfg-row"><label for="cfg-edge-timeout">EDGE_LLM_TIMEOUT_SEC</label><div class="cfg-example">Short timeout for a cheap routing helper. Example: <code>60</code></div><input id="cfg-edge-timeout" placeholder="60" /></div>
-      <div class="cfg-row wide"><label for="cfg-edge-model">EDGE_LLM_MODEL</label><div class="cfg-example">Small routing model name visible from the edge Ollama host. Example: <code>qwen2.5:1.5b</code></div><input id="cfg-edge-model" list="cfg-edge-models-list" placeholder="qwen2.5:1.5b" /></div>
+    </section>
+    <section id="ground" class="cfg-lane-panel cfg-lane-hidden cfg-ground-panel">
+    <div class="cfg-panel">
+    <h2>Ground — Data Domains</h2>
+    <p class="cfg-help">Refresh Data Domains after Splunk MCP validates successfully so investigations use your live Splunk environment.</p>
+    <div id="cfg-ground-status" class="cfg-readiness-wrap">
+      <div class="cfg-readiness-head">
+        <div id="cfg-ground-copy" class="cfg-readiness-copy">Run Refresh Data Domains after validation passes to ground investigations in Splunk.</div>
+        <span id="cfg-ground-state-badge" class="cfg-badge">waiting</span>
       </div>
-      <div class="cfg-note">
-        If enabled, validation checks the edge endpoint, confirms the assigned model is installed, and lists the models currently visible from the edge Ollama host. If disabled, the checker records that the helper is intentionally excluded.
-      </div>
-      <div class="cfg-actions">
-        <button id="cfg-edge-save">Save Edge Helper</button>
-        <button id="cfg-edge-validate" class="btn-secondary">Validate Edge Helper</button>
-        <span id="cfg-edge-status" class="cfg-status">No edge validation has been run yet.</span>
-      </div>
-      <h3>Edge Validation Checker</h3>
-      <div id="cfg-edge-validation-results" class="cfg-validate-grid">
-        <div class="cfg-note">No edge validation has been run yet.</div>
-      </div>
-      <div class="cfg-subgrid">
-        <div>
-          <h3>Edge Helper Checks</h3>
-          <pre id="cfg-edge-checks" class="cfg-pre"></pre>
-        </div>
-        <div>
-          <h3>Installed Edge Models</h3>
-          <div id="cfg-edge-model-picks" class="cfg-model-picks"></div>
-        </div>
-      </div>
-      <h3>Edge Pull Command</h3>
-      <pre id="cfg-edge-pull" class="cfg-pre"></pre>
-      <datalist id="cfg-edge-models-list"></datalist>
-      </div>
-      </div>
-    </details>
-    <details class="cfg-step">
-      <summary>
-        <div class="cfg-step-label">
-          <span class="cfg-step-num">5</span>
-          <div class="cfg-step-title">Environment Grounding</div>
-        </div>
-        <span class="cfg-step-toggle"></span>
-      </summary>
-      <div class="cfg-step-body">
-      <div class="cfg-panel" style="padding:0;border:0;background:transparent;box-shadow:none;">
-        <div class="cfg-personalize-card">
+    </div>
+    <div class="cfg-ground-shell">
+      <div class="cfg-ground-main">
+        <div class="cfg-section-card accent-ground cfg-ground-primary">
           <div class="cfg-personalize-status">
             <div>
-              <h3 style="margin-top:0;">Refresh Data Domains</h3>
-              <p class="cfg-help">This scans Splunk through MCP and rebuilds the local environment profile: accessible indexes, sourcetypes, tag inventory, and a bounded field inventory for the sources the system has seen. On first setup, this is the main button you should run after runtime validation succeeds.</p>
+              <h3 class="cfg-section-title" style="margin-top:0;">Refresh Data Domains</h3>
+              <p class="cfg-help">Scans Splunk through MCP and rebuilds the local environment profile: indexes, sourcetypes, tags, and a bounded field inventory.</p>
             </div>
             <span id="cfg-env-refresh-state" class="cfg-badge">state=unknown</span>
           </div>
           <div id="cfg-env-refresh-detail" class="cfg-personalize-copy">Waiting for configuration load.</div>
           <div class="cfg-actions">
-            <button id="cfg-env-refresh">Refresh Data Domains</button>
-            <button id="cfg-env-wipe-refresh" class="btn-green" type="button">Wipe And Refresh</button>
+            <button id="cfg-env-refresh" disabled>Refresh Data Domains</button>
+            <button id="cfg-env-wipe-refresh" class="btn-green" type="button" disabled>Wipe And Refresh</button>
             <span id="cfg-env-refresh-status" class="cfg-status">Not started.</span>
           </div>
           <div class="cfg-progress-wrap">
@@ -14602,13 +15082,32 @@ def _configure_page_body() -> str:
             <div class="cfg-progress-track"><div id="cfg-env-refresh-bar" class="cfg-progress-bar"></div></div>
             <pre id="cfg-env-refresh-log" class="cfg-pre cfg-progress-log">No refresh output yet.</pre>
           </div>
-        <div class="cfg-personalize-meta">
-          <div id="cfg-env-refresh-path" class="cfg-note">Refresh log path will appear here.</div>
-          <div class="cfg-note">Use this again later only when your Splunk data changes materially: new indexes, new sourcetypes, new tags, or after reconnecting MCP to a different environment.</div>
-          <div class="cfg-note" style="border:1px solid #166534;background:linear-gradient(180deg,#0a2514,#07160d 82%);color:#dcfce7;border-radius:12px;padding:10px 12px;"><strong>New install order:</strong> validate runtime first, then run <strong>Refresh Data Domains</strong>, then run a few real investigations. Open <strong>SPL Optimization</strong> only after the platform has learned the local environment.</div>
+          <div class="cfg-personalize-meta">
+            <div id="cfg-env-refresh-path" class="cfg-note">Refresh log path will appear here.</div>
+            <div class="cfg-note">Run again only when Splunk data changes materially: new indexes, sourcetypes, tags, or after reconnecting MCP to a different environment.</div>
+          </div>
         </div>
       </div>
-        <details class="cfg-advanced">
+      <aside class="cfg-ground-aside">
+        <div class="cfg-section-card">
+          <h3 class="cfg-section-title">Recommended Order</h3>
+          <ol class="cfg-ground-steps">
+            <li><span class="cfg-ground-step-num">1</span><span class="cfg-ground-step-copy"><strong>Connect</strong> — Ollama, Splunk, and bearer token.</span></li>
+            <li><span class="cfg-ground-step-num">2</span><span class="cfg-ground-step-copy"><strong>Model Stack</strong> — assign writer, repair, and judge models.</span></li>
+            <li><span class="cfg-ground-step-num">3</span><span class="cfg-ground-step-copy"><strong>Validate &amp; Save</strong> — confirm live checks, then save config.</span></li>
+            <li><span class="cfg-ground-step-num">4</span><span class="cfg-ground-step-copy"><strong>Ground</strong> — refresh Data Domains here.</span></li>
+          </ol>
+        </div>
+        <div class="cfg-section-card">
+          <h3 class="cfg-section-title">SPL Optimization</h3>
+          <p class="cfg-help">Open after Data Domains exist and you have real investigations to learn from.</p>
+          <div class="cfg-linkline">
+            <a class="cfg-linkbtn" href="/learning">Open SPL Optimization</a>
+          </div>
+        </div>
+      </aside>
+    </div>
+        <details class="cfg-advanced" style="margin-top:18px;">
           <summary>
             <div>
               <div class="cfg-advanced-title">Advanced: Rebuild Personalization Only</div>
@@ -14620,7 +15119,7 @@ def _configure_page_body() -> str:
             <div class="cfg-personalize-status">
               <div>
                 <h3 style="margin-top:16px;">Environment-Aware SPL Personalization</h3>
-                <p class="cfg-help">This rebuilds the environment-aware SPL guidance layer from the current profile only. Use it when Data Domains already exist and you want to regenerate the local skillpack again without re-scanning Splunk.</p>
+                <p class="cfg-help">Rebuilds the environment-aware SPL guidance layer from the current profile only. Use when Data Domains already exist and you want to regenerate the local skillpack without re-scanning Splunk.</p>
               </div>
               <span id="cfg-personalize-state" class="cfg-badge">state=unknown</span>
             </div>
@@ -14639,39 +15138,324 @@ def _configure_page_body() -> str:
             </div>
             <div class="cfg-personalize-meta">
               <div id="cfg-personalize-path" class="cfg-note">Skillpack path will appear after personalization exists.</div>
-              <div class="cfg-note">If you are setting up the platform for the first time, do not use this button. Run <strong>Refresh Data Domains</strong> and let that complete.</div>
+              <div class="cfg-note">On first setup, run <strong>Refresh Data Domains</strong> instead of this button.</div>
             </div>
           </div>
         </details>
       </div>
-      </div>
-    </details>
-    <details class="cfg-step">
-      <summary>
-        <div class="cfg-step-label">
-          <span class="cfg-step-num">6</span>
-          <div class="cfg-step-title">Optimization And Review</div>
-        </div>
-        <span class="cfg-step-toggle"></span>
-      </summary>
-      <div class="cfg-step-body">
-      <div class="cfg-panel" style="padding:0;border:0;background:transparent;box-shadow:none;">
-        <p class="cfg-help">The SPL Optimization AI Engine now has its own Control Center page so you can review proposed SPL assets, approve or reject them, and keep optimization history separate from endpoint setup.</p>
-        <div class="cfg-note" style="border:1px solid #a16207;background:linear-gradient(180deg,#241808,#151008 82%);color:#fde68a;"><strong>Do not start here on a new install.</strong> First validate the runtime, refresh Data Domains, and run several real investigations so A.G.E.N.T. Smith learns the local indexes, sourcetypes, and field behavior. Then use SPL Optimization to tune reusable SPL for that environment.</div>
-        <div class="cfg-note">Design rule: shipped logic stays deterministic; SPL optimization stays local, reviewable, benchmarked, and reversible.</div>
-        <div class="cfg-actions" style="margin-top:12px;">
-          <a class="btn-secondary" href="/learning" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center;">Open SPL Optimization</a>
-          <span class="cfg-status">Use this after Data Domains exist and you have some real investigations to learn from.</span>
-        </div>
-      </div>
-      </div>
-    </details>
+    </section>
+    <div id="cfg-sticky-footer" class="cfg-sticky-footer">
+      <button id="cfg-validate" class="btn-secondary" type="button">Validate</button>
+      <button id="cfg-mcp-probe" class="btn-secondary" type="button">Test MCP</button>
+      <button id="cfg-save" type="button" disabled>Save</button>
+      <span id="cfg-sticky-status" class="cfg-sticky-status">Run validation to enable Save.</span>
+    </div>
   </div>
 </div>
 </div>
 <script>
   const cfg$ = (id) => document.getElementById(id);
+  function cfgSetValue(id, value){
+    const el = cfg$(id);
+    if(el){ el.value = String(value ?? ''); }
+  }
+  function cfgReadValue(id){
+    const el = cfg$(id);
+    return el ? String(el.value || '').trim() : '';
+  }
   function cfgEscape(v){return String(v ?? '');}
+  function cfgTruncateText(text, maxLen){
+    const raw = String(text ?? '');
+    const limit = Number(maxLen) || 160;
+    if(raw.length <= limit){ return raw; }
+    return `${raw.slice(0, Math.max(0, limit - 1)).trimEnd()}…`;
+  }
+  function cfgFormatModelList(models, label){
+    const list = Array.isArray(models) ? models.map((item) => String(item || '').trim()).filter(Boolean) : [];
+    if(!list.length){ return ''; }
+    const prefix = label ? `${label}: ` : '';
+    const maxShow = 3;
+    if(list.length <= maxShow){ return `${prefix}${list.join(', ')}`; }
+    const shown = list.slice(0, maxShow).join(', ');
+    return `${prefix}${shown} +${list.length - maxShow} more (${list.length} total)`;
+  }
+  function cfgFormatCheckDetail(check){
+    const name = String(check?.name || '');
+    const detail = String(check?.detail || '');
+    if(name === 'ollama_api'){
+      const models = Array.isArray(check?.models) ? check.models : [];
+      const httpMatch = detail.match(/\((\d{3})\)/);
+      const code = httpMatch ? httpMatch[1] : '';
+      if(code){
+        return `Ollama reachable (${code}); ${models.length} model(s) discovered`;
+      }
+      if(models.length){
+        return `Ollama reachable; ${models.length} model(s) discovered`;
+      }
+    }
+    if(name === 'edge_helper' && Array.isArray(check?.models) && check.models.length){
+      const httpMatch = detail.match(/\((\d{3})\)/);
+      const code = httpMatch ? httpMatch[1] : '';
+      const modelName = String(check?.model || check?.edge_model || '').trim();
+      if(modelName && detail.includes(modelName)){
+        return cfgTruncateText(detail, 140);
+      }
+      if(code){
+        return `Edge helper reachable (${code}); ${check.models.length} model(s) discovered`;
+      }
+    }
+    return cfgTruncateText(detail, 160);
+  }
+  function cfgFormatCheckExtraBits(check){
+    const name = String(check?.name || '');
+    const bits = [];
+    if(name === 'ollama_api'){
+      return bits;
+    }
+    if(Array.isArray(check?.models) && check.models.length){
+      const formatted = cfgFormatModelList(check.models, 'models');
+      if(formatted){ bits.push(formatted); }
+    }
+    if(Array.isArray(check?.missing_models) && check.missing_models.length){
+      const formatted = cfgFormatModelList(check.missing_models, 'missing');
+      if(formatted){ bits.push(formatted); }
+    }
+    if(Array.isArray(check?.missing_assignments) && check.missing_assignments.length){
+      bits.push(cfgFormatModelList(check.missing_assignments, 'missing roles'));
+    }
+    return bits;
+  }
+  function cfgHealthStatusLabel(status){
+    const state = String(status || 'waiting').toLowerCase();
+    if(state === 'ok'){ return 'OK'; }
+    if(state === 'warn'){ return 'Warn'; }
+    if(state === 'error'){ return 'Error'; }
+    return '…';
+  }
+  function cfgUpdateLaneHealthPills(data){
+    const el = cfg$('cfg-lane-health');
+    if(!el){ return; }
+    const checks = Array.isArray(data?.checks) ? data.checks : [];
+    const byName = {};
+    checks.forEach((check) => { byName[String(check?.name || '')] = check; });
+    const hasRun = checks.length > 0;
+    const pill = (label, status) => {
+      const state = hasRun ? String(status || 'warn').toLowerCase() : 'waiting';
+      return `<span class="cfg-lane-health-pill ${cfgEscape(state)}">${cfgEscape(label)} ${cfgEscape(cfgHealthStatusLabel(state))}</span>`;
+    };
+    const pills = [
+      pill('Ollama', byName.ollama_api?.status),
+      pill('Splunk MCP', byName.splunk_mcp?.status)
+    ];
+    const expected = Array.isArray(data?.expected_models) ? data.expected_models : cfgLastExpectedModels;
+    if(expected.length){
+      const expectedCheck = byName.ollama_expected_models;
+      if(hasRun && expectedCheck){
+        const missing = Array.isArray(expectedCheck.missing_models) ? expectedCheck.missing_models : [];
+        const installed = Math.max(0, expected.length - missing.length);
+        const modelState = missing.length ? (installed ? 'warn' : 'error') : 'ok';
+        pills.push(`<span class="cfg-lane-health-pill ${cfgEscape(modelState)}">${installed}/${expected.length} models</span>`);
+      } else {
+        pills.push('<span class="cfg-lane-health-pill waiting">models …</span>');
+      }
+    }
+    el.innerHTML = pills.join('<span class="cfg-lane-health-sep" aria-hidden="true">·</span>');
+  }
+  function cfgSetStatus(text){
+    const msg = String(text ?? '');
+    const legacy = cfg$('cfg-status');
+    if(legacy){ legacy.textContent = msg; }
+    const sticky = cfg$('cfg-sticky-status');
+    if(sticky){ sticky.textContent = msg; }
+  }
+  let cfgLastValidation = null;
+  let cfgLastExpectedModels = [];
+  let cfgMcpOk = false;
+  let cfgSecretTokenPresent = false;
+  let cfgTokenMasked = false;
+  let cfgTokenReveal = false;
+  let cfgTokenActual = '';
+  let cfgTokenFetched = false;
+  function cfgHasBearerToken(){
+    const raw = cfgReadValue('cfg-splunk-token');
+    if(raw && raw !== '__KEEP_EXISTING_SPLUNK_TOKEN__'){ return true; }
+    if(cfgTokenMasked || cfgSecretTokenPresent){ return true; }
+    return Boolean(String(cfgTokenActual || '').trim());
+  }
+  function cfgConnectEssentialsReady(){
+    return Boolean(
+      cfgReadValue('cfg-ollama-host') &&
+      cfgReadValue('cfg-splunk-base') &&
+      cfgReadValue('cfg-splunk-mcp') &&
+      cfgHasBearerToken()
+    );
+  }
+  function cfgUpdateLaneHints(){
+    const modelsTab = document.querySelector('.cfg-lane-tab[data-lane="models"]');
+    const nextAction = cfg$('cfg-next-action');
+    const currentLane = String(location.hash || '#connect');
+    const highlightModels = cfgConnectEssentialsReady() && (currentLane === '#connect' || currentLane === '');
+    if(modelsTab){
+      modelsTab.classList.toggle('next-step', highlightModels);
+    }
+    if(nextAction){
+      nextAction.classList.toggle('highlight-next', highlightModels);
+    }
+  }
+  function cfgBindConnectFieldHints(){
+    ['cfg-ollama-host','cfg-splunk-base','cfg-splunk-web','cfg-splunk-mcp','cfg-splunk-token'].forEach((id) => {
+      const el = cfg$(id);
+      if(!el || el.dataset.cfgHintBound === '1'){ return; }
+      el.dataset.cfgHintBound = '1';
+      el.addEventListener('input', () => {
+        cfgUpdateLaneHints();
+        const checks = Array.isArray(cfgLastValidation?.checks) ? cfgLastValidation.checks : [];
+        if(!checks.length){
+          cfgUpdateNextAction(cfgLastValidation || {});
+        }
+      });
+    });
+  }
+  function cfgInitLaneRouting(){
+    const lanes = ['connect','models','validate','ground'];
+    const showLane = (lane) => {
+      const normalized = lanes.includes(lane) ? lane : 'connect';
+      lanes.forEach((name) => {
+        const panel = cfg$(name);
+        if(panel){ panel.classList.toggle('cfg-lane-hidden', name !== normalized); }
+      });
+      document.querySelectorAll('.cfg-lane-tab').forEach((tab) => {
+        const href = String(tab.getAttribute('href') || '');
+        const target = href.startsWith('#') ? href.slice(1) : '';
+        tab.classList.toggle('active', target === normalized);
+      });
+      const shell = document.querySelector('.cfg-shell');
+      if(shell){ shell.dataset.cfgLane = normalized; }
+      document.body.classList.toggle('cfg-page-models-lane', normalized === 'models');
+      document.body.classList.toggle('cfg-page-focus-lane', ['models','validate','ground'].includes(normalized));
+      cfgUpdateLaneHints();
+    };
+    document.querySelectorAll('.cfg-lane-tab').forEach((tab) => {
+      tab.addEventListener('click', (event) => {
+        const href = String(tab.getAttribute('href') || '');
+        if(!href.startsWith('#')){ return; }
+        event.preventDefault();
+        history.replaceState(null, '', href);
+        showLane(href.slice(1));
+      });
+    });
+    const hashLane = String(location.hash || '').replace(/^#/, '');
+    showLane(hashLane || 'connect');
+    window.addEventListener('hashchange', () => {
+      showLane(String(location.hash || '').replace(/^#/, '') || 'connect');
+    });
+  }
+  function cfgUpdateNextAction(data){
+    const badge = cfg$('cfg-next-action-badge');
+    const detail = cfg$('cfg-next-action-detail');
+    const meta = cfg$('cfg-next-action-meta');
+    if(!detail){ return; }
+    const summary = data?.summary || {};
+    const errors = Number(summary.error || 0);
+    const warns = Number(summary.warn || 0);
+    const checks = Array.isArray(data?.checks) ? data.checks : [];
+    const mcp = checks.find((item) => String(item?.name || '') === 'splunk_mcp');
+    const env = checks.find((item) => String(item?.name || '') === 'environment_profile');
+    let primary = 'Run Validate on the Validate & Save lane to get a live recommendation.';
+    let lane = '#validate';
+    let badgeText = 'waiting';
+    if(!checks.length){
+      if(cfgConnectEssentialsReady()){
+        primary = 'Endpoints and bearer token look complete — open Model Stack next and assign your four role families.';
+        lane = '#models';
+        badgeText = 'next';
+      } else {
+        primary = 'Start on Connect: set Ollama host, Splunk URLs, and your MCP bearer token.';
+        lane = '#connect';
+        badgeText = 'waiting';
+      }
+    } else if(errors > 0){
+      primary = 'Fix connection or model errors on Connect / Model Stack, then Validate again.';
+      lane = '#connect';
+      badgeText = 'blocked';
+    } else if(mcp && String(mcp.status || '') !== 'ok'){
+      primary = 'Splunk MCP is not healthy yet — confirm token and URL on Connect, then Test MCP.';
+      lane = '#connect';
+      badgeText = 'attention';
+    } else if(warns > 0){
+      primary = 'Validation passed with warnings — review missing models in Model Stack inventory, then Save.';
+      lane = '#models';
+      badgeText = 'attention';
+    } else if(env && String(env.status || '') !== 'ok'){
+      primary = 'Runtime looks healthy — open Ground and run Refresh Data Domains.';
+      lane = '#ground';
+      badgeText = 'ready';
+    } else if(errors === 0 && warns === 0 && checks.length){
+      primary = 'Platform validated — Save if you changed settings, then run investigations or SPL Optimization.';
+      lane = '#ground';
+      badgeText = 'ready';
+    }
+    detail.textContent = primary;
+    if(badge){ badge.textContent = badgeText; }
+    if(meta){
+      meta.innerHTML = `<a class="cfg-linkbtn" href="${lane}">Open recommended lane</a>`;
+    }
+    cfgUpdateLaneHints();
+  }
+  function cfgUpdateStickyFooter(data){
+    const saveBtn = cfg$('cfg-save');
+    if(!saveBtn){ return; }
+    const summary = data?.summary || {};
+    const errors = Number(summary.error || 0);
+    const warns = Number(summary.warn || 0);
+    const hasRun = Boolean(data && Array.isArray(data.checks) && data.checks.length);
+    const sticky = cfg$('cfg-sticky-status');
+    if(sticky){
+      sticky.classList.remove('ok','warn','error');
+      if(!hasRun){
+        sticky.textContent = 'Run validation to enable Save.';
+      } else if(errors > 0){
+        sticky.classList.add('error');
+        sticky.textContent = `Validation blocked Save — ${errors} error(s).`;
+      } else if(warns > 0){
+        sticky.classList.add('warn');
+        sticky.textContent = 'Validation OK with warnings — Save enabled.';
+      } else {
+        sticky.classList.add('ok');
+        sticky.textContent = 'Validation OK — Save enabled.';
+      }
+    }
+    saveBtn.disabled = !hasRun || errors > 0;
+    const refreshBtn = cfg$('cfg-env-refresh');
+    const wipeBtn = cfg$('cfg-env-wipe-refresh');
+    const mcp = (Array.isArray(data?.checks) ? data.checks : []).find((item) => String(item?.name || '') === 'splunk_mcp');
+    const mcpOk = hasRun && String(mcp?.status || '') === 'ok';
+    if(refreshBtn){ refreshBtn.disabled = !mcpOk; }
+    if(wipeBtn){ wipeBtn.disabled = !mcpOk; }
+  }
+  function cfgAssertScriptValid(){
+    const required = [
+      'cfg-lane-nav','cfg-lane-health','connect','models','validate','ground',
+      'cfg-sticky-footer','cfg-next-action','cfg-family-grid',
+      'cfg-save','cfg-validate','cfg-mcp-probe','cfg-core-only-mode'
+    ];
+    const missing = required.filter((id) => !cfg$(id));
+    if(missing.length){
+      console.warn('Configure UI missing elements:', missing.join(', '));
+    }
+    try{
+      if(typeof cfgCollectPayload !== 'function'){ throw new Error('cfgCollectPayload missing'); }
+      return missing.length === 0;
+    } catch(err){
+      const banner = document.createElement('div');
+      banner.className = 'cfg-note';
+      banner.style.borderColor = '#991b1b';
+      banner.textContent = `Configuration script failed to initialize: ${err?.message || err}`;
+      const shell = document.querySelector('.cfg-shell');
+      if(shell){ shell.prepend(banner); }
+      return false;
+    }
+  }
   function cfgRenderDependencies(payload){
     const data = payload || {};
     cfg$('cfg-deps-note').textContent = data.scope_note || 'No dependency scope note available.';
@@ -14697,6 +15481,7 @@ def _configure_page_body() -> str:
   }
   const cfgModelPairs = [
     ['cfg-model-planner','cfg-model-planner-picks'],
+    ['cfg-model-planner-fallback','cfg-model-planner-fallback-picks'],
     ['cfg-model-query-writer','cfg-model-query-writer-picks'],
     ['cfg-model-repair','cfg-model-repair-picks'],
     ['cfg-model-evidence','cfg-model-evidence-picks'],
@@ -14706,10 +15491,423 @@ def _configure_page_body() -> str:
     ['cfg-model-continuation','cfg-model-continuation-picks'],
     ['cfg-model-summary','cfg-model-summary-picks']
   ];
-  let cfgTokenMasked = false;
-  let cfgTokenReveal = false;
-  let cfgTokenActual = '';
-  let cfgTokenFetched = false;
+  const cfgRoleFamilySpec = [
+    {
+      id:'planning',
+      title:'Planning',
+      description:'Interpret analyst intent and search strategy before SPL generation.',
+      accent:'#38bdf8',
+      stageCount:2,
+      stages:['Reasoning Planner','Planner Fallback'],
+      assignments:[
+        {envKey:'OLLAMA_MODEL_QUERY_PLANNER', label:'Reasoning Planner', inputId:'cfg-family-planning-primary'},
+        {envKey:'OLLAMA_MODEL_QUERY_PLANNER_FALLBACK', label:'Planner Fallback', inputId:'cfg-family-planning-fallback', optional:true}
+      ]
+    },
+    {
+      id:'generation',
+      title:'Generation',
+      description:'Write and repair bounded read-only SPL.',
+      accent:'#14b8a6',
+      stageCount:2,
+      stages:['SPL Writer','Query Repair'],
+      assignments:[
+        {envKey:'OLLAMA_MODEL_QUERY_WRITER', label:'SPL Writer & Repair', inputId:'cfg-family-generation-primary', mirrorKeys:['OLLAMA_MODEL_QUERY_REPAIR']}
+      ]
+    },
+    {
+      id:'peer_review',
+      title:'Peer Review',
+      description:'Adjudicate writer vs security reviewer when queries stay contested.',
+      accent:'#f59e0b',
+      stageCount:2,
+      stages:['Peer Reviewer 1','Peer Reviewer 2'],
+      assignments:[
+        {envKey:'OLLAMA_MODEL_PEER_REVIEWER', label:'Peer Reviewers 1 & 2', inputId:'cfg-family-peer-primary', mirrorKeys:['OLLAMA_MODEL_PEER_REVIEWER_2']}
+      ]
+    },
+    {
+      id:'analysis',
+      title:'Analysis & Summary',
+      description:'Security review, evidence checks, continuation, and final narrative.',
+      accent:'#a78bfa',
+      stageCount:4,
+      stages:['Security Reviewer','Evidence Reviewer','Continuation Reviewer','Final Summary'],
+      assignments:[
+        {envKey:'OLLAMA_MODEL_SECURITY_REVIEWER', label:'Review & Summary', inputId:'cfg-family-analysis-primary', mirrorKeys:['OLLAMA_MODEL_EVIDENCE_REVIEWER','OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER','OLLAMA_MODEL_FINAL_SUMMARY']}
+      ]
+    }
+  ];
+  const cfgEnvKeyToAdvancedInput = {
+    OLLAMA_MODEL_QUERY_PLANNER:'cfg-model-planner',
+    OLLAMA_MODEL_QUERY_PLANNER_FALLBACK:'cfg-model-planner-fallback',
+    OLLAMA_MODEL_QUERY_WRITER:'cfg-model-query-writer',
+    OLLAMA_MODEL_QUERY_REPAIR:'cfg-model-repair',
+    OLLAMA_MODEL_EVIDENCE_REVIEWER:'cfg-model-evidence',
+    OLLAMA_MODEL_SECURITY_REVIEWER:'cfg-model-security',
+    OLLAMA_MODEL_PEER_REVIEWER:'cfg-model-peer1',
+    OLLAMA_MODEL_PEER_REVIEWER_2:'cfg-model-peer2',
+    OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER:'cfg-model-continuation',
+    OLLAMA_MODEL_FINAL_SUMMARY:'cfg-model-summary'
+  };
+  let cfgInstalledModels = [];
+  function cfgFamilySpec(){
+    return cfgRoleFamilySpec;
+  }
+  function cfgSlotAccentColor(familyAccent, slotIndex, slotCount){
+    const palette = [1, 0.78, 0.62];
+    const ratio = palette[slotIndex] ?? palette[palette.length - 1];
+    if(slotCount <= 1 || ratio >= 1){ return String(familyAccent || '#38bdf8'); }
+    return `color-mix(in srgb, ${familyAccent} ${Math.round(ratio * 100)}%, #ffffff)`;
+  }
+  function cfgFamilyMetaForTag(tag, values){
+    const normalized = String(tag || '').trim();
+    if(!normalized){ return null; }
+    for(const family of cfgFamilySpec()){
+      const assignments = family.assignments || [];
+      for(let slotIndex = 0; slotIndex < assignments.length; slotIndex += 1){
+        const slot = assignments[slotIndex];
+        const keys = [slot.envKey, ...(slot.mirrorKeys || [])];
+        for(const key of keys){
+          if(String(values[key] || '').trim() === normalized){
+            return {
+              accent: cfgSlotAccentColor(family.accent, slotIndex, assignments.length),
+              familyId: family.id || '',
+              familyTitle: family.title || '',
+              slotLabel: slot.label || family.title || '',
+            };
+          }
+        }
+      }
+    }
+    return null;
+  }
+  function cfgCollectAssignedModels(values){
+    const payload = values || cfgReadAdvancedValues();
+    const items = [];
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot, slotIndex) => {
+        const tag = String(payload[slot.envKey] || '').trim();
+        if(!tag){ return; }
+        items.push({
+          tag,
+          accent: cfgSlotAccentColor(family.accent, slotIndex, (family.assignments || []).length),
+          familyId: family.id || '',
+          familyTitle: family.title || '',
+          slotLabel: slot.label || family.title || '',
+        });
+      });
+    });
+    return items;
+  }
+  function cfgApplyModelColorVisuals(){
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot, slotIndex) => {
+        const select = cfg$(slot.inputId);
+        if(!select){ return; }
+        const slotAccent = cfgSlotAccentColor(family.accent, slotIndex, (family.assignments || []).length);
+        const slotWrap = select.closest('.cfg-family-slot');
+        const chip = slotWrap ? slotWrap.querySelector('.cfg-model-chip') : null;
+        const chipText = chip ? chip.querySelector('.cfg-model-chip-text') : null;
+        const chipRole = chip ? chip.querySelector('.cfg-model-chip-role') : null;
+        const value = String(select.value || '').trim();
+        select.style.setProperty('--slot-accent', slotAccent);
+        if(slotWrap){ slotWrap.style.setProperty('--slot-accent', slotAccent); }
+        select.classList.toggle('has-model', Boolean(value));
+        if(chip){
+          chip.style.setProperty('--chip-accent', slotAccent);
+          chip.classList.toggle('empty', !value);
+          if(chipText){ chipText.textContent = value || 'Unassigned'; chipText.title = value || 'No model selected'; }
+          if(chipRole){ chipRole.textContent = family.title || ''; }
+        }
+        select.onmouseenter = () => cfgHighlightModelTag(value, true);
+        select.onmouseleave = () => cfgHighlightModelTag(value, false);
+      });
+    });
+    cfgRenderModelLegend();
+  }
+  function cfgHighlightModelTag(tag, active){
+    const normalized = String(tag || '').trim();
+    if(!normalized){ return; }
+    document.querySelectorAll('.cfg-inventory-row[data-model-tag]').forEach((row) => {
+      if(String(row.getAttribute('data-model-tag') || '') === normalized){
+        row.classList.toggle('highlight', Boolean(active));
+      }
+    });
+  }
+  function cfgRenderModelLegend(){
+    const legend = cfg$('cfg-model-legend');
+    if(!legend){ return; }
+    const assigned = cfgCollectAssignedModels();
+    if(!assigned.length){
+      legend.innerHTML = '<span class="cfg-note" style="margin:0;">Assign models below — each role family gets a distinct color for quick visual matching.</span>';
+      return;
+    }
+    legend.innerHTML = assigned.map((item) => `
+      <span class="cfg-model-legend-item" style="--legend-accent:${cfgEscape(item.accent)}" title="${cfgEscape(item.tag)}">
+        <span class="cfg-model-legend-dot" aria-hidden="true"></span>
+        <span class="cfg-model-legend-label">${cfgEscape(item.slotLabel)}</span>
+        <span class="cfg-model-legend-model">${cfgEscape(item.tag)}</span>
+      </span>
+    `).join('');
+  }
+  function cfgRenderFamilyGrid(installedModels){
+    cfgInstalledModels = Array.isArray(installedModels) ? installedModels : [];
+    const grid = cfg$('cfg-family-grid');
+    if(!grid){ return; }
+    grid.innerHTML = cfgFamilySpec().map((family) => {
+      const slots = (family.assignments || []).map((slot, slotIndex) => {
+        const optional = slot.optional ? ' optional' : '';
+        const slotAccent = cfgSlotAccentColor(family.accent, slotIndex, (family.assignments || []).length);
+        return `
+          <div class="cfg-family-slot${optional}" style="--slot-accent:${cfgEscape(slotAccent)};--family-accent:${cfgEscape(family.accent || '#38bdf8')}">
+            <label class="cfg-family-slot-label" for="${cfgEscape(slot.inputId)}">
+              <span class="cfg-slot-swatch" aria-hidden="true"></span>
+              ${cfgEscape(slot.label)}${slot.optional ? ' (optional)' : ''}
+            </label>
+            <div class="cfg-family-slot-picker">
+              <select id="${cfgEscape(slot.inputId)}" class="cfg-family-select" data-env-key="${cfgEscape(slot.envKey)}" data-mirror-keys="${cfgEscape((slot.mirrorKeys || []).join(','))}" data-family-id="${cfgEscape(family.id || '')}" style="--slot-accent:${cfgEscape(slotAccent)}"></select>
+            </div>
+            <div class="cfg-model-chip empty" data-for="${cfgEscape(slot.inputId)}" style="--chip-accent:${cfgEscape(slotAccent)}">
+              <span class="cfg-model-chip-dot" aria-hidden="true"></span>
+              <span class="cfg-model-chip-text">Unassigned</span>
+              <span class="cfg-model-chip-role">${cfgEscape(family.title || '')}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+      const stages = (family.stages || []).map((stage) => `<li>${cfgEscape(stage)}</li>`).join('');
+      return `
+        <article class="cfg-family-tile cfg-family-${cfgEscape(family.id || '')}" style="--family-accent:${cfgEscape(family.accent || '#38bdf8')}">
+          <div class="cfg-family-head">
+            <h4 class="cfg-family-title">${cfgEscape(family.title || '')}</h4>
+            <span class="cfg-family-badge">${cfgEscape(String(family.stageCount || 0))} stages</span>
+          </div>
+          <p class="cfg-family-copy">${cfgEscape(family.description || '')}</p>
+          <ul class="cfg-family-stages">${stages}</ul>
+          ${slots}
+        </article>
+      `;
+    }).join('');
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot) => {
+        const input = cfg$(slot.inputId);
+        if(!input){ return; }
+        input.onchange = () => {
+          cfgSyncAdvancedFromFamilies();
+          cfgRefreshFamilyVisuals();
+          cfgUpdateOverrideNote();
+        };
+      });
+    });
+    cfgPopulateFamilySelects(cfgInstalledModels);
+    cfgRefreshFamilyVisuals();
+  }
+  function cfgPopulateFamilySelects(models){
+    const normalized = Array.isArray(models) ? models : cfgInstalledModels;
+    const options = [''].concat(normalized);
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot) => {
+        const select = cfg$(slot.inputId);
+        if(!select || select.tagName !== 'SELECT'){ return; }
+        const current = String(select.value || '').trim();
+        select.innerHTML = options.map((model) => {
+          const label = model ? cfgEscape(model) : '— select model —';
+          return `<option value="${cfgEscape(model)}">${label}</option>`;
+        }).join('');
+        if(current && !normalized.includes(current)){
+          const extra = document.createElement('option');
+          extra.value = current;
+          extra.textContent = `${current} (not installed)`;
+          select.appendChild(extra);
+        }
+        select.value = current;
+      });
+    });
+  }
+  function cfgReadAdvancedValues(){
+    const values = {};
+    Object.entries(cfgEnvKeyToAdvancedInput).forEach(([envKey, inputId]) => {
+      values[envKey] = String(cfg$(inputId)?.value || '').trim();
+    });
+    return values;
+  }
+  function cfgSyncAdvancedFromFamilies(){
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot) => {
+        const value = String(cfg$(slot.inputId)?.value || '').trim();
+        const primaryInput = cfg$(cfgEnvKeyToAdvancedInput[slot.envKey]);
+        if(primaryInput){ primaryInput.value = value; }
+        (slot.mirrorKeys || []).forEach((mirrorKey) => {
+          const mirrorInput = cfg$(cfgEnvKeyToAdvancedInput[mirrorKey]);
+          if(mirrorInput){ mirrorInput.value = value; }
+        });
+      });
+    });
+  }
+  function cfgSyncFamiliesFromAdvanced(values){
+    const payload = values || cfgReadAdvancedValues();
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot) => {
+        const input = cfg$(slot.inputId);
+        if(!input){ return; }
+        input.value = String(payload[slot.envKey] || '').trim();
+      });
+    });
+    cfgRefreshFamilyVisuals();
+    cfgUpdateOverrideNote(payload);
+  }
+  function cfgRefreshFamilyVisuals(){
+    const installed = new Set(cfgInstalledModels);
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot) => {
+        const input = cfg$(slot.inputId);
+        if(!input){ return; }
+        const value = String(input.value || '').trim();
+        const missing = Boolean(value) && !installed.has(value);
+        input.classList.toggle('missing', missing);
+      });
+    });
+    cfgApplyModelColorVisuals();
+    cfgRenderInventoryTable();
+  }
+  function cfgFamilyTitleForTag(tag, values){
+    const meta = cfgFamilyMetaForTag(tag, values);
+    return meta ? meta.familyTitle : '';
+  }
+  function cfgFamilyAccentForTag(tag, values){
+    const meta = cfgFamilyMetaForTag(tag, values);
+    return meta ? meta.accent : '#64748b';
+  }
+  function cfgInventorySortRank(tag, values){
+    const order = ['planning','generation','peer_review','analysis'];
+    const meta = cfgFamilyMetaForTag(tag, values);
+    const idx = order.indexOf(String(meta?.familyId || ''));
+    return idx >= 0 ? idx : order.length;
+  }
+  function cfgFamilyRoleClass(title){
+    const normalized = String(title || '').trim().toLowerCase();
+    if(normalized === 'planning'){ return 'role-planning'; }
+    if(normalized === 'generation'){ return 'role-generation'; }
+    if(normalized === 'peer review'){ return 'role-peer'; }
+    if(normalized.startsWith('analysis')){ return 'role-analysis'; }
+    return '';
+  }
+  function cfgRenderInventoryTable(){
+    const table = cfg$('cfg-inventory-table');
+    if(!table){ return; }
+    const values = cfgReadAdvancedValues();
+    const tags = cfgExpectedModelsFromValues(values, []);
+    const installed = new Set(cfgInstalledModels);
+    if(!tags.length){
+      table.innerHTML = '<div class="cfg-note">Assign models above to see stack inventory.</div>';
+      return;
+    }
+    const sortedTags = tags.slice().sort((a, b) => {
+      const rankDiff = cfgInventorySortRank(a, values) - cfgInventorySortRank(b, values);
+      if(rankDiff !== 0){ return rankDiff; }
+      return String(a).localeCompare(String(b));
+    });
+    table.innerHTML = sortedTags.map((tag) => {
+      const ok = installed.has(tag);
+      const family = cfgFamilyTitleForTag(tag, values);
+      const accent = cfgFamilyAccentForTag(tag, values);
+      return `
+        <div class="cfg-inventory-row${ok ? '' : ' missing'}" data-model-tag="${cfgEscape(tag)}" style="--row-accent:${cfgEscape(accent)}">
+          <div class="cfg-inventory-name" title="${cfgEscape(tag)}">
+            <span class="cfg-inventory-name-dot" aria-hidden="true"></span>
+            <span>${cfgEscape(tag)}</span>
+          </div>
+          <div class="cfg-inventory-meta">
+            <span class="cfg-inventory-pill ${ok ? 'ok' : 'warn'}">${ok ? 'installed' : 'missing'}</span>
+            ${family ? `<span class="cfg-inventory-pill ${cfgFamilyRoleClass(family)}">${cfgEscape(family)}</span>` : ''}
+            ${ok ? '' : `<button type="button" class="cfg-pull-copy" data-pull="${cfgEscape(`ollama pull ${tag}`)}">Copy pull</button>`}
+          </div>
+        </div>
+      `;
+    }).join('');
+    table.querySelectorAll('.cfg-inventory-row[data-model-tag]').forEach((row) => {
+      row.addEventListener('mouseenter', () => cfgHighlightModelTag(row.getAttribute('data-model-tag') || '', true));
+      row.addEventListener('mouseleave', () => cfgHighlightModelTag(row.getAttribute('data-model-tag') || '', false));
+    });
+    table.querySelectorAll('.cfg-pull-copy').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const cmd = btn.getAttribute('data-pull') || '';
+        if(!cmd){ return; }
+        try{
+          await navigator.clipboard.writeText(cmd);
+          cfgSetStatus(`Copied: ${cmd}`);
+        } catch(err){
+          cfgSetStatus(String(err?.message || err));
+        }
+      });
+    });
+  }
+  function cfgRenderStackSummary(modelStack){
+    const summary = cfg$('cfg-stack-summary');
+    if(!summary){ return; }
+    const unique = Number(modelStack?.unique_tag_count || 0);
+    const roles = Number(modelStack?.role_count || 0);
+    const core = Array.isArray(modelStack?.core_tags) ? modelStack.core_tags.length : 0;
+    summary.innerHTML = `
+      <div class="cfg-stack-summary-copy">
+        <strong>${cfgEscape(String(unique || 0))} unique tags</strong> cover <strong>${cfgEscape(String(roles || 0))} runtime roles</strong>.
+        The core SPL path needs <strong>${cfgEscape(String(core || 3))} families</strong> (Planning, Generation, Peer Review). Analysis &amp; Summary adds the review chain.
+      </div>
+      <span class="cfg-badge">3 core families</span>
+      <span class="cfg-badge">${cfgEscape(String(unique || 0))} tags total</span>
+    `;
+  }
+  function cfgHasStageOverrides(values){
+    const payload = values || cfgReadAdvancedValues();
+    let overridden = false;
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot) => {
+        const familyValue = String(payload[slot.envKey] || '').trim();
+        (slot.mirrorKeys || []).forEach((mirrorKey) => {
+          const mirrorValue = String(payload[mirrorKey] || '').trim();
+          if(familyValue && mirrorValue && familyValue !== mirrorValue){
+            overridden = true;
+          }
+        });
+      });
+    });
+    return overridden;
+  }
+  function cfgUpdateOverrideNote(values){
+    const note = cfg$('cfg-override-note');
+    if(!note){ return; }
+    const payload = values || cfgReadAdvancedValues();
+    const mismatches = [];
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot) => {
+        const familyValue = String(payload[slot.envKey] || '').trim();
+        (slot.mirrorKeys || []).forEach((mirrorKey) => {
+          const mirrorValue = String(payload[mirrorKey] || '').trim();
+          if(familyValue && mirrorValue && familyValue !== mirrorValue){
+            mismatches.push(`${mirrorKey} differs from ${slot.envKey}`);
+          }
+        });
+      });
+    });
+    if(!mismatches.length){
+      note.style.display = 'none';
+      note.textContent = '';
+      return;
+    }
+    note.style.display = 'block';
+    note.textContent = `Custom per-stage overrides detected: ${mismatches.join('; ')}. Family assignments will not overwrite these until you reset or align them manually.`;
+  }
+  function cfgResetFamilyDefaults(installedModels){
+    const installed = new Set(Array.isArray(installedModels) ? installedModels : cfgInstalledModels);
+    const draft = {...cfgDefaultAssignments};
+    Object.entries(cfgDefaultAssignments).forEach(([key, model]) => {
+      if(!String(draft[key] || '').trim() && installed.has(model)){ draft[key] = model; }
+    });
+    cfgApplyPayload(draft);
+    cfgSyncFamiliesFromAdvanced(draft);
+    cfgPopulateModelOptions(installedModels || cfgInstalledModels);
+  }
   function cfgShowMaskedTokenEditor(){
     cfg$('cfg-splunk-token').style.display = 'block';
     cfg$('cfg-splunk-token').type = 'password';
@@ -14736,68 +15934,139 @@ def _configure_page_body() -> str:
   }
   function cfgApplyPayload(values){
     const payload = values || {};
-    cfg$('cfg-ollama-host').value = payload.OLLAMA_HOST || '';
-    cfg$('cfg-splunk-base').value = payload.SPLUNK_BASE_URL || '';
-    cfg$('cfg-splunk-web').value = payload.SPLUNK_WEB_URL || '';
-    cfg$('cfg-splunk-mcp').value = payload.SPLUNK_MCP_URL || '';
-    cfg$('cfg-splunk-token').value = payload.SPLUNK_LAB_BEARER_TOKEN || '';
+    cfgSetValue('cfg-ollama-host', payload.OLLAMA_HOST || '');
+    cfgSetValue('cfg-splunk-base', payload.SPLUNK_BASE_URL || '');
+    cfgSetValue('cfg-splunk-web', payload.SPLUNK_WEB_URL || '');
+    cfgSetValue('cfg-splunk-mcp', payload.SPLUNK_MCP_URL || '');
+    cfgSetValue('cfg-splunk-token', payload.SPLUNK_LAB_BEARER_TOKEN || '');
     cfgTokenMasked = String(payload.SPLUNK_LAB_BEARER_TOKEN || '') === '__KEEP_EXISTING_SPLUNK_TOKEN__';
     cfgTokenActual = '';
     cfgTokenFetched = false;
     cfgShowMaskedTokenEditor();
-    cfg$('cfg-auth-enabled').value = payload.SOC_UI_AUTH_ENABLED || '1';
-    cfg$('cfg-edge-enabled').value = payload.EDGE_LLM_ENABLED || '0';
-    cfg$('cfg-edge-host').value = payload.EDGE_LLM_HOST || '';
-    cfg$('cfg-edge-model').value = payload.EDGE_LLM_MODEL || '';
-    cfg$('cfg-edge-role').value = payload.EDGE_LLM_ROLE || 'edge_router_splitter';
-    cfg$('cfg-edge-timeout').value = payload.EDGE_LLM_TIMEOUT_SEC || '60';
-    cfg$('cfg-model-planner').value = payload.OLLAMA_MODEL_QUERY_PLANNER || '';
-    cfg$('cfg-model-query-writer').value = payload.OLLAMA_MODEL_QUERY_WRITER || '';
-    cfg$('cfg-model-repair').value = payload.OLLAMA_MODEL_QUERY_REPAIR || '';
-    cfg$('cfg-model-evidence').value = payload.OLLAMA_MODEL_EVIDENCE_REVIEWER || '';
-    cfg$('cfg-model-security').value = payload.OLLAMA_MODEL_SECURITY_REVIEWER || '';
-    cfg$('cfg-model-peer1').value = payload.OLLAMA_MODEL_PEER_REVIEWER || '';
-    cfg$('cfg-model-peer2').value = payload.OLLAMA_MODEL_PEER_REVIEWER_2 || '';
-    cfg$('cfg-model-continuation').value = payload.OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER || '';
-    cfg$('cfg-model-summary').value = payload.OLLAMA_MODEL_FINAL_SUMMARY || '';
+    cfgSetValue('cfg-auth-enabled', payload.SOC_UI_AUTH_ENABLED || '1');
+    cfgSetValue('cfg-edge-enabled', payload.EDGE_LLM_ENABLED || '0');
+    cfgSetValue('cfg-edge-host', payload.EDGE_LLM_HOST || '');
+    cfgSetValue('cfg-edge-model', payload.EDGE_LLM_MODEL || '');
+    cfgSetValue('cfg-edge-role', payload.EDGE_LLM_ROLE || 'edge_router_splitter');
+    cfgSetValue('cfg-edge-timeout', payload.EDGE_LLM_TIMEOUT_SEC || '60');
+    cfgSetValue('cfg-model-planner', payload.OLLAMA_MODEL_QUERY_PLANNER || '');
+    cfgSetValue('cfg-model-planner-fallback', payload.OLLAMA_MODEL_QUERY_PLANNER_FALLBACK || '');
+    cfgSetValue('cfg-model-query-writer', payload.OLLAMA_MODEL_QUERY_WRITER || '');
+    cfgSetValue('cfg-model-repair', payload.OLLAMA_MODEL_QUERY_REPAIR || '');
+    cfgSetValue('cfg-model-evidence', payload.OLLAMA_MODEL_EVIDENCE_REVIEWER || '');
+    cfgSetValue('cfg-model-security', payload.OLLAMA_MODEL_SECURITY_REVIEWER || '');
+    cfgSetValue('cfg-model-peer1', payload.OLLAMA_MODEL_PEER_REVIEWER || '');
+    cfgSetValue('cfg-model-peer2', payload.OLLAMA_MODEL_PEER_REVIEWER_2 || '');
+    cfgSetValue('cfg-model-continuation', payload.OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER || '');
+    cfgSetValue('cfg-model-summary', payload.OLLAMA_MODEL_FINAL_SUMMARY || '');
+    cfgSyncFamiliesFromAdvanced(payload);
   }
   function cfgApplySecretState(secretState){
     const meta = secretState || {};
     const present = Boolean(meta.splunk_token_present);
+    cfgSecretTokenPresent = present;
     const masked = String(meta.splunk_token_masked || '').trim();
     cfg$('cfg-token-state').textContent = present
       ? `Saved token detected (${masked || 'masked'}). Leave the field as-is to keep it, replace it to rotate it, or clear it to remove it.`
       : 'No saved token detected.';
+    cfgUpdateLaneHints();
   }
   const cfgDefaultAssignments = {
-    OLLAMA_MODEL_QUERY_PLANNER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
-    OLLAMA_MODEL_QUERY_WRITER: 'deepseek-coder-v2:lite',
-    OLLAMA_MODEL_QUERY_REPAIR: 'deepseek-coder-v2:lite',
+    OLLAMA_MODEL_QUERY_PLANNER: 'TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M',
+    OLLAMA_MODEL_QUERY_PLANNER_FALLBACK: 'ministral-3:3b',
+    OLLAMA_MODEL_QUERY_WRITER: 'granite4:3b',
+    OLLAMA_MODEL_QUERY_REPAIR: 'granite4:3b',
     OLLAMA_MODEL_EVIDENCE_REVIEWER: 'hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest',
     OLLAMA_MODEL_SECURITY_REVIEWER: 'hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest',
-    OLLAMA_MODEL_PEER_REVIEWER: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
-    OLLAMA_MODEL_PEER_REVIEWER_2: 'hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
+    OLLAMA_MODEL_PEER_REVIEWER: 'gemma3:4b',
+    OLLAMA_MODEL_PEER_REVIEWER_2: 'gemma3:4b',
     OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER: 'hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest',
     OLLAMA_MODEL_FINAL_SUMMARY: 'hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest'
   };
+  const cfgCoreFamilyIds = new Set(['planning','generation','peer_review']);
+  function cfgCoreOnlyEnabled(){
+    const toggle = cfg$('cfg-core-only-mode');
+    return toggle ? Boolean(toggle.checked) : true;
+  }
   function cfgExpectedModelsFromValues(values, explicitExpected){
     const explicit = Array.isArray(explicitExpected) ? explicitExpected.filter(Boolean) : [];
-    if(explicit.length){ return explicit; }
-    const raw = Object.values(cfgDefaultAssignments).map((model) => String(model || '').trim()).filter(Boolean);
-    return raw.filter((model, index) => raw.indexOf(model) === index);
+    if(explicit.length){
+      return cfgCoreOnlyEnabled() ? explicit.filter((tag) => cfgTagIsCore(tag, values)) : explicit;
+    }
+    const draft = {...(values || {})};
+    cfgFamilySpec().forEach((family) => {
+      (family.assignments || []).forEach((slot) => {
+        const value = String(draft[slot.envKey] || cfgDefaultAssignments[slot.envKey] || '').trim();
+        if(value){
+          draft[slot.envKey] = value;
+          (slot.mirrorKeys || []).forEach((mirrorKey) => { draft[mirrorKey] = value; });
+        }
+      });
+    });
+    const raw = Object.values({...cfgDefaultAssignments, ...draft}).map((model) => String(model || '').trim()).filter(Boolean);
+    const tags = raw.filter((model, index) => raw.indexOf(model) === index);
+    if(!cfgCoreOnlyEnabled()){ return tags; }
+    const coreTags = new Set();
+    cfgFamilySpec().forEach((family) => {
+      if(!cfgCoreFamilyIds.has(family.id)){ return; }
+      (family.assignments || []).forEach((slot) => {
+        const tag = String(draft[slot.envKey] || cfgDefaultAssignments[slot.envKey] || '').trim();
+        if(tag){ coreTags.add(tag); }
+      });
+    });
+    return tags.filter((tag) => coreTags.has(tag));
+  }
+  function cfgTagIsCore(tag, values){
+    const normalized = String(tag || '').trim();
+    if(!normalized){ return false; }
+    for(const family of cfgFamilySpec()){
+      if(!cfgCoreFamilyIds.has(family.id)){ continue; }
+      for(const slot of (family.assignments || [])){
+        const keys = [slot.envKey, ...(slot.mirrorKeys || [])];
+        for(const key of keys){
+          if(String((values || {})[key] || cfgDefaultAssignments[key] || '').trim() === normalized){
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
   function cfgRenderModelCompare(values, installedModels, explicitExpected){
     const expected = cfgExpectedModelsFromValues(values || {}, explicitExpected);
     const installed = Array.isArray(installedModels) ? installedModels : [];
     const missing = expected.filter(model => !installed.includes(model));
-    const renderList = (id, items, cls='') => {
-      cfg$(id).innerHTML = items.length
+    const installedCount = expected.length - missing.length;
+    const pct = expected.length ? Math.round((installedCount / expected.length) * 100) : 0;
+    const pctEl = cfg$('cfg-readiness-pct');
+    const copyEl = cfg$('cfg-readiness-copy');
+    const barEl = cfg$('cfg-readiness-bar');
+    const wrapEl = document.querySelector('.cfg-readiness-wrap');
+    if(pctEl){ pctEl.textContent = `${pct}%`; }
+    if(barEl){ barEl.style.width = `${pct}%`; }
+    if(wrapEl){
+      wrapEl.classList.remove('ok','warn');
+      if(expected.length && !missing.length){ wrapEl.classList.add('ok'); }
+      else if(missing.length){ wrapEl.classList.add('warn'); }
+    }
+    if(copyEl){
+      if(!expected.length){
+        copyEl.textContent = 'Assign model families to see readiness.';
+      } else if(!missing.length){
+        copyEl.textContent = `All ${expected.length} expected tag(s) installed on Ollama.`;
+      } else {
+        copyEl.textContent = `${missing.length} missing of ${expected.length} expected tag(s): ${missing.join(', ')}`;
+      }
+    }
+    ['cfg-expected-list','cfg-installed-list','cfg-missing-list'].forEach((id) => {
+      const el = cfg$(id);
+      if(!el){ return; }
+      const items = id.includes('expected') ? expected : (id.includes('installed') ? installed : missing);
+      const cls = id.includes('installed') ? 'ok' : (id.includes('missing') && missing.length ? 'warn' : 'ok');
+      el.innerHTML = items.length
         ? items.map(item => `<div class="cfg-compare-item ${cls}">${cfgEscape(item)}</div>`).join('')
         : '<div class="cfg-compare-item">None</div>';
-    };
-    renderList('cfg-expected-list', expected);
-    renderList('cfg-installed-list', installed, 'ok');
-    renderList('cfg-missing-list', missing, missing.length ? 'warn' : 'ok');
+    });
   }
   function cfgAutoAssignDefaults(values, installedModels){
     const assigned = {...values};
@@ -14864,6 +16133,7 @@ def _configure_page_body() -> str:
   function cfgRenderEnvRefresh(meta){
     const state = String(meta?.state || 'unknown');
     const pct = Math.max(0, Math.min(100, Number(meta?.progress_pct || 0)));
+    cfgUpdateGroundStatus(meta);
     cfg$('cfg-env-refresh-state').textContent = `state=${state}`;
     cfg$('cfg-env-refresh-detail').textContent = meta?.detail || 'No environment refresh state available.';
     cfg$('cfg-env-refresh-phase').textContent = `phase=${meta?.phase || 'idle'}`;
@@ -14905,28 +16175,32 @@ def _configure_page_body() -> str:
     }
   }
   function cfgCollectPayload(){
-    const tokenValue = cfg$('cfg-splunk-token').value.trim();
+    if(!cfgHasStageOverrides()){
+      cfgSyncAdvancedFromFamilies();
+    }
+    const tokenValue = cfgReadValue('cfg-splunk-token');
     return {
-      OLLAMA_HOST: cfg$('cfg-ollama-host').value.trim(),
-      SPLUNK_BASE_URL: cfg$('cfg-splunk-base').value.trim(),
-      SPLUNK_WEB_URL: cfg$('cfg-splunk-web').value.trim(),
-      SPLUNK_MCP_URL: cfg$('cfg-splunk-mcp').value.trim(),
+      OLLAMA_HOST: cfgReadValue('cfg-ollama-host'),
+      SPLUNK_BASE_URL: cfgReadValue('cfg-splunk-base'),
+      SPLUNK_WEB_URL: cfgReadValue('cfg-splunk-web'),
+      SPLUNK_MCP_URL: cfgReadValue('cfg-splunk-mcp'),
       SPLUNK_LAB_BEARER_TOKEN: cfgTokenMasked && !tokenValue ? '' : (tokenValue || (cfgTokenMasked ? '__KEEP_EXISTING_SPLUNK_TOKEN__' : '')),
-      SOC_UI_AUTH_ENABLED: cfg$('cfg-auth-enabled').value.trim(),
-      EDGE_LLM_ENABLED: cfg$('cfg-edge-enabled').value.trim(),
-      EDGE_LLM_HOST: cfg$('cfg-edge-host').value.trim(),
-      EDGE_LLM_MODEL: cfg$('cfg-edge-model').value.trim(),
-      EDGE_LLM_ROLE: cfg$('cfg-edge-role').value.trim(),
-      EDGE_LLM_TIMEOUT_SEC: cfg$('cfg-edge-timeout').value.trim(),
-      OLLAMA_MODEL_QUERY_PLANNER: cfg$('cfg-model-planner').value.trim(),
-      OLLAMA_MODEL_QUERY_WRITER: cfg$('cfg-model-query-writer').value.trim(),
-      OLLAMA_MODEL_QUERY_REPAIR: cfg$('cfg-model-repair').value.trim(),
-      OLLAMA_MODEL_EVIDENCE_REVIEWER: cfg$('cfg-model-evidence').value.trim(),
-      OLLAMA_MODEL_SECURITY_REVIEWER: cfg$('cfg-model-security').value.trim(),
-      OLLAMA_MODEL_PEER_REVIEWER: cfg$('cfg-model-peer1').value.trim(),
-      OLLAMA_MODEL_PEER_REVIEWER_2: cfg$('cfg-model-peer2').value.trim(),
-      OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER: cfg$('cfg-model-continuation').value.trim(),
-      OLLAMA_MODEL_FINAL_SUMMARY: cfg$('cfg-model-summary').value.trim()
+      SOC_UI_AUTH_ENABLED: cfgReadValue('cfg-auth-enabled'),
+      EDGE_LLM_ENABLED: cfgReadValue('cfg-edge-enabled'),
+      EDGE_LLM_HOST: cfgReadValue('cfg-edge-host'),
+      EDGE_LLM_MODEL: cfgReadValue('cfg-edge-model'),
+      EDGE_LLM_ROLE: cfgReadValue('cfg-edge-role'),
+      EDGE_LLM_TIMEOUT_SEC: cfgReadValue('cfg-edge-timeout'),
+      OLLAMA_MODEL_QUERY_PLANNER: cfgReadValue('cfg-model-planner'),
+      OLLAMA_MODEL_QUERY_PLANNER_FALLBACK: cfgReadValue('cfg-model-planner-fallback'),
+      OLLAMA_MODEL_QUERY_WRITER: cfgReadValue('cfg-model-query-writer'),
+      OLLAMA_MODEL_QUERY_REPAIR: cfgReadValue('cfg-model-repair'),
+      OLLAMA_MODEL_EVIDENCE_REVIEWER: cfgReadValue('cfg-model-evidence'),
+      OLLAMA_MODEL_SECURITY_REVIEWER: cfgReadValue('cfg-model-security'),
+      OLLAMA_MODEL_PEER_REVIEWER: cfgReadValue('cfg-model-peer1'),
+      OLLAMA_MODEL_PEER_REVIEWER_2: cfgReadValue('cfg-model-peer2'),
+      OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER: cfgReadValue('cfg-model-continuation'),
+      OLLAMA_MODEL_FINAL_SUMMARY: cfgReadValue('cfg-model-summary')
     };
   }
   function cfgRenderQuickPicks(inputId, pickerId, models){
@@ -14985,9 +16259,14 @@ def _configure_page_body() -> str:
       option.value = model;
       list.appendChild(option);
     });
+    cfgRenderFamilyGrid(normalized);
     cfgModelPairs.forEach(([inputId, pickerId]) => {
       const input = cfg$(inputId);
-      input.oninput = () => cfgRenderQuickPicks(inputId, pickerId, normalized);
+      input.oninput = () => {
+        cfgUpdateOverrideNote();
+        cfgRenderQuickPicks(inputId, pickerId, normalized);
+        cfgRefreshFamilyVisuals();
+      };
       cfgRenderQuickPicks(inputId, pickerId, normalized);
     });
   }
@@ -14999,42 +16278,102 @@ def _configure_page_body() -> str:
       return;
     }
     const extraBits = [];
-    if(Array.isArray(edgeCheck.models) && edgeCheck.models.length){ extraBits.push(`models: ${edgeCheck.models.join(', ')}`); }
-    if(Array.isArray(edgeCheck.missing_models) && edgeCheck.missing_models.length){ extraBits.push(`missing: ${edgeCheck.missing_models.join(', ')}`); }
+    if(Array.isArray(edgeCheck.models) && edgeCheck.models.length){ extraBits.push(cfgFormatModelList(edgeCheck.models, 'models')); }
+    if(Array.isArray(edgeCheck.missing_models) && edgeCheck.missing_models.length){ extraBits.push(cfgFormatModelList(edgeCheck.missing_models, 'missing')); }
     cfg$('cfg-edge-validation-results').innerHTML = `
       <div class="cfg-check ${cfgEscape(edgeCheck.status || 'warn')}">
         <div class="cfg-check-head">
           <div class="cfg-check-name">edge_helper</div>
           <span class="cfg-badge">${cfgEscape(edgeCheck.status || 'unknown')}</span>
         </div>
-        <div class="cfg-check-detail">${cfgEscape(edgeCheck.detail || '')}</div>
+        <div class="cfg-check-detail">${cfgEscape(cfgFormatCheckDetail(edgeCheck))}</div>
         ${extraBits.length ? `<div class="cfg-check-meta">${cfgEscape(extraBits.join('\\n'))}</div>` : ''}
       </div>
     `;
   }
+  function cfgUpdateValidationStatus(data){
+    const summary = data.summary || {};
+    const checks = Array.isArray(data.checks) ? data.checks : [];
+    const errors = Number(summary.error || 0);
+    const warns = Number(summary.warn || 0);
+    const copy = cfg$('cfg-validation-copy');
+    const badge = cfg$('cfg-validation-state-badge');
+    const wrap = cfg$('cfg-validation-status');
+    if(copy){
+      if(!checks.length){
+        copy.textContent = 'Run validation from the sticky footer to check live dependencies.';
+      } else if(errors){
+        copy.textContent = `${errors} blocking issue(s) — fix Connect / Model Stack, then validate again.`;
+      } else if(warns){
+        copy.textContent = `Validation passed with ${warns} warning(s). Review below, then Save.`;
+      } else {
+        copy.textContent = 'All checks passed — Save if you changed settings.';
+      }
+    }
+    if(badge){
+      badge.textContent = errors ? 'blocked' : (warns ? 'attention' : (checks.length ? 'ready' : 'waiting'));
+    }
+    if(wrap){
+      wrap.classList.remove('ok','warn','error');
+      if(errors){ wrap.classList.add('error'); }
+      else if(warns){ wrap.classList.add('warn'); }
+      else if(checks.length){ wrap.classList.add('ok'); }
+    }
+  }
+  function cfgUpdateGroundStatus(meta){
+    const state = String(meta?.state || 'unknown');
+    const copy = cfg$('cfg-ground-copy');
+    const badge = cfg$('cfg-ground-state-badge');
+    const wrap = cfg$('cfg-ground-status');
+    if(copy){
+      if(state === 'in_progress'){
+        copy.textContent = meta?.detail || 'Refreshing Data Domains — this may take a few minutes.';
+      } else if(state === 'ready'){
+        copy.textContent = meta?.detail || 'Data Domains are ready — run investigations to learn your environment.';
+      } else if(state === 'error'){
+        copy.textContent = meta?.detail || 'Data Domains refresh failed — review the log below and retry.';
+      } else {
+        copy.textContent = 'Run Refresh Data Domains after validation passes to ground investigations in Splunk.';
+      }
+    }
+    if(badge){
+      badge.textContent = state === 'in_progress' ? 'running' : (state === 'ready' ? 'ready' : (state === 'error' ? 'failed' : 'waiting'));
+    }
+    if(wrap){
+      wrap.classList.remove('ok','warn','error');
+      if(state === 'ready'){ wrap.classList.add('ok'); }
+      else if(state === 'error'){ wrap.classList.add('error'); }
+      else if(state === 'in_progress'){ wrap.classList.add('warn'); }
+    }
+  }
   function cfgRenderValidation(data){
     const summary = data.summary || {};
+    if(Array.isArray(data.expected_models)){ cfgLastExpectedModels = data.expected_models; }
+    cfgUpdateValidationStatus(data);
     cfg$('cfg-validation-summary').innerHTML = [
       `<span class="cfg-badge">ok=${cfgEscape(summary.ok || 0)}</span>`,
       `<span class="cfg-badge">warn=${cfgEscape(summary.warn || 0)}</span>`,
       `<span class="cfg-badge">error=${cfgEscape(summary.error || 0)}</span>`
     ].join('');
     const checks = Array.isArray(data.checks) ? data.checks : [];
+    cfgLastValidation = data;
+    cfgUpdateNextAction(data);
+    cfgUpdateStickyFooter(data);
+    cfgUpdateLaneHealthPills(data);
     if(!checks.length){
-      cfg$('cfg-validation-results').innerHTML = '<div class="cfg-note">No validation results available.</div>';
+      cfg$('cfg-validation-results').innerHTML = '<div class="cfg-note">No validation has been run yet.</div>';
       return;
     }
     cfg$('cfg-validation-results').innerHTML = checks.map((check) => {
-      const extraBits = [];
-      if(Array.isArray(check.models) && check.models.length){ extraBits.push(`models: ${check.models.join(', ')}`); }
-      if(Array.isArray(check.missing_models) && check.missing_models.length){ extraBits.push(`missing: ${check.missing_models.join(', ')}`); }
+      const extraBits = cfgFormatCheckExtraBits(check);
+      const status = cfgEscape(check.status || 'warn');
       return `
-        <div class="cfg-check ${cfgEscape(check.status || 'warn')}">
+        <div class="cfg-check ${status}">
           <div class="cfg-check-head">
-            <div class="cfg-check-name">${cfgEscape(check.name || 'check')}</div>
-            <span class="cfg-badge">${cfgEscape(check.status || 'unknown')}</span>
+            <div class="cfg-check-name"><span class="cfg-check-dot"></span>${cfgEscape(check.name || 'check')}</div>
+            <span class="cfg-badge">${status}</span>
           </div>
-          <div class="cfg-check-detail">${cfgEscape(check.detail || '')}</div>
+          <div class="cfg-check-detail">${cfgEscape(cfgFormatCheckDetail(check))}</div>
           ${extraBits.length ? `<div class="cfg-check-meta">${cfgEscape(extraBits.join('\\n'))}</div>` : ''}
         </div>
       `;
@@ -15051,7 +16390,7 @@ def _configure_page_body() -> str:
     cfg$('cfg-health-board').innerHTML = healthCards.map(([key, label]) => {
       const check = statusMap[key] || {};
       const state = cfgEscape(check.status || 'warn');
-      const detail = cfgEscape(check.detail || 'Validation has not completed yet.');
+      const detail = cfgEscape(cfgFormatCheckDetail(check) || 'Validation has not completed yet.');
       return `
         <div class="cfg-health-card">
           <div class="cfg-health-head">
@@ -15074,7 +16413,7 @@ def _configure_page_body() -> str:
     cfg$('cfg-mcp-probe-results').innerHTML = `
       <div class="cfg-check ${cfgEscape(status)}">
         <div class="cfg-check-head">
-          <div class="cfg-check-name">mcp_query_probe</div>
+          <div class="cfg-check-name"><span class="cfg-check-dot"></span>mcp_query_probe</div>
           <span class="cfg-badge">${cfgEscape(status)}</span>
         </div>
         <div class="cfg-check-detail">${cfgEscape(payload.detail || 'No MCP probe result available.')}</div>
@@ -15084,9 +16423,10 @@ def _configure_page_body() -> str:
   }
   function cfgRender(data){
     const values = data.values || {};
-    cfgApplyPayload(values);
     cfgApplySecretState(data.secret_state || {});
     cfgPopulateModelOptions(data.ollama_available_models || []);
+    cfgApplyPayload(values);
+    cfgRenderStackSummary(data.model_stack || {});
     cfgRenderModelCompare(values, data.ollama_available_models || [], data.expected_models || []);
     cfg$('cfg-ollama-pulls').textContent = (data.ollama_pull_commands || []).join('\\n') || 'No model pull commands generated.';
     cfg$('cfg-mcp-json').textContent = data.splunk_mcp_config_json || '{}';
@@ -15113,6 +16453,10 @@ def _configure_page_body() -> str:
     cfg$('cfg-setup-link-inline').href = `/docs/view?path=${encodeURIComponent(setupPath)}`;
     cfgRenderEnvRefresh(data.environment_profile_refresh || {});
     cfgRenderPersonalization(data.personalization || {});
+    cfgBindConnectFieldHints();
+    cfgUpdateLaneHints();
+    cfgUpdateNextAction(cfgLastValidation || {});
+    cfgUpdateLaneHealthPills(cfgLastValidation || {expected_models: cfgLastExpectedModels});
   }
   async function cfgLoad(){
     try{
@@ -15128,9 +16472,9 @@ def _configure_page_body() -> str:
     }
     const resp = await fetch('/api/config/runtime');
     const data = await resp.json();
-    if(!resp.ok){ cfg$('cfg-status').textContent = data.error || `load failed (${resp.status})`; return; }
+    if(!resp.ok){ cfgSetStatus(data.error || `load failed (${resp.status})`); return; }
     cfgRender(data);
-    cfg$('cfg-status').textContent = 'Loaded current configuration.';
+    cfgSetStatus('Loaded current configuration.');
     if(String(data.environment_profile_refresh?.state || '') === 'in_progress'){
       await cfgPollEnvRefresh();
     }
@@ -15141,7 +16485,7 @@ def _configure_page_body() -> str:
   }
   async function cfgValidate(){
     const draft = cfgCollectPayload();
-    cfg$('cfg-status').textContent = 'Validating live connections...';
+    cfgSetStatus('Validating live connections...');
     const resp = await fetch('/api/config/validate', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -15150,7 +16494,7 @@ def _configure_page_body() -> str:
     const data = await resp.json();
     if(!resp.ok){
       cfgApplyPayload(draft);
-      cfg$('cfg-status').textContent = data.error || `validation failed (${resp.status})`;
+      cfgSetStatus(data.error || `validation failed (${resp.status})`);
       cfg$('cfg-edge-status').textContent = data.error || `edge validation failed (${resp.status})`;
       return;
     }
@@ -15167,9 +16511,9 @@ def _configure_page_body() -> str:
     ].filter(Boolean).join('\\n\\n');
     cfg$('cfg-edge-checks').textContent = data.connectivity_checks?.edge_ollama_tags || 'Edge helper disabled or not configured.';
     if(data.environment_profile_status === 'in_progress'){
-      cfg$('cfg-status').textContent = 'Validation complete. Data Domains initialization started.';
+      cfgSetStatus('Validation complete. Data Domains initialization started.');
     } else {
-      cfg$('cfg-status').textContent = 'Validation complete.';
+      cfgSetStatus('Validation complete.');
     }
     cfg$('cfg-edge-status').textContent = 'Edge helper validation complete.';
   }
@@ -15195,7 +16539,7 @@ def _configure_page_body() -> str:
   }
   async function cfgProbeMcp(){
     const draft = cfgCollectPayload();
-    cfg$('cfg-status').textContent = 'Running live MCP probe...';
+    cfgSetStatus('Running live MCP probe...');
     const resp = await fetch('/api/config/mcp-probe', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -15208,12 +16552,12 @@ def _configure_page_body() -> str:
         status: 'error',
         detail: data.error || `MCP probe failed (${resp.status})`
       });
-      cfg$('cfg-status').textContent = data.error || `MCP probe failed (${resp.status})`;
+      cfgSetStatus(data.error || `MCP probe failed (${resp.status})`);
       return;
     }
     cfgApplyPayload(draft);
     cfgRenderMcpProbe(data);
-    cfg$('cfg-status').textContent = data.detail || 'MCP probe complete.';
+    cfgSetStatus(data.detail || 'MCP probe complete.');
   }
   async function cfgSave(mode='full'){
     const edgeOnly = mode === 'edge';
@@ -15223,7 +16567,7 @@ def _configure_page_body() -> str:
       saveBtn.disabled = true;
       saveBtn.textContent = edgeOnly ? 'Saving Edge...' : 'Saving...';
     }
-    cfg$('cfg-status').textContent = edgeOnly ? 'Saving edge helper...' : 'Saving...';
+    cfgSetStatus(edgeOnly ? 'Saving edge helper...' : 'Saving...');
     if(edgeOnly){
       cfg$('cfg-edge-status').textContent = 'Saving edge helper...';
     }
@@ -15237,7 +16581,7 @@ def _configure_page_body() -> str:
       const validationData = await validationResp.json();
       if(!validationResp.ok){
         const detail = validationData.error || `pre-save validation failed (${validationResp.status})`;
-        cfg$('cfg-status').textContent = detail;
+        cfgSetStatus(detail);
         if(edgeOnly){
           cfg$('cfg-edge-status').textContent = detail;
         }
@@ -15257,14 +16601,14 @@ def _configure_page_body() -> str:
       const data = await resp.json();
       if(!resp.ok){
         const detail = data.error || `save failed (${resp.status})`;
-        cfg$('cfg-status').textContent = detail;
+        cfgSetStatus(detail);
         if(edgeOnly){
           cfg$('cfg-edge-status').textContent = detail;
         }
         return;
       }
       const savedStatus = edgeOnly ? 'Saved edge helper settings to config/ui.env.' : 'Saved to config/ui.env.';
-      cfg$('cfg-status').textContent = savedStatus;
+      cfgSetStatus(savedStatus);
       if(edgeOnly){
         cfg$('cfg-edge-status').textContent = 'Edge helper saved to config/ui.env.';
       }
@@ -15272,20 +16616,18 @@ def _configure_page_body() -> str:
         cfgRender(data);
       } catch (renderErr) {
         console.error('cfgRender failed after save', renderErr);
-        cfg$('cfg-status').textContent = `${savedStatus} UI refresh was partial; reload if fields look stale.`;
+        cfgSetStatus(`${savedStatus} UI refresh was partial; reload if fields look stale.`);
       }
       try {
         await cfgValidate();
       } catch (validateErr) {
         console.error('cfgValidate failed after save', validateErr);
-        if(cfg$('cfg-status').textContent === 'Validating live connections...'){
-          cfg$('cfg-status').textContent = `${savedStatus} Validation refresh failed; use Validate Current Config to retry.`;
-        }
+        cfgSetStatus(`${savedStatus} Validation refresh failed; use Validate to retry.`);
       }
     } catch (err) {
       console.error('cfgSave failed', err);
       const detail = err?.message ? `save failed: ${err.message}` : 'save failed';
-      cfg$('cfg-status').textContent = detail;
+      cfgSetStatus(detail);
       if(edgeOnly){
         cfg$('cfg-edge-status').textContent = detail;
       }
@@ -15297,6 +16639,13 @@ def _configure_page_body() -> str:
     }
   }
   cfg$('cfg-save').onclick = async () => { await cfgSave('full'); };
+  const cfgFamilyResetBtn = cfg$('cfg-family-reset');
+  if(cfgFamilyResetBtn){
+    cfgFamilyResetBtn.onclick = () => {
+      cfgResetFamilyDefaults(cfgInstalledModels);
+      cfgSetStatus('Reset family assignments to v1.5.1 defaults. Save to persist.');
+    };
+  }
   cfg$('cfg-personalize').onclick = async () => {
     cfg$('cfg-personalize-status').textContent = 'Starting personalization rebuild...';
     const resp = await fetch('/api/config/personalize', {
@@ -15404,6 +16753,7 @@ def _configure_page_body() -> str:
     cfgTokenFetched = false;
     cfgShowMaskedTokenEditor();
     cfg$('cfg-token-state').textContent = 'Token cleared in the draft form. Save Configuration to remove it from runtime.';
+    cfgUpdateLaneHints();
   };
   cfg$('cfg-splunk-token').addEventListener('input', () => {
     const tokenInput = cfg$('cfg-splunk-token');
@@ -15412,12 +16762,374 @@ def _configure_page_body() -> str:
       cfgTokenActual = String(tokenInput.value || '');
       cfgTokenFetched = false;
     }
+    cfgUpdateLaneHints();
   });
+  cfgBindConnectFieldHints();
+  cfgAssertScriptValid();
+  cfgInitLaneRouting();
+  const cfgCoreOnlyToggle = cfg$('cfg-core-only-mode');
+  if(cfgCoreOnlyToggle){
+    cfgCoreOnlyToggle.addEventListener('change', () => {
+      const draft = cfgReadAdvancedValues();
+      cfgRenderModelCompare(draft, cfgInstalledModels, []);
+      cfgRenderInventoryTable();
+      if(cfgLastValidation){
+        cfgUpdateNextAction(cfgLastValidation);
+        cfgUpdateStickyFooter(cfgLastValidation);
+      }
+    });
+  }
   cfgLoad();
 </script>
 """
 
+
+def _configure_page_body_rendered() -> str:
+    return (
+        _configure_page_body()
+        .replace("__APP_VERSION_LABEL__", html.escape(APP_VERSION_LABEL))
+        .replace("__CONFIGURE_UI_TAG__", html.escape(CONFIGURE_UI_TAG))
+    )
+
 APP_HTML = APP_HTML.replace("__APP_VERSION_LABEL__", html.escape(APP_VERSION_LABEL))
+APP_HTML = APP_HTML.replace("__CONFIGURE_UI_TAG__", html.escape(CONFIGURE_UI_TAG))
+
+
+def _remote_log_config_status() -> dict[str, Any]:
+    return ollama_log_config_status()
+
+
+def _ollama_ops_page_body() -> str:
+    return """
+<div class="card">
+  <style>
+    .ops-shell{display:grid;gap:16px;}
+    .ops-hero{border:1px solid #244660;border-radius:18px;background:linear-gradient(160deg,#08182a,#091726 52%,#0a1d17);padding:18px;}
+    .ops-hero h1{margin:0 0 8px;font-size:28px;line-height:1.05;}
+    .ops-hero p{margin:0;color:#a8c0d8;font-size:14px;line-height:1.65;}
+    .ops-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}
+    .ops-metric{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px;}
+    .ops-metric-kicker{font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px;}
+    .ops-metric-value{font-size:22px;font-weight:900;color:#f8fafc;line-height:1.1;}
+    .ops-metric-copy{margin-top:6px;color:#9fb4cc;font-size:12px;line-height:1.45;}
+    .ops-panel{border:1px solid #23445f;border-radius:18px;background:linear-gradient(180deg,#081525,#06111d);padding:18px;}
+    .ops-panel h2{margin:0 0 10px;font-size:18px;}
+    .ops-help{margin:0 0 12px;color:#9fb4cc;font-size:13px;line-height:1.55;}
+    .ops-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;}
+    .ops-actions input,.ops-actions select{background:#040c18;color:#f8fafc;border:1px solid #33506a;border-radius:12px;padding:10px 12px;font-size:13px;}
+    .ops-actions button{appearance:none;border:0;border-radius:12px;padding:10px 14px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#03230f;font-weight:900;cursor:pointer;font-size:13px;}
+    .ops-actions .btn-secondary{background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;border:1px solid #315a79;}
+    .ops-status{color:#9fb4cc;font-size:13px;margin-bottom:10px;}
+    .ops-loaded{display:grid;gap:8px;margin-top:10px;}
+    .ops-loaded-item{border:1px solid #27415a;border-radius:12px;background:#081729;padding:10px 12px;color:#dbeafe;font-size:13px;}
+    .ops-log{border:1px solid #1e3348;border-radius:14px;background:#030a12;color:#dbeafe;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;max-height:420px;overflow:auto;padding:12px;white-space:pre-wrap;}
+    .ops-log-line{margin:0 0 4px;}
+    .ops-log-line.warn{color:#fde68a;}
+    .ops-log-line.error,.ops-log-line.fatal{color:#fecaca;}
+    .ops-log-line.debug{color:#94a3b8;}
+    .ops-cli{border:1px solid #27415a;border-radius:12px;background:#071523;padding:12px;color:#cbd5e1;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;}
+    .ops-chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;}
+    .ops-chart-card{border:1px solid #27415a;border-radius:14px;background:#071523;padding:12px 12px 8px;}
+    .ops-chart-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;}
+    .ops-chart-head span{font-size:12px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;color:#7dd3fc;}
+    .ops-chart-head strong{font-size:13px;font-weight:800;color:#f8fafc;}
+    .ops-chart-card canvas{display:block;width:100%;height:180px;border-radius:10px;background:linear-gradient(180deg,#050d16,#030810);}
+    @media (max-width: 980px){.ops-grid{grid-template-columns:1fr 1fr;}.ops-chart-grid{grid-template-columns:1fr;}}
+  </style>
+  <div class="ops-shell">
+    <div class="ops-hero">
+      <h1>Ollama Ops Monitor</h1>
+      <p>Live GPU telemetry and Ollama runtime status for this sidecar host. Log tailing uses the detected local source (<code>journalctl</code>, <code>docker logs</code>, or remote Windows SSE when configured).</p>
+    </div>
+    <div id="ops-status" class="ops-status">Loading Ollama and GPU metrics...</div>
+    <div id="ops-metrics" class="ops-grid"></div>
+    <section class="ops-panel">
+      <h2>GPU History</h2>
+      <p class="ops-help">Rolling timechart while this page is open (~4 minutes at 2s sampling). VRAM is filled area; GPU utilization is a line overlay on the same 0–100% scale.</p>
+      <div class="ops-chart-grid">
+        <div class="ops-chart-card">
+          <div class="ops-chart-head"><span>VRAM Usage</span><strong id="ops-vram-legend">waiting...</strong></div>
+          <canvas id="ops-chart-vram" width="640" height="180" aria-label="VRAM usage timechart"></canvas>
+        </div>
+        <div class="ops-chart-card">
+          <div class="ops-chart-head"><span>GPU Utilization</span><strong id="ops-gpu-legend">waiting...</strong></div>
+          <canvas id="ops-chart-gpu" width="640" height="180" aria-label="GPU utilization timechart"></canvas>
+        </div>
+      </div>
+    </section>
+    <section class="ops-panel">
+      <h2>Loaded Models</h2>
+      <div id="ops-loaded" class="ops-loaded"><div class="ops-loaded-item">No models loaded in VRAM yet.</div></div>
+    </section>
+    <section class="ops-panel">
+      <h2>Live Ollama Logs</h2>
+      <p class="ops-help">Equivalent CLI on this Linux host: <code>journalctl -u ollama -f -n 200 --output=cat</code> or <code>watch -n 1 nvidia-smi</code> for GPU.</p>
+      <div class="ops-actions">
+        <select id="ops-log-level"><option value="">All levels</option><option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option><option value="fatal">fatal</option></select>
+        <input id="ops-log-grep" placeholder="grep filter" />
+        <button id="ops-log-reconnect" type="button">Reconnect Stream</button>
+        <button id="ops-log-clear" class="btn-secondary" type="button">Clear View</button>
+        <label><input id="ops-log-pause" type="checkbox" /> Pause</label>
+      </div>
+      <div id="ops-log-meta" class="ops-status">Connecting to log stream...</div>
+      <div id="ops-log-view" class="ops-log"></div>
+    </section>
+    <section class="ops-panel">
+      <h2>Host CLI Cheatsheet</h2>
+      <div id="ops-cli" class="ops-cli"></div>
+    </section>
+  </div>
+  <script>
+    const ops$ = (id) => document.getElementById(id);
+    let opsMetricsTimer = null;
+    let opsLogSource = null;
+    let opsLogPaused = false;
+    const OPS_HISTORY_MAX = 120;
+    const opsHistory = [];
+
+    function opsFmtMiB(value){
+      const n = Number(value || 0);
+      if (!Number.isFinite(n)) return 'n/a';
+      return n >= 1024 ? `${(n / 1024).toFixed(1)} GiB` : `${Math.round(n)} MiB`;
+    }
+
+    function opsPushHistory(gpuRow){
+      if (!gpuRow) return;
+      const total = Number(gpuRow.memory_total_mib || 0);
+      const used = Number(gpuRow.memory_used_mib || 0);
+      const vramPct = total > 0 ? (used / total) * 100 : null;
+      const gpuUtil = Number(gpuRow.utilization_gpu_pct);
+      opsHistory.push({
+        t: Date.now(),
+        vramPct: Number.isFinite(vramPct) ? vramPct : null,
+        vramUsed: Number.isFinite(used) ? used : null,
+        vramTotal: Number.isFinite(total) ? total : null,
+        gpuUtil: Number.isFinite(gpuUtil) ? gpuUtil : null,
+      });
+      while (opsHistory.length > OPS_HISTORY_MAX) opsHistory.shift();
+    }
+
+    function opsPrepareCanvas(canvas){
+      const rect = canvas.getBoundingClientRect();
+      const width = Math.max(320, Math.floor(rect.width || canvas.width || 640));
+      const height = Math.max(120, Math.floor(rect.height || canvas.height || 180));
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return { ctx, width, height };
+    }
+
+    function opsDrawSeriesChart(canvas, key, opts){
+      if (!canvas) return;
+      const { ctx, width, height } = opsPrepareCanvas(canvas);
+      const pad = { l: 42, r: 12, t: 12, b: 26 };
+      const plotW = Math.max(10, width - pad.l - pad.r);
+      const plotH = Math.max(10, height - pad.t - pad.b);
+      const points = opsHistory.filter((row) => row[key] !== null && row[key] !== undefined);
+      ctx.clearRect(0, 0, width, height);
+
+      ctx.strokeStyle = '#23445f';
+      ctx.lineWidth = 1;
+      ctx.fillStyle = '#64748b';
+      ctx.font = '11px Trebuchet MS, Segoe UI, sans-serif';
+      for (let pct = 0; pct <= 100; pct += 25) {
+        const y = pad.t + plotH - (pct / 100) * plotH;
+        ctx.beginPath();
+        ctx.moveTo(pad.l, y);
+        ctx.lineTo(pad.l + plotW, y);
+        ctx.stroke();
+        ctx.fillText(`${pct}%`, 6, y + 4);
+      }
+
+      if (points.length < 2) {
+        ctx.fillStyle = '#9fb4cc';
+        ctx.fillText('Collecting samples...', pad.l + 8, pad.t + 24);
+        return;
+      }
+
+      const minT = points[0].t;
+      const maxT = points[points.length - 1].t;
+      const span = Math.max(1, maxT - minT);
+      const coords = points.map((row) => {
+        const x = pad.l + ((row.t - minT) / span) * plotW;
+        const y = pad.t + plotH - (Math.max(0, Math.min(100, row[key])) / 100) * plotH;
+        return { x, y, row };
+      });
+
+      if (opts.fill) {
+        const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + plotH);
+        grad.addColorStop(0, opts.fillTop || 'rgba(34,197,94,0.42)');
+        grad.addColorStop(1, opts.fillBottom || 'rgba(34,197,94,0.04)');
+        ctx.beginPath();
+        ctx.moveTo(coords[0].x, pad.t + plotH);
+        coords.forEach((pt) => ctx.lineTo(pt.x, pt.y));
+        ctx.lineTo(coords[coords.length - 1].x, pad.t + plotH);
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+
+      ctx.beginPath();
+      coords.forEach((pt, idx) => {
+        if (idx === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+      });
+      ctx.strokeStyle = opts.lineColor || '#22c55e';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      const last = coords[coords.length - 1].row;
+      ctx.fillStyle = opts.lineColor || '#22c55e';
+      ctx.beginPath();
+      ctx.arc(coords[coords.length - 1].x, coords[coords.length - 1].y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#9fb4cc';
+      ctx.fillText('-4m', pad.l, height - 8);
+      ctx.fillText('now', pad.l + plotW - 22, height - 8);
+
+      if (key === 'vramPct' && last.vramUsed !== null && last.vramTotal !== null) {
+        ops$('ops-vram-legend').textContent = `${last.vramPct.toFixed(1)}% · ${opsFmtMiB(last.vramUsed)} / ${opsFmtMiB(last.vramTotal)}`;
+      } else if (key === 'gpuUtil' && last.gpuUtil !== null) {
+        ops$('ops-gpu-legend').textContent = `${last.gpuUtil.toFixed(0)}% compute`;
+      }
+    }
+
+    function opsRenderCharts(gpuRow){
+      if (gpuRow) opsPushHistory(gpuRow);
+      const vramOpts = {
+        fill: true,
+        lineColor: '#34d399',
+        fillTop: 'rgba(52,211,153,0.40)',
+        fillBottom: 'rgba(52,211,153,0.05)',
+      };
+      const gpuOpts = { fill: false, lineColor: '#60a5fa' };
+      opsDrawSeriesChart(ops$('ops-chart-vram'), 'vramPct', vramOpts);
+      opsDrawSeriesChart(ops$('ops-chart-gpu'), 'gpuUtil', gpuOpts);
+      if (!opsHistory.length && !gpuRow) {
+        ops$('ops-vram-legend').textContent = 'no GPU samples';
+        ops$('ops-gpu-legend').textContent = 'no GPU samples';
+      }
+    }
+
+    function opsRedrawCharts(){
+      const vramOpts = {
+        fill: true,
+        lineColor: '#34d399',
+        fillTop: 'rgba(52,211,153,0.40)',
+        fillBottom: 'rgba(52,211,153,0.05)',
+      };
+      const gpuOpts = { fill: false, lineColor: '#60a5fa' };
+      opsDrawSeriesChart(ops$('ops-chart-vram'), 'vramPct', vramOpts);
+      opsDrawSeriesChart(ops$('ops-chart-gpu'), 'gpuUtil', gpuOpts);
+    }
+
+    function opsRenderMetrics(payload){
+      const ollama = payload?.ollama || {};
+      const gpu = payload?.gpu || {};
+      const logSource = payload?.log_source || {};
+      const cards = [];
+      cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">Ollama</div><div class="ops-metric-value">${ollama.connected ? 'Connected' : 'Offline'}</div><div class="ops-metric-copy">${ollama.host || 'OLLAMA_HOST not set'}${ollama.version ? ` · v${ollama.version}` : ''}</div></div>`);
+      const gpuRow = Array.isArray(gpu.gpus) && gpu.gpus.length ? gpu.gpus[0] : null;
+      if (gpuRow) {
+        const usedPct = gpuRow.memory_total_mib ? Math.round((gpuRow.memory_used_mib / gpuRow.memory_total_mib) * 100) : 0;
+        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">VRAM</div><div class="ops-metric-value">${usedPct}%</div><div class="ops-metric-copy">${opsFmtMiB(gpuRow.memory_used_mib)} / ${opsFmtMiB(gpuRow.memory_total_mib)} · ${gpuRow.name || 'GPU'}</div></div>`);
+        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">GPU Util</div><div class="ops-metric-value">${gpuRow.utilization_gpu_pct ?? 'n/a'}%</div><div class="ops-metric-copy">mem util ${gpuRow.utilization_memory_pct ?? 'n/a'}% · ${gpuRow.temperature_c ?? 'n/a'}°C</div></div>`);
+      } else {
+        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">VRAM</div><div class="ops-metric-value">n/a</div><div class="ops-metric-copy">${gpu.reason || 'nvidia-smi unavailable in this runtime'}</div></div>`);
+        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">GPU Util</div><div class="ops-metric-value">n/a</div><div class="ops-metric-copy">Use host CLI: watch -n 1 nvidia-smi</div></div>`);
+      }
+      cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">Models</div><div class="ops-metric-value">${ollama.models_installed ?? 0}</div><div class="ops-metric-copy">installed · log source ${logSource.mode || 'disabled'}</div></div>`);
+      ops$('ops-metrics').innerHTML = cards.join('');
+      opsRenderCharts(gpuRow);
+      ops$('ops-status').textContent = ollama.connected
+        ? `Ollama reachable at ${ollama.host}. Log source mode: ${logSource.mode || 'disabled'}.`
+        : `Ollama is not reachable (${ollama.detail || 'check Configuration'}). GPU metrics may still update when nvidia-smi is available on the host.`;
+
+      const loaded = Array.isArray(ollama.models_loaded) ? ollama.models_loaded : [];
+      ops$('ops-loaded').innerHTML = loaded.length
+        ? loaded.map((row) => `<div class="ops-loaded-item">${row.name || 'model'} · vram=${row.size_vram ?? 'n/a'} · size=${row.size ?? 'n/a'}</div>`).join('')
+        : '<div class="ops-loaded-item">No models loaded in VRAM yet. Run a prompt in Open WebUI or AGTSmith to load one.</div>';
+
+      const hints = logSource.cli_hints || {};
+      ops$('ops-cli').textContent = [
+        `# GPU once\\n${hints.gpu_once || 'nvidia-smi'}`,
+        `# GPU watch\\n${hints.gpu_watch || 'watch -n 1 nvidia-smi'}`,
+        `# Ollama logs (systemd)\\n${hints.logs_systemd || 'journalctl -u ollama -f -n 200 --output=cat'}`,
+        `# Ollama logs (docker)\\n${hints.logs_docker || 'docker logs -f --tail 200 ollama'}`,
+      ].join('\\n\\n');
+    }
+
+    async function opsRefreshMetrics(){
+      try {
+        const resp = await fetch('/api/ops/ollama/metrics', { credentials: 'same-origin' });
+        const payload = await resp.json();
+        opsRenderMetrics(payload);
+      } catch (err) {
+        ops$('ops-status').textContent = `Metrics refresh failed: ${err}`;
+      }
+    }
+
+    function opsAppendLog(entry){
+      if (opsLogPaused) return;
+      const line = String(entry?.line || entry?.message || '').trim();
+      if (!line) return;
+      const level = String(entry?.level || 'info').toLowerCase();
+      const node = document.createElement('div');
+      node.className = `ops-log-line ${level}`;
+      node.textContent = line;
+      const view = ops$('ops-log-view');
+      view.appendChild(node);
+      while (view.childNodes.length > 500) view.removeChild(view.firstChild);
+      view.scrollTop = view.scrollHeight;
+    }
+
+    function opsConnectLogs(){
+      if (opsLogSource) {
+        opsLogSource.close();
+        opsLogSource = null;
+      }
+      const level = ops$('ops-log-level').value || '';
+      const grep = ops$('ops-log-grep').value || '';
+      const params = new URLSearchParams({ tail: '200' });
+      if (level) params.set('level', level);
+      if (grep) params.set('grep', grep);
+      ops$('ops-log-meta').textContent = 'Connecting to log stream...';
+      opsLogSource = new EventSource(`/api/ops/ollama/logs/stream?${params.toString()}`);
+      opsLogSource.addEventListener('status', (evt) => {
+        try {
+          const payload = JSON.parse(evt.data || '{}');
+          ops$('ops-log-meta').textContent = `Log stream: ${payload.state || 'unknown'}${payload.detail ? ` · ${payload.detail}` : ''}`;
+        } catch (_) {}
+      });
+      opsLogSource.addEventListener('error', (evt) => {
+        if (evt?.data) {
+          try {
+            const payload = JSON.parse(evt.data);
+            opsAppendLog({ line: `[stream] ${payload.message || payload.code || 'error'}`, level: 'error' });
+          } catch (_) {}
+        }
+      });
+      opsLogSource.addEventListener('log', (evt) => {
+        try { opsAppendLog(JSON.parse(evt.data || '{}')); } catch (_) {}
+      });
+      opsLogSource.onerror = () => {
+        ops$('ops-log-meta').textContent = 'Log stream disconnected. Click Reconnect Stream to retry.';
+      };
+    }
+
+    ops$('ops-log-reconnect').addEventListener('click', opsConnectLogs);
+    ops$('ops-log-clear').addEventListener('click', () => { ops$('ops-log-view').innerHTML = ''; });
+    ops$('ops-log-pause').addEventListener('change', (evt) => { opsLogPaused = !!evt.target.checked; });
+    window.addEventListener('resize', () => { opsRedrawCharts(); });
+    opsRefreshMetrics();
+    opsMetricsTimer = setInterval(opsRefreshMetrics, 2000);
+    opsConnectLogs();
+  </script>
+</div>
+"""
 
 
 def _users_page_body() -> str:
@@ -18091,11 +19803,13 @@ class Handler(BaseHTTPRequestHandler):
         title: str = "A.G.E.N.T. Smith",
         nav_active: str = "docs",
         show_nav: bool = True,
+        control_active: str | None = None,
     ) -> None:
         user = self._authenticated_user()
+        rendered_body = _control_center_layout(control_active, body_html) if control_active else body_html
         body = DOCS_SHELL_HTML.format(
             title=html.escape(title),
-            body=body_html,
+            body=rendered_body,
             nav=_global_nav(nav_active) if show_nav else "",
             onboarding_user=html.escape(str((user or {}).get("username", ""))),
             onboarding_role=html.escape(str((user or {}).get("role", ""))),
@@ -18648,6 +20362,7 @@ class Handler(BaseHTTPRequestHandler):
             detected_web = _auto_detect_splunk_web_url(merged_for_detection)
             if detected_web:
                 updates["SPLUNK_WEB_URL"] = detected_web
+        updates = apply_model_family_assignments(updates)
         ollama_host = str(updates.get("OLLAMA_HOST", "")).strip().rstrip("/") or get_ollama_host()
         available_models = _discover_ollama_models(ollama_host)
         updates = _autofill_model_assignments(updates, available_models)
@@ -18924,65 +20639,64 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def _write_sse_error(self, code: str, message: str, *, extra: dict[str, Any] | None = None) -> None:
+        payload: dict[str, Any] = {
+            "type": "error",
+            "code": code,
+            "message": message,
+            "ts": "now",
+        }
+        if extra:
+            payload.update(extra)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        self.wfile.write(format_sse("error", payload))
+        self.wfile.flush()
+
     def _stream_ollama_logs(self, parsed: Any) -> None:
         query = parse_qs(parsed.query)
         if not self._require_ops_role(query):
             return
 
         config = _remote_log_config_status()
-        if config["mode"] != "remote_windows":
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.end_headers()
-            self.wfile.write(
-                format_sse(
-                    "error",
-                    {
-                        "type": "error",
-                        "code": "source_disabled",
-                        "message": "OLLAMA_LOG_SOURCE is not set to remote_windows",
-                        "ts": "now",
-                    },
-                )
-            )
-            self.wfile.flush()
-            return
-
+        mode = str(config.get("mode", "disabled"))
         params = StreamParams.from_values(
             query.get("tail", ["200"])[0],
             query.get("level", [""])[0],
             query.get("grep", [""])[0],
         )
 
-        source = LOG_SOURCE_REGISTRY.get_source(params)
-        if not config["config_ok"]:
-            missing = ", ".join(config["missing_vars"])
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.end_headers()
-            self.wfile.write(
-                format_sse(
-                    "error",
-                    {
-                        "type": "error",
-                        "code": "missing_config",
-                        "message": f"Set required server env vars for remote_windows: {missing}",
-                        "ts": "now",
-                        "missing_vars": config["missing_vars"],
-                    },
-                )
+        if mode == "disabled" or not config.get("config_ok"):
+            missing = ", ".join(config.get("missing_vars", []))
+            detail = (
+                f"No Ollama log source detected. Set OLLAMA_LOG_SOURCE or enable journalctl/docker logs on this host."
+                if mode == "disabled"
+                else f"Missing log source configuration: {missing or mode}"
             )
-            self.wfile.flush()
+            self._write_sse_error("source_disabled", detail, extra={"missing_vars": config.get("missing_vars", [])})
             return
 
-        remote_url = os.getenv("OLLAMA_LOG_REMOTE_URL", "").strip()
-        remote_token = os.getenv("OLLAMA_LOG_REMOTE_TOKEN", "").strip()
-        health_url = get_remote_health_url(remote_url)
-        health_ok, health_detail = check_remote_health(health_url, remote_token, timeout=4.0)
+        if mode in {"local_systemd", "local_docker", "local_command"}:
+            try:
+                command = build_local_log_command(mode)
+            except Exception as exc:
+                self._write_sse_error("local_command_error", str(exc))
+                return
+            source = LOCAL_LOG_SOURCE_REGISTRY.get_source(mode, command, params)
+            health_ok = True
+            health_detail = "local_log_source_ready"
+        elif mode == "remote_windows":
+            source = LOG_SOURCE_REGISTRY.get_source(params)
+            remote_url = os.getenv("OLLAMA_LOG_REMOTE_URL", "").strip()
+            remote_token = os.getenv("OLLAMA_LOG_REMOTE_TOKEN", "").strip()
+            health_url = get_remote_health_url(remote_url)
+            health_ok, health_detail = check_remote_health(health_url, remote_token, timeout=4.0)
+        else:
+            self._write_sse_error("source_disabled", f"Unsupported OLLAMA_LOG_SOURCE mode: {mode}")
+            return
 
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -18994,7 +20708,7 @@ class Handler(BaseHTTPRequestHandler):
         sid, sub_q = source.subscribe()
         try:
             if health_ok:
-                self.wfile.write(format_sse("status", {"type": "status", "state": "connected", "detail": "health_ok"}))
+                self.wfile.write(format_sse("status", {"type": "status", "state": "connected", "detail": health_detail}))
             else:
                 self.wfile.write(
                     format_sse(
@@ -19010,7 +20724,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(
                     format_sse(
                         "status",
-                        {"type": "status", "state": "reconnecting", "detail": "waiting_for_remote_source"},
+                        {"type": "status", "state": "reconnecting", "detail": "waiting_for_log_source"},
                     )
                 )
             self.wfile.flush()
@@ -19047,27 +20761,51 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         config = _remote_log_config_status()
+        mode = str(config.get("mode", "disabled"))
         remote_health_ok = False
         remote_health_detail = "remote health check skipped"
-        if config["mode"] == "remote_windows" and config["config_ok"]:
+        local_health_ok = False
+        local_health_detail = "local health check skipped"
+
+        if mode == "remote_windows" and config.get("config_ok"):
             remote_url = os.getenv("OLLAMA_LOG_REMOTE_URL", "").strip()
             remote_token = os.getenv("OLLAMA_LOG_REMOTE_TOKEN", "").strip()
             health_url = get_remote_health_url(remote_url)
             remote_health_ok, remote_health_detail = check_remote_health(health_url, remote_token, timeout=4.0)
             remote_health_detail = redact_secrets(remote_health_detail)
+        elif mode in {"local_systemd", "local_docker", "local_command"} and config.get("config_ok"):
+            try:
+                build_local_log_command(mode)
+                local_health_ok = True
+                local_health_detail = "local_log_command_ready"
+            except Exception as exc:
+                local_health_detail = str(exc)
 
-        status_code = 200 if (config["config_ok"] and (config["mode"] != "remote_windows" or remote_health_ok)) else 503
+        healthy = bool(config.get("config_ok")) and (
+            (mode == "remote_windows" and remote_health_ok)
+            or (mode in {"local_systemd", "local_docker", "local_command"} and local_health_ok)
+        )
+        status_code = HTTPStatus.OK if healthy or mode == "disabled" else HTTPStatus.SERVICE_UNAVAILABLE
         self._json(
             status_code,
             {
-                "mode": config["mode"],
-                "config_ok": config["config_ok"],
-                "missing_vars": config["missing_vars"],
-                "required_vars": config["required_vars"],
+                "mode": mode,
+                "config_ok": config.get("config_ok"),
+                "missing_vars": config.get("missing_vars", []),
+                "required_vars": config.get("required_vars", []),
                 "remote_health_ok": remote_health_ok,
                 "remote_health_detail": remote_health_detail,
+                "local_health_ok": local_health_ok,
+                "local_health_detail": local_health_detail,
+                "cli_hints": config.get("cli_hints", {}),
             },
         )
+
+    def _api_ops_ollama_metrics(self) -> None:
+        if not self._require_ops_role({}):
+            return
+        payload = collect_ops_snapshot(get_ollama_host())
+        self._json(HTTPStatus.OK, payload)
 
     def _api_environment_profile(self) -> None:
         payload = _load_environment_profile_payload()
@@ -19278,6 +21016,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/ops/ollama/logs/health":
             self._ops_ollama_logs_health(parsed)
             return
+        if parsed.path == "/api/ops/ollama/metrics":
+            self._api_ops_ollama_metrics()
+            return
         if parsed.path == "/api/environment/profile":
             self._api_environment_profile()
             return
@@ -19354,12 +21095,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/docs/index":
-            self._html(HTTPStatus.OK, _docs_index_body(), title="Documentation Portal", nav_active="control")
+            self._html(HTTPStatus.OK, _docs_index_body(), title="Documentation Portal", nav_active="control", control_active="/docs")
             return
 
         if parsed.path == "/docs/view":
             path_value = parse_qs(parsed.query).get("path", [""])[0]
-            self._html(HTTPStatus.OK, _docs_view_body(path_value), title="Documentation Viewer", nav_active="control")
+            self._html(HTTPStatus.OK, _docs_view_body(path_value), title="Documentation Viewer", nav_active="control", control_active="/docs")
             return
 
         if parsed.path == "/docs/raw":
@@ -19411,11 +21152,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/architecture":
-            self._html(HTTPStatus.OK, _architecture_page_body(), title="Architecture Graph", nav_active="control")
+            self._html(HTTPStatus.OK, _architecture_page_body(), title="Architecture Graph", nav_active="control", control_active="/architecture")
             return
 
         if parsed.path == "/langgraph-graph":
-            self._html(HTTPStatus.OK, _langgraph_graph_page_body(), title="LangGraph Graph", nav_active="control")
+            self._html(HTTPStatus.OK, _langgraph_graph_page_body(), title="LangGraph Graph", nav_active="control", control_active="/langgraph-graph")
             return
 
         if parsed.path == "/artifacts":
@@ -19434,29 +21175,35 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/configure":
             if not self._require_ops_page():
                 return
-            self._html(HTTPStatus.OK, _configure_page_body(), title="Configuration", nav_active="control")
+            self._html(HTTPStatus.OK, _configure_page_body_rendered(), title="Configuration", nav_active="control", control_active="/configure")
+            return
+
+        if parsed.path == "/admin/ollama-ops":
+            if not self._require_ops_page():
+                return
+            self._html(HTTPStatus.OK, _ollama_ops_page_body(), title="Ollama Ops Monitor", nav_active="control", control_active="/admin/ollama-ops")
             return
 
         if parsed.path == "/learning":
             if not self._require_ops_page():
                 return
-            self._html(HTTPStatus.OK, _learning_page_body(), title="SPL Optimization AI Engine", nav_active="control")
+            self._html(HTTPStatus.OK, _learning_page_body(), title="SPL Optimization AI Engine", nav_active="control", control_active="/learning")
             return
 
         if parsed.path == "/spl-assets":
             if not self._require_ops_page():
                 return
-            self._html(HTTPStatus.OK, _spl_asset_repository_page_body(), title="SPL Asset Repository", nav_active="control")
+            self._html(HTTPStatus.OK, _spl_asset_repository_page_body(), title="SPL Asset Repository", nav_active="control", control_active="/spl-assets")
             return
 
         if parsed.path == "/cases":
-            self._html(HTTPStatus.OK, self._cases_workspace_page_body(), title="Case Workspace", nav_active="control")
+            self._html(HTTPStatus.OK, self._cases_workspace_page_body(), title="Case Workspace", nav_active="control", control_active="/cases")
             return
 
         if parsed.path == "/users":
             if not self._require_admin_page():
                 return
-            self._html(HTTPStatus.OK, _users_page_body(), title="Users", nav_active="control")
+            self._html(HTTPStatus.OK, _users_page_body(), title="Users", nav_active="control", control_active="/users")
             return
 
         if parsed.path == "/mcp":
@@ -19776,6 +21523,12 @@ class Handler(BaseHTTPRequestHandler):
                 result["splunk_search_url_base"] = _splunk_search_url_base()
                 result["mode"] = mode_payload
                 result["effective_question"] = effective_question
+                if isinstance(result_body, dict):
+                    coverage = result_body.get("platform_coverage")
+                    if not isinstance(coverage, dict):
+                        evidence = result_body.get("evidence", {})
+                        coverage = evidence.get("platform_coverage") if isinstance(evidence, dict) else {}
+                    result["platform_coverage"] = coverage if isinstance(coverage, dict) else {}
             self._json(200, result)
         except Exception as exc:
             self._json(500, {"error": f"{type(exc).__name__}: {exc}"})

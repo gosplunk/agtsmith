@@ -1,57 +1,30 @@
 # Model Strategy
 
-## Active Split-Role SPL Workflow
+## v1.5.x US-Primary Stack
+
+The default profile shifts from Qwen + DeepSeek (`v1.4.x`) to US-origin Ollama tags validated on the RTX 1000 Ada bake-off while holding **94.83 / 100%** MCP hardening.
 
 ### Planner Model
-- Default:
-  - `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
-- Responsibilities:
-  - planner
-  - peer reviewer 1 when needed
-  - peer reviewer 2 when needed
+- Default: `TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M` (FR / Mistral AI — Ministral-3B-Reasoning)
+- Fallback: `ministral-3:3b` via `OLLAMA_MODEL_QUERY_PLANNER_FALLBACK`
+- Bake-off artifact winner: `hf.co/EnlistedGhost/Ministral-3-3B-Reasoning-2512-GGUF:Q5_K_M` (EnlistedGhost GGUF crashes Ollama on the lab host)
 
-This model is used for higher-context reasoning where the system needs intent interpretation, search-strategy explanation, and adjudication between competing candidate plans.
+### SPL Writer and Repair
+- Default: `granite4:3b` (US / IBM)
+- Responsibilities: primary SPL writer, query repair fallback writer
+- Replaces `deepseek-coder-v2:lite` (offline RAG **94.4 vs 75.8**, full GPU, ~1 s gen vs ~6 s)
+
+### Peer Reviewers
+- Default: `gemma3:4b` (US / Google) for both peer slots
+- Responsibilities: adjudicate writer vs security reviewer when queries are not cleanly approved
 
 ### Security Review and Summary Model
-- Default:
-  - `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
-- Responsibilities:
-  - security reviewer / critic
-  - evidence reviewer
-  - final summary
-  - agentic summary
-  - continuation reviewer
-
-This model is used for security-oriented critique, evidence assessment, continuation judgment, and concise analyst-facing output.
-
-### SPL Writer Model
-- Default:
-  - `deepseek-coder-v2:lite`
-- Responsibilities:
-  - primary SPL writer
-  - query repair fallback writer
-
-This model is used for code-like SPL composition. It should focus on:
-- command ordering
-- field handling
-- `stats` / `eval` composition
-- bounded, syntactically clean read-only SPL
+- Default: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest` (US / Foundation)
+- Responsibilities: security reviewer, evidence reviewer, final summary, agentic summary, continuation reviewer
 
 ### Optional Edge Router Model
-- Example fit:
-  - a small Qwen-class model on an edge device
-- Responsibilities:
-  - cheap intent pre-classification
-  - cross-platform split-query hints
-  - low-cost escalation or confidence hints
-
-This role is optional and should stay narrow. It is not the primary SPL writer or final reviewer.
-Configuration keys:
-- `EDGE_LLM_ENABLED`
-- `EDGE_LLM_HOST`
-- `EDGE_LLM_MODEL`
-- `EDGE_LLM_ROLE`
-- `EDGE_LLM_TIMEOUT_SEC`
+- Example fit: a small on-device classifier (optional)
+- Configuration keys: `EDGE_LLM_ENABLED`, `EDGE_LLM_HOST`, `EDGE_LLM_MODEL`, `EDGE_LLM_ROLE`, `EDGE_LLM_TIMEOUT_SEC`
 
 ## Role Mapping
 - Planner: `OLLAMA_MODEL_QUERY_PLANNER`
@@ -68,52 +41,57 @@ Configuration keys:
 2. Planner interprets the analyst question and emits a structured search plan.
 3. SPL Writer converts that plan into bounded read-only SPL.
 4. Security Reviewer critiques the generated SPL against the plan.
-5. Peer reviewers adjudicate writer vs reviewer candidate only when the reviewer does not cleanly approve the query or materially changes it.
+5. Peer reviewers adjudicate writer vs reviewer candidate only when needed.
 6. Deterministic validation enforces read-only safety and environment binding.
 7. Splunk executes only approved plans.
 8. Evidence review, continuation review, and final summary convert execution results into analyst-facing output.
 
-## Offline Optimization Flow
-The same runtime now has an offline eval harness used to improve the LangGraph layout without changing the live default path blindly:
+## Recommended Current Profile (v1.5.1)
+```bash
+export OLLAMA_MODEL_QUERY_PLANNER="TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M"
+export OLLAMA_MODEL_QUERY_PLANNER_FALLBACK="ministral-3:3b"
+export OLLAMA_MODEL_QUERY_WRITER="granite4:3b"
+export OLLAMA_MODEL_QUERY_REPAIR="granite4:3b"
+export OLLAMA_MODEL_SECURITY_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+export OLLAMA_MODEL_EVIDENCE_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+export OLLAMA_MODEL_PEER_REVIEWER="gemma3:4b"
+export OLLAMA_MODEL_PEER_REVIEWER_2="gemma3:4b"
+export OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+export OLLAMA_MODEL_FINAL_SUMMARY="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
+export EDGE_LLM_ENABLED="0"
+```
 
+Pull defaults:
+```bash
+ollama pull TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M
+ollama pull ministral-3:3b
+ollama pull granite4:3b
+ollama pull gemma3:4b
+ollama pull hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
+```
+
+## Legacy v1.4.x Profile (rollback)
+```bash
+export OLLAMA_MODEL_QUERY_PLANNER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+export OLLAMA_MODEL_QUERY_WRITER="deepseek-coder-v2:lite"
+export OLLAMA_MODEL_QUERY_REPAIR="deepseek-coder-v2:lite"
+export OLLAMA_MODEL_PEER_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+export OLLAMA_MODEL_PEER_REVIEWER_2="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+```
+
+See `scripts/runtime_config.py` (`LEGACY_V14_*` constants).
+
+## Offline Optimization Flow
 1. Build a gold corpus from seed questions using the current workflow.
 2. Generate prompt variants from those gold cases.
 3. Run topology permutations against the eval prompt set.
 4. Score support rate, intent match, result quality, and latency.
 5. Keep only topology changes that hold up empirically.
 
-This is where experimental decisions about reviewer, peer review, summary, and repair stages should be tested first.
-
-## Recommended Current Profile
-```bash
-export OLLAMA_MODEL_QUERY_PLANNER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-export OLLAMA_MODEL_QUERY_WRITER="deepseek-coder-v2:lite"
-export OLLAMA_MODEL_SECURITY_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
-export OLLAMA_MODEL_EVIDENCE_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
-export OLLAMA_MODEL_PEER_REVIEWER="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-export OLLAMA_MODEL_PEER_REVIEWER_2="hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
-export OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
-export OLLAMA_MODEL_FINAL_SUMMARY="hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
-export OLLAMA_MODEL_QUERY_REPAIR="deepseek-coder-v2:lite"
-export EDGE_LLM_ENABLED="0"
-export EDGE_LLM_HOST=""
-export EDGE_LLM_MODEL=""
-export EDGE_LLM_ROLE="edge_router_splitter"
-export EDGE_LLM_TIMEOUT_SEC="60"
-```
-
-## Local Commands
-Pull the default writer:
-```bash
-ollama pull deepseek-coder-v2:lite
-```
-
-If you want a custom imported writer later, assign that imported model name to:
-- `OLLAMA_MODEL_QUERY_WRITER`
-- optionally `OLLAMA_MODEL_QUERY_REPAIR`
+Bake-off artifacts: `docs/runbooks/laptop_model_profile.md`, `artifacts/model_eval/bakeoff_final/`.
 
 ## Operational Notes
-- Qwen should not be the primary final SPL generator unless the writer fails and the deterministic/template fallback takes over.
+- Keep `OLLAMA_RAG_ENABLED=1` (default) so writers see environment profile + gold SPL context.
+- Run `make env-profile-refresh` before benchmarks or after Splunk index layout changes.
 - The writer remains bounded by deterministic policy and environment validation.
 - BOTSv3 can improve writer habits and gold SPL examples, but it must not define production defaults.
-- The edge helper is an optional accelerator and classifier. If it is disabled, the primary inference host remains the full source of planning, writing, and review.

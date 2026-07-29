@@ -2,12 +2,12 @@
 
 ## Overview
 
-A.G.E.N.T. Smith now uses a split-role path for SPL generation and security review:
+A.G.E.N.T. Smith uses a split-role path for SPL generation and security review (`v1.5.1` US-primary defaults):
 
-- `Planner`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
-- `SPL Writer`: `deepseek-coder-v2:lite`
-- `Security Review / Evidence Review / Final Summary`: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest`
-- `Peer Review`: `hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M`
+- `Planner`: `TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M` (FR / Mistral AI)
+- `SPL Writer` / `Query Repair`: `granite4:3b` (US / IBM)
+- `Peer Review`: `gemma3:4b` (US / Google)
+- `Security Review / Evidence Review / Final Summary`: `hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest` (US / Foundation)
 
 An optional helper layer can sit in front of that path:
 - `Edge Router / Splitter`: small LLM on an edge device for cheap question classification and cross-platform split hints
@@ -25,13 +25,13 @@ In the UI, the live workflow view is available from:
 ```mermaid
 flowchart LR
     A[Analyst Question] --> R[Optional Edge Router<br/>Small LLM]
-    R --> B[Planner Node<br/>Qwen]
+    R --> B[Planner Node<br/>Ministral-3B-Reasoning]
     A -->|edge helper disabled| B
-    B --> C[Writer Node<br/>DeepSeek-Coder]
+    B --> C[Writer Node<br/>Granite 4]
     C --> D[Reviewer Node<br/>Foundation-Sec]
     D -->|clean approval| G[Deterministic Validation]
-    D -->|contested or revised| E[Peer Review 1<br/>Qwen]
-    E --> F[Peer Review 2<br/>Qwen]
+    D -->|contested or revised| E[Peer Review 1<br/>Gemma 3]
+    E --> F[Peer Review 2<br/>Gemma 3]
     F --> G
     G -->|approved| H[Splunk MCP Read-Only Execution]
     G -->|blocked| I[Fail Closed]
@@ -105,14 +105,15 @@ If any layer fails:
 Primary environment variables:
 
 ```bash
-OLLAMA_MODEL_QUERY_PLANNER=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
-OLLAMA_MODEL_QUERY_WRITER=deepseek-coder-v2:lite
+OLLAMA_MODEL_QUERY_PLANNER=TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M
+OLLAMA_MODEL_QUERY_PLANNER_FALLBACK=ministral-3:3b
+OLLAMA_MODEL_QUERY_WRITER=granite4:3b
+OLLAMA_MODEL_QUERY_REPAIR=granite4:3b
 OLLAMA_MODEL_SECURITY_REVIEWER=hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
 OLLAMA_MODEL_EVIDENCE_REVIEWER=hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
-OLLAMA_MODEL_PEER_REVIEWER=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
-OLLAMA_MODEL_PEER_REVIEWER_2=hf.co/MaziyarPanahi/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M
+OLLAMA_MODEL_PEER_REVIEWER=gemma3:4b
+OLLAMA_MODEL_PEER_REVIEWER_2=gemma3:4b
 OLLAMA_MODEL_AGENTIC_CONTINUATION_REVIEWER=hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
-OLLAMA_MODEL_QUERY_REPAIR=deepseek-coder-v2:lite
 OLLAMA_MODEL_FINAL_SUMMARY=hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
 ```
 

@@ -21,6 +21,8 @@ from environment_profile import (
     suggest_domains_for_question,
     validate_query_against_environment,
 )
+from intent_field_contracts import validate_platform_sourcetype_coherence
+from query_templates import TEMPLATES
 
 
 class EnvironmentProfileTests(unittest.TestCase):
@@ -517,6 +519,47 @@ class EnvironmentProfileTests(unittest.TestCase):
             self.assertNotIn("index=linux", rendered)
             self.assertNotIn("index=windows_sysmon", rendered)
 
+    def test_apply_environment_query_constraints_preserves_windows_branch_on_botsv3_mixed_lab(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "linux", "sourcetypes": ["auth.log", "syslog"]},
+                {"index": "botsv3", "sourcetypes": ["access_combined", "XmlWinEventLog", "linux_secure"]},
+            ],
+            "sourcetype_to_indexes": {
+                "auth.log": ["linux"],
+                "syslog": ["linux"],
+                "access_combined": ["botsv3"],
+                "XmlWinEventLog": ["botsv3"],
+                "linux_secure": ["botsv3"],
+            },
+            "sourcetype_field_inventory": {
+                "auth.log": {"interesting_fields": ["user", "src_ip", "host"]},
+                "XmlWinEventLog": {"interesting_fields": ["TargetUserName", "Source_Network_Address", "EventCode"]},
+            },
+        }
+        query = (
+            'search ('
+            '(index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("Failed password")) '
+            'OR '
+            '((index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog (EventCode=4625 OR EventID=4625))'
+            ') '
+            '| eval platform=case(match(index,"(?i)linux"),"linux",true(),"windows") '
+            '| stats count by platform index host user_name src_ip'
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            rendered = apply_environment_query_constraints(
+                "Show failed login activity in the last 7 days on my windows or linux machines.",
+                "failed_login_activity",
+                query,
+                profile_path=path,
+            )
+            self.assertIn("index=linux", rendered)
+            self.assertIn("index=botsv3", rendered)
+            self.assertIn("4625", rendered)
+            self.assertIn("platform", rendered)
+
     def test_apply_environment_query_constraints_drops_sysmon_only_windows_branch_for_failed_logins(self) -> None:
         profile = {
             "indexes": [
@@ -639,6 +682,209 @@ class EnvironmentProfileTests(unittest.TestCase):
             self.assertIn("index=soc_linux", rendered)
             self.assertNotIn("soc_sysmon", rendered)
             self.assertNotIn("EventCode=4624", rendered)
+
+    def test_single_index_botsv3_failed_login_keeps_platform_sourcetypes_separate(self) -> None:
+        """Repro: single-index botsv3 must not pair linux_secure with EventCode=4625."""
+        profile = {
+            "indexes": [
+                {
+                    "index": "botsv3",
+                    "sourcetypes": ["linux_secure", "XmlWinEventLog", "WinEventLog:Security"],
+                    "styles": ["linux", "windows"],
+                }
+            ],
+            "sourcetype_to_indexes": {
+                "linux_secure": ["botsv3"],
+                "XmlWinEventLog": ["botsv3"],
+                "WinEventLog:Security": ["botsv3"],
+            },
+        }
+        template = next(item for item in TEMPLATES if item.intent == "failed_login_activity")
+        question = "Show failed logon activity in the last 24 hours"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            rendered = apply_environment_query_constraints(
+                question,
+                "failed_login_activity",
+                template.query,
+                profile_path=path,
+            )
+            append_start = rendered.lower().find("| append [")
+            self.assertGreater(append_start, 0, "expected cross-platform append branch")
+            append_block = rendered[append_start:]
+            main_branch = rendered[:append_start]
+
+            self.assertIn("index=botsv3", rendered)
+            self.assertIn("linux_secure", main_branch)
+            self.assertNotRegex(main_branch.lower(), r"eventcode=4625|eventid=4625")
+            self.assertRegex(append_block.lower(), r"xmlwineventlog|wineventlog:security")
+            self.assertRegex(append_block.lower(), r"eventcode=4625|eventid=4625")
+            self.assertNotIn("linux_secure", append_block)
+
+            coherent, reason = validate_platform_sourcetype_coherence(rendered, "failed_login_activity")
+            self.assertTrue(coherent, reason)
+
+    def test_resolve_authoritative_domains_prefers_linux_over_botsv3_for_auth(self) -> None:
+        profile = {
+            "indexes": [
+                {
+                    "index": "botsv3",
+                    "sourcetypes": ["linux_secure", "XmlWinEventLog", "access_combined"],
+                },
+                {
+                    "index": "linux",
+                    "sourcetypes": ["auth.log", "linux_secure", "syslog"],
+                },
+            ],
+            "sourcetype_to_indexes": {
+                "linux_secure": ["linux", "botsv3"],
+                "auth.log": ["linux"],
+                "syslog": ["linux"],
+                "XmlWinEventLog": ["botsv3"],
+                "access_combined": ["linux", "botsv3"],
+            },
+            "index_sourcetype_field_inventory": {
+                "linux": {
+                    "auth.log": {
+                        "interesting_field_examples": [
+                            {"field": "user", "sample_values": ["root"], "count": 10},
+                            {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10},
+                        ]
+                    }
+                },
+                "botsv3": {
+                    "linux_secure": {
+                        "interesting_field_examples": [
+                            {"field": "user", "sample_values": ["root"], "count": 10},
+                            {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10},
+                        ]
+                    },
+                    "XmlWinEventLog": {
+                        "interesting_field_examples": [
+                            {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+                            {"field": "EventCode", "sample_values": ["4625"], "count": 10},
+                        ]
+                    },
+                },
+            },
+        }
+        question = "Failed logons in the last 24 hours"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            hints = resolve_authoritative_domains_for_question(
+                question,
+                "failed_login_activity",
+                profile_path=path,
+            )
+            self.assertTrue(hints)
+            self.assertEqual(hints[0]["index"], "linux")
+            self.assertIn("auth.log", hints[0]["sourcetypes"])
+
+    def test_failed_logons_real_profile_like_fixture_is_linux_only(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "linux", "sourcetypes": ["auth.log", "linux_secure", "syslog"]},
+                {"index": "botsv3", "sourcetypes": ["linux_secure", "XmlWinEventLog", "access_combined"]},
+            ],
+            "sourcetype_to_indexes": {
+                "auth.log": ["linux"],
+                "linux_secure": ["linux", "botsv3"],
+                "syslog": ["linux"],
+                "XmlWinEventLog": ["botsv3"],
+                "access_combined": ["linux", "botsv3"],
+            },
+            "index_sourcetype_field_inventory": {
+                "linux": {
+                    "auth.log": {
+                        "interesting_field_examples": [
+                            {"field": "user", "sample_values": ["root"], "count": 10},
+                            {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10},
+                        ]
+                    }
+                },
+                "botsv3": {
+                    "linux_secure": {
+                        "interesting_field_examples": [
+                            {"field": "user", "sample_values": ["root"], "count": 10},
+                            {"field": "rhost", "sample_values": ["10.0.0.8"], "count": 10},
+                        ]
+                    },
+                    "XmlWinEventLog": {
+                        "interesting_field_examples": [
+                            {"field": "TargetUserName", "sample_values": ["alice"], "count": 10},
+                            {"field": "EventCode", "sample_values": ["4625"], "count": 10},
+                        ]
+                    },
+                },
+            },
+        }
+        question = "Failed logons in the last 24 hours"
+        template = next(item for item in TEMPLATES if item.intent == "linux_auth_failures")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            from minimal_question_to_answer import map_question_to_template, template_to_query_args
+
+            mapped = map_question_to_template(question, profile_path=path)
+            self.assertEqual(mapped.intent, "linux_auth_failures")
+            args = template_to_query_args(mapped, question, profile_path=path)
+            rendered = str(args.get("query", ""))
+            self.assertIn("index=linux", rendered)
+            self.assertIn("sourcetype=auth.log", rendered)
+            self.assertNotIn("4625", rendered)
+            self.assertNotIn("| append [", rendered)
+
+            coherent, reason = validate_platform_sourcetype_coherence(rendered, "linux_auth_failures")
+            self.assertTrue(coherent, reason)
+
+    def test_windows_auth_failures_resolves_botsv3_without_field_inventory(self) -> None:
+        profile = {
+            "indexes": [
+                {
+                    "index": "botsv3",
+                    "sourcetypes": ["linux_secure", "XmlWinEventLog", "access_combined"],
+                },
+            ],
+            "sourcetype_to_indexes": {
+                "linux_secure": ["botsv3"],
+                "XmlWinEventLog": ["botsv3"],
+                "access_combined": ["botsv3"],
+            },
+            "sourcetype_field_inventory": {},
+            "index_sourcetype_field_inventory": {},
+        }
+        question = "Show Windows failed logon events (EventCode 4625) in the last 24 hours"
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            domains = resolve_authoritative_domains_for_question(
+                question,
+                "windows_auth_failures",
+                profile_path=path,
+            )
+            self.assertTrue(domains, "expected botsv3 domain for windows_auth_failures")
+            self.assertEqual(domains[0]["index"], "botsv3")
+            self.assertTrue(
+                any(st.lower() == "xmlwineventlog" for st in domains[0].get("sourcetypes", [])),
+                domains[0].get("sourcetypes"),
+            )
+
+            template_query = (
+                "search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+                "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
+                "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip) "
+                "| table _time host user_name src_ip EventCode"
+            )
+            rendered = apply_environment_query_constraints(
+                question,
+                "windows_auth_failures",
+                template_query,
+                profile_path=path,
+            )
+            self.assertIn("index=botsv3", rendered)
+            self.assertNotIn("index=windows", rendered)
 
 
 if __name__ == "__main__":

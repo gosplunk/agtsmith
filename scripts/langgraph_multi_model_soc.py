@@ -43,13 +43,13 @@ from minimal_question_to_answer import (
 )
 from botsv3_catalog import extract_explicit_botsv3_sourcetype
 from question_intelligence import build_question_profile_text
-from query_templates import TEMPLATES
+from query_templates import TEMPLATES, QueryTemplate
 from query_policy import validate_query_args
-from spl_rag_context import build_spl_rag_context
+from spl_rag_context import build_resolved_domain_hints, build_spl_rag_context
 from spl_query_repair import attempt_query_repair_once
 from tdir_core import build_tdir_case
 from environment_profile import apply_environment_query_constraints, validate_query_against_environment
-from intent_field_contracts import validate_query_for_intent
+from intent_field_contracts import validate_query_for_intent, validate_platform_sourcetype_coherence, validate_intent_platform_scope
 from local_learning import ranked_approved_learning_records
 from runtime_config import (
     DEFAULT_MODEL_EVIDENCE_REVIEWER,
@@ -57,11 +57,13 @@ from runtime_config import (
     DEFAULT_MODEL_PEER_REVIEWER,
     DEFAULT_MODEL_PEER_REVIEWER_2,
     DEFAULT_MODEL_QUERY_PLANNER,
+    DEFAULT_MODEL_QUERY_PLANNER_FALLBACK,
     DEFAULT_MODEL_QUERY_REPAIR,
     DEFAULT_MODEL_QUERY_WRITER,
     DEFAULT_MODEL_SECURITY_REVIEWER,
     get_model_assignment,
 )
+from ollama_client import call_ollama_json, extract_json_object
 
 # Per-role model selection (env or saved runtime config driven for easy lab switching)
 MODEL_QUERY_PLANNER = get_model_assignment(
@@ -75,6 +77,10 @@ MODEL_PEER_REVIEWER = get_model_assignment("OLLAMA_MODEL_PEER_REVIEWER", DEFAULT
 MODEL_PEER_REVIEWER_2 = get_model_assignment("OLLAMA_MODEL_PEER_REVIEWER_2", DEFAULT_MODEL_PEER_REVIEWER_2)
 MODEL_FINAL_SUMMARY = get_model_assignment("OLLAMA_MODEL_FINAL_SUMMARY", DEFAULT_MODEL_FINAL_SUMMARY)
 MODEL_QUERY_REPAIR = get_model_assignment("OLLAMA_MODEL_QUERY_REPAIR", DEFAULT_MODEL_QUERY_REPAIR)
+MODEL_QUERY_PLANNER_FALLBACK = get_model_assignment(
+    "OLLAMA_MODEL_QUERY_PLANNER_FALLBACK",
+    DEFAULT_MODEL_QUERY_PLANNER_FALLBACK,
+)
 RAG_ENABLED = str(os.getenv("OLLAMA_RAG_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 RAG_MAX_CHARS = int(os.getenv("OLLAMA_RAG_MAX_CHARS", "1600"))
 
@@ -116,6 +122,58 @@ WINDOWS_STYLE_INTENTS = {
     "windows_credential_access_activity",
 }
 WEB_STYLE_INTENTS = {"apache_access_top_ips", "apache_404_spike"}
+AUTH_FAMILY_INTENTS = {
+    "failed_login_activity",
+    "successful_login_activity",
+    "linux_auth_failures",
+    "windows_auth_failures",
+    "linux_successful_logins",
+    "windows_successful_logons",
+}
+
+DETERMINISTIC_RUN_QUERY_INTENTS = {
+    "failed_login_activity",
+    "successful_login_activity",
+    "linux_auth_failures",
+    "linux_successful_logins",
+    "windows_successful_logons",
+    "windows_auth_failures",
+    "windows_process_activity",
+    "osquery_process_activity",
+    "windows_sysmon_network_activity",
+    "windows_sysmon_dns_activity",
+    "windows_credential_access_activity",
+    "linux_privilege_escalation",
+    "linux_privilege_escalation_first_seen",
+    "linux_session_activity",
+    "linux_audit_activity",
+    "apache_access_top_ips",
+    "apache_404_spike",
+    "apache_suspicious_user_agents",
+    "stream_http_activity",
+    "botsv3_named_sourcetype_overview",
+    "top_indexes",
+    "aws_vpc_flow_activity",
+    "aad_signin_activity",
+    "stream_dns_activity",
+    "o365_management_activity",
+}
+
+
+def _template_override_mode() -> str:
+    mode = str(os.getenv("AGTSMITH_TEMPLATE_OVERRIDE", "fallback")).strip().lower()
+    if mode in {"always", "fallback", "never"}:
+        return mode
+    return "fallback"
+
+
+def _build_template_aligned_plan(question: str, mapped_template: QueryTemplate) -> dict[str, Any]:
+    return {
+        "selected_tool": "splunk_run_query",
+        "tool_args": template_to_query_args(mapped_template, question),
+        "intent": mapped_template.intent,
+        "reason": f"question_alignment_override:template:{mapped_template.intent}",
+    }
 
 
 def _merge_fields_preserving_order(existing: list[str], additions: list[str]) -> list[str]:
@@ -187,6 +245,8 @@ def _apply_learning_assets(question: str, plan: dict[str, Any]) -> dict[str, Any
                         query = query[:match.start()] + replacement + query[match.end():]
                         learned_reasons.append("learning:preferred_fields_stats")
         elif kind == "spl_pattern_asset":
+            if intent in AUTH_FAMILY_INTENTS:
+                continue
             required_sources = [str(item).strip() for item in proposal.get("required_sources", []) if str(item).strip()]
             required_sourcetypes = [str(item).strip() for item in proposal.get("required_sourcetypes", []) if str(item).strip()]
             template = str(proposal.get("query_template", "")).strip()
@@ -204,7 +264,15 @@ def _apply_learning_assets(question: str, plan: dict[str, Any]) -> dict[str, Any
     return updated
 
 
-def _apply_environment_constraints_to_query(question: str, intent: str, query: str) -> str:
+def _apply_environment_constraints_to_query(
+    question: str,
+    intent: str,
+    query: str,
+    *,
+    args: dict[str, Any] | None = None,
+) -> str:
+    if isinstance(args, dict) and args.get("_env_constraints_applied"):
+        return query
     return apply_environment_query_constraints(question, intent, query)
 
 
@@ -266,63 +334,27 @@ def _float01(value: Any, default: float = 0.5) -> float:
     return max(0.0, min(1.0, round(f, 3)))
 
 
-def _extract_json_object(text: str) -> dict[str, Any]:
-    if not text:
-        raise ValueError("empty_model_text")
-
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-
-    try:
-        obj = json.loads(cleaned)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
-
-    # Robust fallback: locate first decodable JSON object among mixed text.
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", cleaned):
-        start = match.start()
-        try:
-            obj, _end = decoder.raw_decode(cleaned[start:])
-        except Exception:
-            continue
-        if isinstance(obj, dict):
-            return obj
-    raise ValueError("json_object_not_found")
+def _planner_model_candidates() -> list[str]:
+    ordered = [MODEL_QUERY_PLANNER]
+    for tag in str(MODEL_QUERY_PLANNER_FALLBACK or "").split(","):
+        tag = tag.strip()
+        if tag:
+            ordered.append(tag)
+    seen: set[str] = set()
+    out: list[str] = []
+    for tag in ordered:
+        if tag not in seen:
+            seen.add(tag)
+            out.append(tag)
+    return out
 
 
 def _call_ollama_json(*, model: str, system_prompt: str, user_payload: dict[str, Any], timeout: float = 180.0) -> dict[str, Any]:
-    prompt = (
-        f"{system_prompt}\n\n"
-        "Return strict JSON only. No prose.\n\n"
-        f"INPUT:\n{json.dumps(user_payload, indent=2)}"
-    )
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "think": False,
-    }
-    timeout_config = httpx.Timeout(
-        timeout,
-        connect=min(8.0, timeout),
-        read=timeout,
-        write=min(30.0, timeout),
-        pool=min(30.0, timeout),
-    )
-    with httpx.Client(timeout=timeout_config) as client:
-        resp = client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
-        resp.raise_for_status()
-        body = resp.json()
+    return call_ollama_json(model=model, system_prompt=system_prompt, user_payload=user_payload, timeout=timeout)
 
-    raw = str(body.get("response") or "").strip()
-    parsed = _extract_json_object(raw)
-    parsed["_raw_text_preview"] = raw[:1200]
-    return parsed
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    return extract_json_object(text)
 
 
 def _default_plan_from_template(question: str) -> dict[str, Any]:
@@ -358,7 +390,8 @@ def _default_plan_from_template(question: str) -> dict[str, Any]:
     template = map_question_to_template(question)
     args = template_to_query_args(template, question)
     if isinstance(args, dict) and str(args.get("query", "")).strip():
-        args["query"] = _apply_environment_constraints_to_query(question, template.intent, str(args.get("query", "")).strip())
+        args = dict(args)
+        args["_env_constraints_applied"] = True
     return {
         "selected_tool": "splunk_run_query",
         "tool_args": args,
@@ -691,34 +724,8 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
                 "| sort - count | head 20"
             )
             normalized["intent"] = "windows_process_activity"
-        if (
-            any(tok in q_lower for tok in ("failed login", "failed authentication", "authentication failure", "password spray", "brute force", "failed logon"))
-            and "windows" in q_lower
-            and "linux" in q_lower
-        ):
-            args["query"] = (
-                "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
-                "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\" OR \"FAILED SU\") "
-                "| eval platform=\"linux\" "
-                "| rex field=_raw \"(?i)Failed password for (?:invalid user )?(?<failed_user>[^ ]+)\" "
-                "| rex field=_raw \"(?i)user=(?<pam_user>[^\\s;]+)\" "
-                "| rex field=_raw \"(?i)from (?<failed_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<failed_port>\\d+)\" "
-                "| rex field=_raw \"(?i)rhost=(?<failed_rhost>[^\\s;]+)\" "
-                "| eval src_ip=coalesce(src_ip,failed_src_ip,failed_rhost,rhost,src,ip,\"local\") "
-                "| eval user_name=coalesce(user,username,account,failed_user,pam_user) "
-                "| eval auth_port=coalesce(port,lport) "
-                "| append [ search index=windows sourcetype=XmlWinEventLog "
-                "(Channel=Security OR source=\"XmlWinEventLog:Security\") "
-                "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
-                "| eval platform=\"windows\" "
-                "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
-                "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,Caller_User_Name,user,username,account) "
-                "| eval auth_port=coalesce(DestinationPort,dest_port) ] "
-                "| fillnull value=\"unknown\" src_ip user_name auth_port "
-                "| stats count by platform index host user_name src_ip auth_port "
-                "| sort - count"
-            )
-            normalized["intent"] = "failed_login_activity"
+        # Cross-platform failed-login shaping defers to query_templates.failed_login_activity
+        # via map_question_to_template + template_to_query_args (env rewriter applies per-branch).
         first_seen_priv_esc = any(
             tok in q_lower
             for tok in (
@@ -854,7 +861,14 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
             )
             normalized["intent"] = "linux_audit_activity"
         if "query" in args and str(args.get("query", "")).strip():
-            args["query"] = _apply_environment_constraints_to_query(question, normalized["intent"], str(args.get("query", "")).strip())
+            if not args.get("_env_constraints_applied"):
+                args["query"] = _apply_environment_constraints_to_query(
+                    question,
+                    normalized["intent"],
+                    str(args.get("query", "")).strip(),
+                    args=args,
+                )
+                args["_env_constraints_applied"] = True
             args["query"] = re.sub(r"\s{2,}", " ", str(args["query"]).strip())
 
     if tool == "splunk_run_query" and "row_limit" not in args:
@@ -907,38 +921,9 @@ def _enforce_question_alignment(question: str, plan: dict[str, Any]) -> dict[str
             aligned["reason"] = "question_alignment_override:metadata_inventory"
         return aligned
 
-    deterministic_run_query_intents = {
-        "failed_login_activity",
-        "successful_login_activity",
-        "linux_auth_failures",
-        "linux_successful_logins",
-        "windows_successful_logons",
-        "windows_auth_failures",
-        "windows_process_activity",
-        "osquery_process_activity",
-        "windows_sysmon_network_activity",
-        "windows_sysmon_dns_activity",
-        "windows_credential_access_activity",
-        "linux_privilege_escalation",
-        "linux_privilege_escalation_first_seen",
-        "linux_session_activity",
-        "linux_audit_activity",
-        "apache_access_top_ips",
-        "apache_404_spike",
-        "apache_suspicious_user_agents",
-        "stream_http_activity",
-        "botsv3_named_sourcetype_overview",
-        "top_indexes",
-        "aws_vpc_flow_activity",
-        "aad_signin_activity",
-        "stream_dns_activity",
-        "o365_management_activity",
-    }
-    if mapped_template.intent in deterministic_run_query_intents:
-        aligned["selected_tool"] = "splunk_run_query"
-        aligned["tool_args"] = template_to_query_args(mapped_template, question)
-        aligned["intent"] = mapped_template.intent
-        aligned["reason"] = f"question_alignment_override:template:{mapped_template.intent}"
+    deterministic_run_query_intents = DETERMINISTIC_RUN_QUERY_INTENTS
+    if _template_override_mode() == "always" and mapped_template.intent in deterministic_run_query_intents:
+        aligned.update(_build_template_aligned_plan(question, mapped_template))
         return aligned
 
     return aligned
@@ -1016,10 +1001,18 @@ def planner_node(state: MultiModelState) -> MultiModelState:
         "rag_context": rag_context,
     }
     planner_output: dict[str, Any]
-    try:
-        planner_output = _call_ollama_json(model=MODEL_QUERY_PLANNER, system_prompt=system, user_payload=payload)
-        planner_output["source"] = "planner_model"
-    except Exception as exc:
+    planner_model_used = ""
+    planner_errors: list[str] = []
+    for candidate_model in _planner_model_candidates():
+        try:
+            planner_output = _call_ollama_json(model=candidate_model, system_prompt=system, user_payload=payload)
+            planner_output["source"] = "planner_model"
+            planner_output["planner_model_used"] = candidate_model
+            planner_model_used = candidate_model
+            break
+        except Exception as exc:
+            planner_errors.append(f"{candidate_model}:{type(exc).__name__}:{exc}")
+    else:
         template_fallback = _default_plan_from_template(question)
         planner_output = {
             "selected_tool": template_fallback.get("selected_tool", "splunk_run_query"),
@@ -1036,12 +1029,14 @@ def planner_node(state: MultiModelState) -> MultiModelState:
                 if key in {"earliest_time", "latest_time", "row_limit", "type"}
             },
             "confidence": 0.5,
-            "reason": f"planner_exception:{type(exc).__name__}:{exc}",
+            "reason": f"planner_exception:{'|'.join(planner_errors[-3:])}",
             "caveats": ["planner_fallback_used"],
             "source": "planner_fallback",
         }
 
     normalized = _normalize_planner_plan(planner_output, question, fallback_reason="planner_normalization_fallback")
+    if planner_model_used and normalized.get("source") == "planner_model":
+        normalized["planner_model_used"] = planner_model_used
     return {
         "planner_output": normalized,
         "planner_duration_ms": int((time.monotonic() - started) * 1000),
@@ -1055,7 +1050,7 @@ def planner_node(state: MultiModelState) -> MultiModelState:
                 f"strategy={normalized.get('search_strategy_summary', '')}",
                 "This stage is planning only. Final SPL is generated by the writer model.",
             ],
-            model=MODEL_QUERY_PLANNER,
+            model=planner_model_used or MODEL_QUERY_PLANNER,
             duration_ms=int((time.monotonic() - started) * 1000),
         ),
     }
@@ -1064,8 +1059,14 @@ def planner_node(state: MultiModelState) -> MultiModelState:
 def writer_node(state: MultiModelState) -> MultiModelState:
     started = time.monotonic()
     question = state["question"]
-    rag_context = build_spl_rag_context(question, max_chars=RAG_MAX_CHARS) if RAG_ENABLED else ""
     planner_output = state.get("planner_output", {}) or {}
+    planner_intent = str(planner_output.get("intent", "")).strip()
+    rag_context = (
+        build_spl_rag_context(question, intent=planner_intent, max_chars=RAG_MAX_CHARS)
+        if RAG_ENABLED
+        else ""
+    )
+    resolved_domain_hints = build_resolved_domain_hints(question, intent=planner_intent)
     if str(planner_output.get("selected_tool", "")) != "splunk_run_query":
         writer_output = _normalize_candidate(
             {
@@ -1100,6 +1101,7 @@ def writer_node(state: MultiModelState) -> MultiModelState:
         "Convert the structured search plan into executable read-only Splunk tool args. "
         "You are optimizing for syntactic correctness, clean command ordering, and practical SPL composition. "
         "When a canonical template query is supplied, treat it as the anchor shape to preserve unless you have a strong reason to improve it. "
+        "When resolved_domain_hints are supplied, bind indexes and sourcetypes to those domains only. "
         "Do not widen the scope beyond the canonical template. Do not invent alternate sourcetypes or indexes. "
         "If selected_tool is splunk_run_query, tool_args must include query, earliest_time, latest_time, row_limit. "
         "Place time bounds in tool_args, not inside query text. Query must start with 'search '. "
@@ -1110,6 +1112,7 @@ def writer_node(state: MultiModelState) -> MultiModelState:
         "question": question,
         "planner_output": planner_output,
         "canonical_template_query": str(planner_output.get("canonical_template_query", "")),
+        "resolved_domain_hints": resolved_domain_hints,
         "rag_context": rag_context,
     }
 
@@ -1387,7 +1390,7 @@ def validate_final_plan_node(state: MultiModelState) -> MultiModelState:
         args_current = args if isinstance(args, dict) else {}
         repair_meta: dict[str, Any] = {}
         intent_name = str(plan.get("intent", "")).strip()
-        for attempt_idx in range(2):
+        for attempt_idx in range(3):
             ok, reason = validate_query_args(args_current, question=question)
             if not ok:
                 failure_reason = f"policy:{reason}"
@@ -1396,37 +1399,66 @@ def validate_final_plan_node(state: MultiModelState) -> MultiModelState:
                 if not contract_ok:
                     failure_reason = f"intent_contract:{contract_reason}"
                 else:
-                    env_ok, env_reason = validate_query_against_environment(args_current)
-                    if not env_ok:
-                        failure_reason = f"environment:{env_reason}"
+                    query_text = str(args_current.get("query", "")).strip()
+                    coherence_ok, coherence_reason = validate_platform_sourcetype_coherence(query_text, intent_name)
+                    if not coherence_ok:
+                        failure_reason = f"platform_coherence:{coherence_reason}"
                     else:
-                        plan["tool_args"] = args_current
-                        result_payload: dict[str, Any] = {
-                            "final_plan": plan,
-                            "validation_ok": True,
-                            "validation_reason": "plan_valid",
-                            "validation_duration_ms": int((time.monotonic() - started) * 1000),
-                            "stage_logs": _append_stage_log(
-                                state,
-                                stage="validation",
-                                title="Deterministic validation approved the plan",
-                                details=[
-                                    f"intent={intent_name}",
-                                    f"selected_tool={plan.get('selected_tool', '')}",
-                                    "Policy, intent contract, and environment checks passed.",
-                                ],
-                                duration_ms=int((time.monotonic() - started) * 1000),
-                            ),
-                        }
-                        if repair_meta:
-                            result_payload["query_repair"] = repair_meta
-                            result_payload["validation_reason"] = "plan_valid_after_auto_repair"
-                        return result_payload
+                        scope_ok, scope_reason = validate_intent_platform_scope(
+                            query_text,
+                            intent_name,
+                            question=question,
+                        )
+                        if not scope_ok:
+                            failure_reason = f"platform_scope:{scope_reason}"
+                        else:
+                            env_ok, env_reason = validate_query_against_environment(args_current)
+                            if not env_ok:
+                                failure_reason = f"environment:{env_reason}"
+                            else:
+                                if isinstance(args_current, dict):
+                                    args_current.pop("_env_constraints_applied", None)
+                                plan["tool_args"] = args_current
+                                result_payload: dict[str, Any] = {
+                                    "final_plan": plan,
+                                    "validation_ok": True,
+                                    "validation_reason": "plan_valid",
+                                    "validation_duration_ms": int((time.monotonic() - started) * 1000),
+                                    "stage_logs": _append_stage_log(
+                                        state,
+                                        stage="validation",
+                                        title="Deterministic validation approved the plan",
+                                        details=[
+                                            f"intent={intent_name}",
+                                            f"selected_tool={plan.get('selected_tool', '')}",
+                                            "Policy, intent contract, platform coherence, and environment checks passed.",
+                                        ],
+                                        duration_ms=int((time.monotonic() - started) * 1000),
+                                    ),
+                                }
+                                if repair_meta:
+                                    result_payload["query_repair"] = repair_meta
+                                    result_payload["validation_reason"] = "plan_valid_after_auto_repair"
+                                return result_payload
 
-            if attempt_idx == 1:
+            if attempt_idx == 1 and _template_override_mode() != "never":
+                mapped_template = map_question_to_template(question)
+                plan = _build_template_aligned_plan(question, mapped_template)
+                args_current = plan.get("tool_args", {}) if isinstance(plan.get("tool_args", {}), dict) else {}
+                intent_name = str(plan.get("intent", "")).strip()
+                repair_meta = {
+                    **(repair_meta or {}),
+                    "template_fallback_applied": True,
+                    "template_intent": mapped_template.intent,
+                }
+                continue
+
+            if attempt_idx >= 2:
                 human_reason = failure_reason
                 if human_reason.startswith("intent_contract:"):
                     human_reason = f"Final query blocked by intent contract: {human_reason.split(':', 1)[1]}"
+                elif human_reason.startswith("platform_coherence:"):
+                    human_reason = f"Final query blocked by platform/sourcetype coherence: {human_reason.split(':', 1)[1]}"
                 elif human_reason.startswith("environment:"):
                     human_reason = f"Final query blocked by environment profile: {human_reason.split(':', 1)[1]}"
                 elif human_reason.startswith("policy:"):
@@ -1473,6 +1505,7 @@ def validate_final_plan_node(state: MultiModelState) -> MultiModelState:
                 failed_query_args=args_current,
                 failure_reason=failure_reason,
                 model=MODEL_QUERY_REPAIR,
+                intent=str(plan.get("intent", "")).strip(),
                 rag_max_chars=RAG_MAX_CHARS,
             )
             repair_meta = repair if isinstance(repair, dict) else {}
@@ -1482,6 +1515,17 @@ def validate_final_plan_node(state: MultiModelState) -> MultiModelState:
                     args_current = repaired_args
                     plan["reason"] = f"{plan.get('reason', '')};auto_repair:{repair_meta.get('repair_reason', '')}".strip(";")
                     continue
+            if _template_override_mode() != "never":
+                mapped_template = map_question_to_template(question)
+                plan = _build_template_aligned_plan(question, mapped_template)
+                args_current = plan.get("tool_args", {}) if isinstance(plan.get("tool_args", {}), dict) else {}
+                intent_name = str(plan.get("intent", "")).strip()
+                repair_meta = {
+                    **(repair_meta or {}),
+                    "template_fallback_applied": True,
+                    "template_intent": mapped_template.intent,
+                }
+                continue
             return {
                 "supported": False,
                 "guardrail_reason": f"Final query blocked after repair attempt: {failure_reason}",
@@ -1924,6 +1968,17 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
     judge2_conf = _float01((state.get("judge2_output", {}) or {}).get("confidence", 0.5), default=0.5)
     plan_conf = _float01(plan.get("confidence", 0.5), default=0.5)
     final_conf = round((plan_conf + reviewer_conf + evidence_conf + judge_conf + judge2_conf) / 5.0, 3)
+    rows_returned = len(rows) if isinstance(rows, list) else 0
+    intent_name = str(plan.get("intent", "")).strip()
+    if rows_returned == 0 and intent_name in AUTH_FAMILY_INTENTS:
+        query_platforms = set(platform_coverage.get("query_platforms", []) if isinstance(platform_coverage, dict) else [])
+        row_platforms = set(platform_coverage.get("row_platforms", []) if isinstance(platform_coverage, dict) else [])
+        if platform_coverage.get("cross_platform_query") and not row_platforms:
+            final_conf = min(final_conf, 0.45)
+        elif query_platforms and not row_platforms:
+            final_conf = min(final_conf, 0.55)
+        else:
+            final_conf = min(final_conf, 0.50)
 
     evidence = {
         "query_or_args": plan.get("tool_args", {}),

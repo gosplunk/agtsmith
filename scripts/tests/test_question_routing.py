@@ -32,6 +32,16 @@ class QuestionRoutingTests(unittest.TestCase):
         self.assertEqual(args.get("earliest_time"), "-7d")
         self.assertEqual(args.get("latest_time"), "now")
 
+    def test_windows_or_linux_failed_login_applies_environment(self) -> None:
+        question = "Show failed login activity in the last 7 days on my windows or linux machines"
+        template = map_question_to_template(question)
+        args = template_to_query_args(template, question, apply_environment=True)
+        query = str(args.get("query", ""))
+        self.assertIn("index=linux", query)
+        self.assertIn("4625", query)
+        self.assertIn("platform", query)
+        self.assertTrue("index=botsv3" in query or "index=windows" in query)
+
     def test_windows_specific_failed_login_uses_windows_intent(self) -> None:
         question = "Show failed login activity in the last 24 hours in windows"
         template = map_question_to_template(question)

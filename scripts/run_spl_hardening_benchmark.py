@@ -19,6 +19,7 @@ from intent_field_contracts import validate_query_for_intent
 from langgraph_multi_model_soc import planner_node, run_multi_model_soc, writer_node
 from minimal_question_to_answer import map_question_to_template, run_splunk_query_args, template_to_query_args
 from query_policy import validate_query_args
+from spl_autonomy_manifest import build_manifest
 from web_ui_server import _mitre_attack_bundle
 
 
@@ -501,10 +502,13 @@ def main() -> int:
         except Exception:
             previous_report = None
 
+    manifest = build_manifest(extra={"benchmark_scope": scope, "cases_path": str(args.cases), "out_dir": str(out_dir)})
+
     report = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "scope": scope,
         "case_count": len(results),
+        **manifest,
         "summary": {
             "avg_score": round(statistics.mean(scores), 2) if scores else 0.0,
             "median_score": round(statistics.median(scores), 2) if scores else 0.0,

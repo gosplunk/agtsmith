@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 
 config/ui.env
+config/.ssh/
 
 artifacts/*
 !artifacts/README.md

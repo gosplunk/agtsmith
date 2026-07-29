@@ -1,0 +1,130 @@
+# Synthetic event templates for lab data generator.
+# Each event_set maps to a logical domain in lab_data_layout.yaml.
+
+defaults:
+  host: agtsmith-lab-gen
+  lab_data_source: agtsmith_generator
+  count_per_run: 50
+  time_jitter_hours: 6
+
+event_sets:
+  linux_failed_ssh:
+    domain: linux_auth
+    benchmark_case: linux_auth_failures_24h
+    format: raw
+    source: /var/log/auth.log
+    templates:
+      - 'Failed password for invalid user {user} from {src_ip} port {port} ssh2'
+      - 'Failed password for {user} from {src_ip} port {port} ssh2'
+      - 'Invalid user {user} from {src_ip}'
+    fields:
+      user: ["admin", "root", "testuser", "deploy", "oracle"]
+      src_ip: ["10.0.0.99", "10.0.0.88", "192.168.1.50", "203.0.113.10"]
+      port: ["22", "2222", "2200"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator ("Failed password" OR "Invalid user") earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  linux_sudo:
+    domain: linux_auth
+    benchmark_case: linux_privilege_escalation_24h
+    format: raw
+    source: /var/log/auth.log
+    templates:
+      - 'sudo: pam_unix(sudo:session): session opened for user root by {actor}(uid=1000)'
+      - 'sudo: {actor} : TTY=pts/0 ; PWD=/home/{actor} ; USER=root ; COMMAND=/bin/bash'
+    fields:
+      actor: ["alice", "bob", "deploy", "ops"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator sudo earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  apache_access:
+    domain: web_access
+    benchmark_case: apache_access_top_ips_24h
+    format: raw
+    source: /var/log/apache2/access.log
+    templates:
+      - '{clientip} - - [{time}] "GET /index.html HTTP/1.1" 200 1234 "-" "Mozilla/5.0"'
+      - '{clientip} - - [{time}] "GET /api/v1/health HTTP/1.1" 200 512 "-" "curl/7.68.0"'
+    fields:
+      clientip: ["10.0.0.5", "10.0.0.12", "203.0.113.44", "198.51.100.8"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  apache_404:
+    domain: web_access
+    benchmark_case: apache_404_spike_24h
+    format: raw
+    source: /var/log/apache2/access.log
+    templates:
+      - '{clientip} - - [{time}] "GET /admin/login.php HTTP/1.1" 404 512 "-" "scanner/1.0"'
+      - '{clientip} - - [{time}] "GET /.env HTTP/1.1" 404 256 "-" "Mozilla/5.0"'
+    fields:
+      clientip: ["10.0.0.77", "198.51.100.99"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator " 404 " earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_4625:
+    domain: windows_auth
+    benchmark_case: windows_failed_logon_4625_24h
+    format: json
+    source: WinEventLog:Security
+    payload:
+      EventCode: "4625"
+      EventID: "4625"
+      LogName: Security
+      SourceName: Microsoft-Windows-Security-Auditing
+      Type: Information
+      Computer: agtsmith-win-lab
+      TaskCategory: "Logon"
+      Message: "An account failed to log on."
+      TargetUserName: "{user}"
+      SubjectUserName: "{user}"
+      IpAddress: "{src_ip}"
+      Source_Network_Address: "{src_ip}"
+      lab_data_source: agtsmith_generator
+    fields:
+      user: ["alice", "bob", "administrator", "svc_backup"]
+      src_ip: ["10.0.0.55", "192.168.1.100", "203.0.113.20"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4625 OR EventID=4625) earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_sysmon_network:
+    domain: windows_sysmon
+    benchmark_case: windows_sysmon_network_30d
+    format: json
+    source: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
+    payload:
+      EventCode: "3"
+      EventID: "3"
+      Image: "C:\\Windows\\System32\\svchost.exe"
+      DestinationIp: "{dest_ip}"
+      DestinationPort: "{dest_port}"
+      SourceIp: "{src_ip}"
+      SourcePort: "{src_port}"
+      lab_data_source: agtsmith_generator
+    fields:
+      dest_ip: ["10.0.0.20", "192.168.1.50", "203.0.113.15"]
+      dest_port: ["443", "80", "53"]
+      src_ip: ["10.0.0.5", "10.0.0.12"]
+      src_port: ["49152", "52341"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator EventCode=3 earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  stream_dns_query:
+    domain: stream_dns
+    benchmark_case: botsv3_stream_dns_all_time
+    format: json
+    source: stream:dns
+    payload:
+      query: "{query_name}"
+      reply_code: "{reply_code}"
+      src: "{src_ip}"
+      dest: "{dest_ip}"
+      lab_data_source: agtsmith_generator
+    fields:
+      query_name: ["example.com", "update.microsoft.com", "cdn.example.net"]
+      reply_code: ["NOERROR", "NXDOMAIN", "NOERROR"]
+      src_ip: ["10.0.0.5", "10.0.0.88", "192.168.1.10"]
+      dest_ip: ["8.8.8.8", "1.1.1.1", "9.9.9.9"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+    min_expected_rows: 1

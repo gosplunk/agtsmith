@@ -9,12 +9,19 @@ write/mutation-oriented commands that violate read-only policy.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
-from environment_profile import build_environment_context, build_tag_context
+from environment_profile import (
+    PROFILE_PATH_DEFAULT,
+    build_environment_context,
+    build_tag_context,
+    resolve_authoritative_domains_for_question,
+)
 from local_learning import approved_learning_records
 from question_intelligence import build_question_profile_text, infer_question_dimensions
+from spl_offline_docs_rag import build_offline_docs_context, offline_docs_index_available
 
 RAG_SOURCES: tuple[str, ...] = (
     "docs/reference/rag_sources/agtsmith_spl_authoring_playbook.md",
@@ -59,7 +66,14 @@ def _read_text(path: str) -> str:
         return ""
 
 
-def _build_skillpack_context(question: str, *, max_intents: int = 3, max_domains: int = 3, max_chars: int = 1200) -> str:
+def _build_skillpack_context(
+    question: str,
+    *,
+    intent: str = "",
+    max_intents: int = 3,
+    max_domains: int = 3,
+    max_chars: int = 1200,
+) -> str:
     if not SKILLPACK_PATH.exists():
         return ""
     try:
@@ -69,6 +83,7 @@ def _build_skillpack_context(question: str, *, max_intents: int = 3, max_domains
     if not isinstance(data, dict):
         return ""
     q = (question or "").lower()
+    intent_l = str(intent or "").strip().lower()
     tokens = {t for t in re.findall(r"[a-z0-9_]{3,}", q)}
     dims = infer_question_dimensions(question)
     platforms = set(dims.get("platforms", []))
@@ -85,6 +100,10 @@ def _build_skillpack_context(question: str, *, max_intents: int = 3, max_domains
                 continue
             score = 0
             intent = str(row.get("intent", "")).lower()
+            if intent_l and intent and intent != intent_l:
+                score -= 12
+            if intent_l and intent == intent_l:
+                score += 10
             if intent and intent in q:
                 score += 3
             tags = {str(x).strip().lower() for x in row.get("tags", []) if str(x).strip()}
@@ -354,7 +373,82 @@ def _best_lines(text: str, hints: list[str], max_chars: int = 700) -> str:
     return _sanitize_snippet("\n".join(selected)[:max_chars])
 
 
-def build_spl_rag_context(question: str, *, max_sources: int = 3, max_chars: int = 1600) -> str:
+def build_resolved_domain_hints(
+    question: str,
+    *,
+    intent: str = "",
+    profile_path: str | Path = PROFILE_PATH_DEFAULT,
+    max_domains: int = 3,
+    max_chars: int = 600,
+) -> str:
+    """Compact authoritative index/sourcetype hints for writer grounding."""
+    intent_name = str(intent or "").strip()
+    if not intent_name:
+        return ""
+    try:
+        domains = resolve_authoritative_domains_for_question(
+            question,
+            intent_name,
+            profile_path=profile_path,
+            max_domains=max_domains,
+        )
+    except Exception:
+        return ""
+    if not domains:
+        return ""
+    lines = ["[RESOLVED_DOMAINS]"]
+    for domain in domains[:max_domains]:
+        if not isinstance(domain, dict):
+            continue
+        idx = str(domain.get("index", "")).strip()
+        sts = [str(st).strip() for st in domain.get("sourcetypes", []) if str(st).strip()]
+        styles = [str(s).strip() for s in domain.get("styles", []) if str(s).strip()]
+        if not idx:
+            continue
+        preview = ", ".join(sts[:4])
+        style_text = ",".join(styles) if styles else "unknown"
+        lines.append(f"- index={idx} platform={style_text} sourcetypes={preview}")
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars]
+    return text
+
+
+def _profile_meta_header(profile_path: str | Path = PROFILE_PATH_DEFAULT) -> str:
+    path = Path(profile_path)
+    if not path.is_file():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    ts = str(data.get("timestamp_utc", "")).strip()
+    skill_ts = ""
+    if SKILLPACK_PATH.is_file():
+        try:
+            skill = json.loads(SKILLPACK_PATH.read_text(encoding="utf-8"))
+            if isinstance(skill, dict):
+                skill_ts = str(skill.get("timestamp_utc", "")).strip()
+        except Exception:
+            pass
+    parts = ["[RAG_META]"]
+    if ts:
+        parts.append(f"environment_profile_timestamp={ts}")
+    if skill_ts:
+        parts.append(f"skillpack_timestamp={skill_ts}")
+    return " ".join(parts) if len(parts) > 1 else ""
+
+
+def build_spl_rag_context(
+    question: str,
+    *,
+    intent: str = "",
+    max_sources: int = 3,
+    max_chars: int = 1600,
+    profile_path: str | Path = PROFILE_PATH_DEFAULT,
+) -> str:
     hints = _question_hints(question)
     ranked: list[tuple[int, str, str]] = []
     for src in RAG_SOURCES:
@@ -387,11 +481,31 @@ def build_spl_rag_context(question: str, *, max_sources: int = 3, max_chars: int
         "- Prefer CIM-aligned tags/eventtypes when present in CIM_TAG_PROFILE for the asked use case.\n"
         "- Unless the question explicitly asks for Splunk internal context, exclude internal indexes by default (use NOT index=_*).\n"
     )
-    env_ctx = build_environment_context(question, max_chars=max(400, int(max_chars * 0.5)))
-    tag_ctx = build_tag_context(question, max_chars=max(300, int(max_chars * 0.35)))
-    skill_ctx = _build_skillpack_context(question, max_chars=max(300, int(max_chars * 0.35)))
+    env_ctx = build_environment_context(question, max_chars=max(400, int(max_chars * 0.5)), profile_path=profile_path)
+    tag_ctx = build_tag_context(question, max_chars=max(300, int(max_chars * 0.35)), profile_path=profile_path)
+    skill_ctx = _build_skillpack_context(
+        question,
+        intent=intent,
+        max_chars=max(300, int(max_chars * 0.35)),
+    )
+    domain_ctx = build_resolved_domain_hints(
+        question,
+        intent=intent,
+        profile_path=profile_path,
+        max_chars=max(240, int(max_chars * 0.2)),
+    )
+    meta_ctx = _profile_meta_header(profile_path)
     authoring_ctx = _build_authoring_guidance(question, max_chars=max(320, int(max_chars * 0.35)))
     local_learning_ctx = _build_local_learning_context(question, max_chars=max(260, int(max_chars * 0.25)))
+    offline_docs_enabled = str(os.getenv("SPL_OFFLINE_DOCS_RAG_ENABLED", "1")).strip().lower() not in {"0", "false", "no"}
+    offline_docs_ctx = ""
+    if offline_docs_enabled and offline_docs_index_available():
+        offline_docs_ctx = build_offline_docs_context(
+            question,
+            intent=intent,
+            max_topics=3,
+            max_chars=max(360, int(max_chars * 0.45)),
+        )
     question_profile = build_question_profile_text(question)
     reserve = len(constraints) + 2
     if env_ctx:
@@ -400,10 +514,16 @@ def build_spl_rag_context(question: str, *, max_sources: int = 3, max_chars: int
         reserve += len(tag_ctx) + 2
     if skill_ctx:
         reserve += len(skill_ctx) + 2
+    if domain_ctx:
+        reserve += len(domain_ctx) + 2
+    if meta_ctx:
+        reserve += len(meta_ctx) + 2
     if authoring_ctx:
         reserve += len(authoring_ctx) + 2
     if local_learning_ctx:
         reserve += len(local_learning_ctx) + 2
+    if offline_docs_ctx:
+        reserve += len(offline_docs_ctx) + 2
     if question_profile:
         reserve += len(question_profile) + 2
     budget = max(200, max_chars - reserve)
@@ -411,8 +531,11 @@ def build_spl_rag_context(question: str, *, max_sources: int = 3, max_chars: int
     if len(merged_sources) > budget:
         merged_sources = merged_sources[:budget]
     segments = [
+        meta_ctx.strip(),
         question_profile.strip(),
+        domain_ctx.strip(),
         merged_sources.strip(),
+        offline_docs_ctx.strip(),
         env_ctx.strip(),
         tag_ctx.strip(),
         skill_ctx.strip(),

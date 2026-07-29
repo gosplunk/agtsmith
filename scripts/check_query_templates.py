@@ -10,8 +10,11 @@ Checks:
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 from collections import Counter
+from pathlib import Path
 
 from minimal_question_to_answer import map_question_to_template
 from query_templates import TEMPLATES
@@ -78,12 +81,15 @@ def main() -> int:
         ("Show 404 spike behavior in apache access_combined logs in the last 24 hours", "apache_404_spike"),
         ("Show suspicious user agents in apache access_combined logs", "apache_suspicious_user_agents"),
     )
-    for question, expected_intent in routing_cases:
-        actual_intent = map_question_to_template(question).intent
-        if actual_intent != expected_intent:
-            errors.append(
-                f"Routing mismatch for question={question!r}: expected={expected_intent} got={actual_intent}"
-            )
+    with tempfile.TemporaryDirectory() as td:
+        empty_profile_path = Path(td) / "empty_profile.json"
+        empty_profile_path.write_text(json.dumps({"indexes": []}), encoding="utf-8")
+        for question, expected_intent in routing_cases:
+            actual_intent = map_question_to_template(question, profile_path=empty_profile_path).intent
+            if actual_intent != expected_intent:
+                errors.append(
+                    f"Routing mismatch for question={question!r}: expected={expected_intent} got={actual_intent}"
+                )
 
     print("=== Query Template Self-Check ===")
     print(f"templates={len(TEMPLATES)}")

@@ -14,7 +14,7 @@ description: >-
 export SPLUNK_USER=dev SPLUNK_PASS='...'   # optional, for Splunk-embedded targets
 pip install -r .cursor/skills/agtsmith-screenshots/scripts/requirements.txt
 playwright install chromium
-make screenshots SCREENSHOT_VERSION=0.2.0-splunk
+make screenshots SCREENSHOT_VERSION=v1.5.1
 ```
 
 ## Manifest
@@ -24,7 +24,7 @@ Edit [manifest.yaml](manifest.yaml) to add targets. Credentials only via environ
 ## Compare to baseline
 
 ```bash
-make screenshots-diff SCREENSHOT_VERSION=0.2.0-splunk
+make screenshots-diff SCREENSHOT_VERSION=v1.5.1
 ```
 
 ## Output

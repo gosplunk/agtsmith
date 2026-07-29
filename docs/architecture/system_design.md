@@ -15,7 +15,7 @@ This document is the concise implementation reference for A.G.E.N.T. Smith. It d
 flowchart LR
     A[Analyst Question] --> B[Linux Controller Host]
     B --> C[LangGraph Orchestration]
-    C --> D[Qwen Planner + DeepSeek Writer + Foundation-Sec Review]
+    C --> D[Ministral Planner + Granite Writer + Foundation-Sec Review]
     D --> E[Deterministic Policy Gate]
     E --> F[Splunk MCP]
     F --> G[Splunk Data]
@@ -59,15 +59,15 @@ flowchart LR
 - Every investigation and follow-up pivot can be reopened from saved state without rerunning Splunk
 - The Investigation Drawer and Case Workspace both render this durable case memory as analyst workflow state rather than transient browser state
 
-## Active Model Roles
-- Planner: Qwen
-- SPL Writer: DeepSeek
-- Security Reviewer: Foundation-Sec
-- Peer Reviewer 1 when needed: Qwen
-- Peer Reviewer 2 when needed: Qwen
-- Evidence Reviewer: Foundation-Sec
-- Continuation Reviewer: Foundation-Sec
-- Final Summary: Foundation-Sec
+## Active Model Roles (v1.5.1 defaults)
+- Planner: Ministral-3B-Reasoning (`TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M`; fallback `ministral-3:3b`)
+- SPL Writer / Repair: Granite 4 (`granite4:3b`)
+- Security Reviewer: Foundation-Sec-8B
+- Peer Reviewer 1 when needed: Gemma 3 (`gemma3:4b`)
+- Peer Reviewer 2 when needed: Gemma 3 (`gemma3:4b`)
+- Evidence Reviewer: Foundation-Sec-8B
+- Continuation Reviewer: Foundation-Sec-8B
+- Final Summary: Foundation-Sec-8B
 - Optional Edge Router / Splitter
 
 ## Control Model

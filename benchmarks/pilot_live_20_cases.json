@@ -143,8 +143,7 @@
     "expected_shape": "stats",
     "preferred_indexes": [
       "index=linux",
-      "index=windows",
-      "index=windows_sysmon"
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=auth.log",
@@ -154,15 +153,16 @@
     ],
     "required_query_terms": [
       "index=linux",
-      "index=windows",
       "4625",
-      "stats"
+      "stats",
+      "platform"
     ],
     "forbidden_query_terms": [],
     "required_result_fields": [
       "index",
       "host",
-      "sourcetype"
+      "sourcetype",
+      "platform"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
@@ -177,8 +177,7 @@
     "expected_shape": "stats",
     "preferred_indexes": [
       "index=linux",
-      "index=windows",
-      "index=windows_sysmon"
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=auth.log",
@@ -188,8 +187,9 @@
     ],
     "required_query_terms": [
       "index=linux",
-      "index=windows",
-      "stats"
+      "4625",
+      "stats",
+      "platform"
     ],
     "forbidden_query_terms": [],
     "required_result_fields": [

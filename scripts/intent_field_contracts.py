@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
 
 
@@ -14,6 +16,118 @@ def _query_text(query_args: dict[str, Any]) -> str:
 
 def _group_hit(query: str, tokens: tuple[str, ...]) -> bool:
     return any(tok in query for tok in tokens)
+
+
+_AUTH_COHERENCE_INTENTS = frozenset(
+    {
+        "failed_login_activity",
+        "successful_login_activity",
+        "linux_auth_failures",
+        "windows_auth_failures",
+    }
+)
+
+_WINDOWS_EVENT_SIGNALS = ("eventcode=4625", "eventid=4625", "eventcode=4624", "eventid=4624")
+_LINUX_ONLY_SOURCETYPE_TOKENS = ("linux_secure", 'source="/var/log/auth.log"', 'source="/var/log/secure"')
+_WINDOWS_SOURCETYPE_TOKENS = ("xmlwineventlog", "wineventlog:security")
+
+
+def _subsearch_segments(query: str) -> list[str]:
+    parts = re.split(r"\|\s*append\s*\[\s*search\s+", query, flags=re.IGNORECASE)
+    segments = [parts[0].strip()]
+    for part in parts[1:]:
+        branch = part.rsplit("]", 1)[0] if "]" in part else part
+        segments.append(f"search {branch}".strip())
+    return [segment for segment in segments if segment]
+
+
+def validate_platform_sourcetype_coherence(query: str, intent: str) -> tuple[bool, str]:
+    """Fail when Windows auth event IDs appear beside Linux-only sourcetypes."""
+    query_l = str(query or "").strip().lower()
+    intent_l = str(intent or "").strip().lower()
+    if not query_l:
+        return False, "coherence_query_missing"
+    if intent_l not in _AUTH_COHERENCE_INTENTS:
+        return True, "coherence_not_applicable"
+
+    if re.search(r"linux_secure[^|\]]*(?:4625|4624|eventcode=4625|eventid=4625)", query_l):
+        return False, "coherence_linux_secure_with_windows_4625"
+    if re.search(r"(?:4625|4624|eventcode=4625|eventid=4625)[^|\]]*linux_secure", query_l):
+        return False, "coherence_windows_4625_with_linux_secure"
+
+    for segment in _subsearch_segments(query_l):
+        has_windows_event = any(tok in segment for tok in _WINDOWS_EVENT_SIGNALS)
+        has_linux_only_st = any(tok in segment for tok in _LINUX_ONLY_SOURCETYPE_TOKENS)
+        has_windows_st = any(tok in segment for tok in _WINDOWS_SOURCETYPE_TOKENS)
+        if has_windows_event and has_linux_only_st and not has_windows_st:
+            return False, "coherence_windows_event_in_linux_branch"
+        if has_linux_only_st and has_windows_event:
+            return False, "coherence_mixed_platform_markers"
+
+    if intent_l == "failed_login_activity" and "| append [" in query_l:
+        linux_branch = 'eval platform="linux"' in query_l or "failed password" in query_l
+        windows_branch = 'eval platform="windows"' in query_l or "4625" in query_l
+        if not (linux_branch and windows_branch):
+            return False, "coherence_cross_platform_missing_branch_markers"
+
+    return True, "coherence_ok"
+
+
+def validate_intent_platform_scope(
+    query: str,
+    intent: str,
+    question: str = "",
+    *,
+    profile_path: str | Path | None = None,
+) -> tuple[bool, str]:
+    """Fail when a linux-only profile still carries cross-platform Windows auth append branches."""
+    query_l = str(query or "").strip().lower()
+    intent_l = str(intent or "").strip().lower()
+    if not query_l or intent_l not in _AUTH_COHERENCE_INTENTS:
+        return True, "scope_not_applicable"
+
+    from environment_profile import (
+        PROFILE_PATH_DEFAULT,
+        _has_linux_only_domain,
+        _has_windows_only_domain,
+        load_environment_profile,
+        resolve_authoritative_domains_for_question,
+    )
+
+    path = profile_path if profile_path is not None else PROFILE_PATH_DEFAULT
+    profile = load_environment_profile(path)
+    if not profile:
+        return True, "scope_profile_missing_skip"
+
+    routing_intent = intent_l
+    if intent_l in {"linux_auth_failures", "linux_successful_logins"}:
+        probe_intent = "failed_login_activity" if "fail" in intent_l else "successful_login_activity"
+    elif intent_l in {"windows_auth_failures", "windows_successful_logons"}:
+        probe_intent = "failed_login_activity" if "fail" in intent_l else "successful_login_activity"
+    else:
+        probe_intent = intent_l
+
+    domains = resolve_authoritative_domains_for_question(
+        question or "failed login activity",
+        probe_intent,
+        profile_path=path,
+        max_domains=4,
+    )
+    if not domains:
+        return True, "scope_no_domains_skip"
+
+    has_linux_only = _has_linux_only_domain(domains)
+    has_windows_only = _has_windows_only_domain(domains)
+    if not (has_linux_only and not has_windows_only):
+        return True, "scope_not_linux_only"
+
+    if "| append [" not in query_l:
+        return True, "scope_ok"
+
+    if any(tok in query_l for tok in _WINDOWS_EVENT_SIGNALS) or "xmlwineventlog" in query_l:
+        return False, "scope_linux_only_profile_with_windows_append"
+
+    return True, "scope_ok"
 
 
 def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[bool, str]:
@@ -37,7 +151,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
             ("platform",),
         ),
         "linux_auth_failures": (
-            ("index=linux",),
+            ("index=linux", "index=soc_linux", "sourcetype=auth.log", "sourcetype=linux_secure", 'source="/var/log/auth.log"', 'source="/var/log/secure"'),
             ("source=\"/var/log/auth.log\"", "source=\"/var/log/secure\"", "sourcetype=auth.log", "sourcetype=linux_secure", "eventtype=failed_login", "tag=authentication"),
             ("failed", "authentication failure", "invalid user"),
             ("stats ", "timechart "),
@@ -268,5 +382,10 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
     if intent_l in {"apache_access_top_ips", "apache_404_spike", "apache_suspicious_user_agents"}:
         if any(bad in query for bad in ("index=apache", "index=apache_access_logs", "index=linux_perf")):
             return False, "intent_contract_apache_wrong_index_alias"
+
+    if intent_l in _AUTH_COHERENCE_INTENTS:
+        coherent, coherence_reason = validate_platform_sourcetype_coherence(query, intent_l)
+        if not coherent:
+            return False, coherence_reason
 
     return True, "intent_contract_ok"

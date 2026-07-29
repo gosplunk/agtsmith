@@ -18,6 +18,11 @@ import httpx
 
 from minimal_question_to_answer import OLLAMA_HOST
 
+try:
+    from spl_rag_context import build_spl_rag_context
+except ImportError:
+    build_spl_rag_context = None  # type: ignore[assignment,misc]
+
 
 TEST_CASES: list[dict[str, Any]] = [
     {
@@ -48,6 +53,32 @@ TEST_CASES: list[dict[str, Any]] = [
 ]
 
 FORBIDDEN_TERMS = ("delete", "drop", "outputlookup", "| outputcsv", "| sendemail", "| map ", " collect ")
+
+ORIGIN_BY_KEY: tuple[tuple[str, str], ...] = (
+    ("deepseek", "CN / DeepSeek"),
+    ("qwen", "CN / Alibaba"),
+    ("codegemma", "US / Google"),
+    ("gemma", "US / Google"),
+    ("llama", "US / Meta"),
+    ("mistral", "FR / Mistral AI"),
+    ("devstral", "FR / Mistral AI"),
+    ("mixtral", "FR / Mistral AI"),
+    ("magistral", "FR / Mistral AI"),
+    ("ministral", "FR / Mistral AI"),
+    ("granite", "US / IBM"),
+    ("phi", "US / Microsoft"),
+    ("foundation-sec", "US / Foundation"),
+    ("foundation", "US / Foundation"),
+    ("nemotron", "US / NVIDIA"),
+)
+
+
+def model_origin(tag: str) -> str:
+    lower = tag.lower()
+    for key, origin in ORIGIN_BY_KEY:
+        if key in lower:
+            return origin
+    return "unknown"
 
 
 def list_models(timeout: float = 20.0) -> list[str]:
@@ -84,13 +115,27 @@ def _extract_json(text: str) -> dict[str, Any]:
         return {}
 
 
-def generate_candidate(model: str, question: str, timeout: float = 120.0) -> dict[str, Any]:
+def generate_candidate(
+    model: str,
+    question: str,
+    *,
+    rag_context: str = "",
+    timeout: float = 120.0,
+) -> dict[str, Any]:
     system = (
-        "You are a Splunk SPL writer. Return strict JSON only with keys: "
-        "query, earliest_time, latest_time, row_limit. "
+        "You are a Splunk SPL writer for a read-only SOC lab. "
+        "Return strict JSON only with keys: query, earliest_time, latest_time, row_limit. "
         "Rules: read-only, query starts with 'search ', use row_limit <= 200."
     )
-    prompt = f"{system}\n\nTASK:\n{question}"
+    if rag_context:
+        prompt = (
+            f"{system}\n\n"
+            "Use the retrieval context as guidance, but keep output minimal and policy-safe.\n\n"
+            f"RETRIEVAL_CONTEXT:\n{rag_context}\n\n"
+            f"TASK:\n{question}"
+        )
+    else:
+        prompt = f"{system}\n\nTASK:\n{question}"
     payload = {"model": model, "prompt": prompt, "stream": False, "think": False}
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
@@ -155,45 +200,94 @@ def score_candidate(candidate: dict[str, Any], required_terms: list[str]) -> tup
     return max(0, min(100, score)), notes
 
 
+def _evaluate_model_cases(
+    model: str,
+    *,
+    use_rag: bool,
+) -> tuple[list[dict[str, Any]], float]:
+    case_rows: list[dict[str, Any]] = []
+    total = 0
+    for case in TEST_CASES:
+        question = str(case["question"])
+        rag_context = ""
+        if use_rag:
+            if build_spl_rag_context is None:
+                raise RuntimeError("spl_rag_context_unavailable")
+            rag_context = build_spl_rag_context(question)
+        try:
+            c = generate_candidate(model, question, rag_context=rag_context)
+            sc, notes = score_candidate(c, list(case["required_terms"]))
+        except Exception as exc:
+            c = {"query": "", "earliest_time": "", "latest_time": "", "row_limit": "", "raw_preview": ""}
+            sc = 0
+            notes = [f"model_error:{type(exc).__name__}"]
+        total += sc
+        case_rows.append(
+            {
+                "case_id": case["id"],
+                "score": sc,
+                "notes": notes,
+                "candidate": c,
+                "rag_enabled": use_rag,
+            }
+        )
+    avg = round(total / len(TEST_CASES), 2)
+    return case_rows, avg
+
+
+def _discover_candidates(explicit: list[str], top_k: int) -> list[str]:
+    discovered = list_models()
+    if explicit:
+        return explicit
+    preferred_keys = ("deepseek", "qwen", "gemma", "codegemma", "llama", "mistral", "granite", "phi", "foundation")
+    preferred = [m for m in discovered if any(k in m.lower() for k in preferred_keys)]
+    return preferred[:top_k] if preferred else discovered[:top_k]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Deterministic benchmark for SPL writer models")
     parser.add_argument("--models", nargs="*", default=[], help="Explicit model names to test")
     parser.add_argument("--top-k", type=int, default=4, help="When --models is empty, test up to top-k discovered candidates")
+    parser.add_argument(
+        "--rag-mode",
+        choices=("off", "on", "both"),
+        default="off",
+        help="off=vanilla only, on=RAG-augmented (production parity), both=dual-track with lift",
+    )
     parser.add_argument("--out-dir", default="artifacts/model_eval")
     args = parser.parse_args()
 
-    discovered = list_models()
-    candidates = args.models
-    if not candidates:
-        preferred = [m for m in discovered if any(k in m.lower() for k in ("qwen", "foundation-sec", "foundation", "nemotron"))]
-        candidates = preferred[: args.top_k] if preferred else discovered[: args.top_k]
+    if args.rag_mode in {"on", "both"} and build_spl_rag_context is None:
+        raise RuntimeError("RAG mode requires spl_rag_context module")
 
+    candidates = _discover_candidates(args.models, args.top_k)
     if not candidates:
         raise RuntimeError("no_models_found")
 
     results: list[dict[str, Any]] = []
     for model in candidates:
-        case_rows: list[dict[str, Any]] = []
-        total = 0
-        for case in TEST_CASES:
-            try:
-                c = generate_candidate(model, case["question"])
-                sc, notes = score_candidate(c, case["required_terms"])
-            except Exception as exc:
-                c = {"query": "", "earliest_time": "", "latest_time": "", "row_limit": "", "raw_preview": ""}
-                sc = 0
-                notes = [f"model_error:{type(exc).__name__}"]
-            total += sc
-            case_rows.append(
-                {
-                    "case_id": case["id"],
-                    "score": sc,
-                    "notes": notes,
-                    "candidate": c,
-                }
-            )
-        avg = round(total / len(TEST_CASES), 2)
-        results.append({"model": model, "avg_score": avg, "cases": case_rows})
+        origin = model_origin(model)
+        row: dict[str, Any] = {"model": model, "origin": origin}
+        if args.rag_mode == "off":
+            cases, avg = _evaluate_model_cases(model, use_rag=False)
+            row["avg_score"] = avg
+            row["vanilla_avg_score"] = avg
+            row["cases"] = cases
+        elif args.rag_mode == "on":
+            cases, avg = _evaluate_model_cases(model, use_rag=True)
+            row["avg_score"] = avg
+            row["rag_avg_score"] = avg
+            row["cases"] = cases
+        else:
+            vanilla_cases, vanilla_avg = _evaluate_model_cases(model, use_rag=False)
+            rag_cases, rag_avg = _evaluate_model_cases(model, use_rag=True)
+            row["vanilla_avg_score"] = vanilla_avg
+            row["rag_avg_score"] = rag_avg
+            row["rag_lift"] = round(rag_avg - vanilla_avg, 2)
+            row["avg_score"] = rag_avg
+            row["cases"] = rag_cases
+            row["vanilla_cases"] = vanilla_cases
+        results.append(row)
 
     ranked = sorted(results, key=lambda r: r["avg_score"], reverse=True)
     best = ranked[0]
@@ -209,12 +303,14 @@ def main() -> int:
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "ollama_host": OLLAMA_HOST,
+        "rag_mode": args.rag_mode,
         "tested_models": candidates,
         "test_case_count": len(TEST_CASES),
         "ranked": ranked,
         "recommended_query_writer_model": best["model"],
         "recommended_score": best["avg_score"],
-        "method": "deterministic_rule_scoring_v1",
+        "recommended_origin": best.get("origin", model_origin(best["model"])),
+        "method": "deterministic_rule_scoring_v2_rag_mode",
     }
     out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     latest_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -224,14 +320,25 @@ def main() -> int:
         "",
         f"- Timestamp (UTC): `{payload['timestamp_utc']}`",
         f"- Ollama host: `{OLLAMA_HOST}`",
+        f"- RAG mode: `{args.rag_mode}`",
         f"- Cases: `{len(TEST_CASES)}`",
         f"- Recommended query-writer model: `{best['model']}`",
+        f"- Recommended origin: `{payload['recommended_origin']}`",
         f"- Recommended avg score: `{best['avg_score']}`",
         "",
         "## Ranked Results",
     ]
     for row in ranked:
-        lines.append(f"- model=`{row['model']}` avg_score=`{row['avg_score']}`")
+        if args.rag_mode == "both":
+            lines.append(
+                f"- model=`{row['model']}` origin=`{row.get('origin', 'unknown')}` "
+                f"rag_avg=`{row.get('rag_avg_score')}` vanilla_avg=`{row.get('vanilla_avg_score')}` "
+                f"lift=`{row.get('rag_lift')}`"
+            )
+        else:
+            lines.append(
+                f"- model=`{row['model']}` origin=`{row.get('origin', 'unknown')}` avg_score=`{row['avg_score']}`"
+            )
     lines.append("")
     lines.append("## Scoring Method")
     lines.append("- Query presence: 10")
@@ -246,8 +353,10 @@ def main() -> int:
     latest_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print("=== SPL Writer Model Evaluation ===")
+    print(f"rag_mode={args.rag_mode}")
     print(f"tested_models={len(candidates)}")
     print(f"recommended_model={best['model']}")
+    print(f"recommended_origin={payload['recommended_origin']}")
     print(f"recommended_score={best['avg_score']}")
     print(f"json={out_json}")
     print(f"md={out_md}")

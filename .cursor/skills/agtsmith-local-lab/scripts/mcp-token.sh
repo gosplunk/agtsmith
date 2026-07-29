@@ -4,20 +4,24 @@ set -euo pipefail
 : "${SPLUNK_USER:?Set SPLUNK_USER}"
 : "${SPLUNK_PASS:?Set SPLUNK_PASS}"
 
-NAME="${MCP_TOKEN_NAME:-agtsmith-dev}"
-EXPIRES="${MCP_TOKEN_EXPIRES:-+30d}"
+# Splunk MCP Server 1.x requires encrypted tokens from the app REST handler,
+# not standard /services/authorization/tokens static JWTs.
+TOKEN_USER="${MCP_TOKEN_USER:-mcp}"
+MCP_TOKEN_URL="https://127.0.0.1:8089/servicesNS/nobody/Splunk_MCP_Server/mcp_token?output_mode=json"
 
-resp=$(curl -sk -u "${SPLUNK_USER}:${SPLUNK_PASS}" \
-  -X POST "https://127.0.0.1:8089/services/authorization/tokens?output_mode=json" \
-  -d "name=${NAME}" \
-  -d "audience=mcp" \
-  -d "expires_on=${EXPIRES}")
+curl -sk -u "${SPLUNK_USER}:${SPLUNK_PASS}" \
+  -X POST "${MCP_TOKEN_URL}" \
+  -d "username=${TOKEN_USER}" \
+  -d "action=rotate" >/dev/null
 
-token=$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d['entry'][0]['content']['token'])" <<<"$resp" 2>/dev/null || true)
+fetch_resp=$(curl -sk -u "${SPLUNK_USER}:${SPLUNK_PASS}" \
+  "${MCP_TOKEN_URL}&username=${TOKEN_USER}")
+
+token=$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))" <<<"${fetch_resp}" 2>/dev/null || true)
 
 if [[ -z "${token:-}" ]]; then
-  echo "Failed to create token. Response:" >&2
-  echo "$resp" >&2
+  echo "Failed to mint encrypted MCP token for user ${TOKEN_USER}." >&2
+  echo "Response: ${fetch_resp}" >&2
   exit 1
 fi
 

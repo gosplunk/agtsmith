@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 : "${SPLUNK_USER:?Set SPLUNK_USER}"
 : "${SPLUNK_PASS:?Set SPLUNK_PASS}"
 
-TOKEN="$("${ROOT}/.cursor/skills/agtsmith-local-lab/scripts/mcp-token.sh" | awk -F= '/SPLUNK_LAB_BEARER_TOKEN=/{print $2}')"
+TOKEN="$("${ROOT}/.cursor/skills/agtsmith-local-lab/scripts/mcp-token.sh" | awk '/^SPLUNK_LAB_BEARER_TOKEN=/{print substr($0, index($0, "=") + 1)}')"
 
 if [[ -z "${TOKEN}" ]]; then
   echo "Failed to mint MCP token" >&2

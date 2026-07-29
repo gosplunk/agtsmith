@@ -54,13 +54,27 @@ def _install_stub_modules() -> None:
     stubs["minimal_question_to_answer"] = mod
 
     mod = types.ModuleType("ollama_log_stream")
+    mod.LocalLogSourceRegistry = type("LocalLogSourceRegistry", (), {})
     mod.RemoteLogSourceRegistry = type("RemoteLogSourceRegistry", (), {})
     mod.StreamParams = type("StreamParams", (), {})
+    mod.check_remote_health = lambda *args, **kwargs: {"ok": True}
     mod.format_sse = lambda *args, **kwargs: b""
     mod.get_remote_health_url = lambda *args, **kwargs: ""
     mod.redact_secrets = lambda value: value
     mod.role_allowed = lambda role: True
     stubs["ollama_log_stream"] = mod
+
+    mod = types.ModuleType("ollama_ops_monitor")
+    mod.build_local_log_command = lambda *args, **kwargs: ""
+    mod.collect_ops_snapshot = lambda *args, **kwargs: {}
+    mod.ollama_log_config_status = lambda *args, **kwargs: {}
+    stubs["ollama_ops_monitor"] = mod
+
+    mod = types.ModuleType("investigation_playbooks")
+    mod.playbook_for_intent = lambda *args, **kwargs: {}
+    mod.playbook_target_order = lambda *args, **kwargs: []
+    mod.playbook_targets_for_intent = lambda *args, **kwargs: []
+    stubs["investigation_playbooks"] = mod
 
     mod = types.ModuleType("environment_profile")
     mod.load_environment_profile = lambda *args, **kwargs: {}
@@ -74,16 +88,23 @@ def _install_stub_modules() -> None:
     mod.DEFAULT_MODEL_PEER_REVIEWER = "stub"
     mod.DEFAULT_MODEL_PEER_REVIEWER_2 = "stub"
     mod.DEFAULT_MODEL_QUERY_PLANNER = "stub"
+    mod.DEFAULT_MODEL_QUERY_PLANNER_FALLBACK = "stub-fallback"
     mod.DEFAULT_MODEL_QUERY_REPAIR = "stub"
     mod.DEFAULT_MODEL_QUERY_WRITER = "stub"
     mod.DEFAULT_MODEL_SECURITY_REVIEWER = "stub"
+    mod.DEFAULT_MODEL_ASSIGNMENTS = {}
+    mod.MODEL_ASSIGNMENT_KEYS = []
+    mod.MODEL_PULL_EXTRA_KEYS = []
     mod.UI_ENV_PATH = Path("/tmp/agtsmith-ui.env")
     mod.display_path = lambda path: str(path)
+    mod.expected_ollama_models = lambda values=None: []
+    mod.model_stack_summary = lambda values=None: {"unique_tag_count": 0, "role_count": 0, "core_tags": [], "optional_tags": [], "families": []}
+    mod.apply_model_family_assignments = lambda values: dict(values)
     mod.get_edge_llm_enabled = lambda: False
     mod.get_edge_llm_host = lambda: ""
     mod.get_edge_llm_model = lambda: ""
     mod.get_edge_llm_role = lambda: ""
-    mod.get_edge_llm_timeout_sec = lambda: 30
+    mod.get_edge_llm_timeout_sec = lambda: "60"
     mod.get_ollama_host = lambda: ""
     mod.get_splunk_base_url = lambda: ""
     mod.get_splunk_mcp_url = lambda: ""
@@ -115,6 +136,29 @@ import web_ui_server as wus
 
 
 class WebUiLayoutTests(unittest.TestCase):
+    def test_configure_page_exposes_role_family_model_map(self) -> None:
+        html = wus._configure_page_body_rendered()
+        self.assertIn('Model Stack', html)
+        self.assertIn('id="cfg-family-grid"', html)
+        self.assertIn('id="cfg-inventory-table"', html)
+        self.assertIn('cfg-family-shell', html)
+        self.assertIn('cfg-family-select', html)
+        self.assertIn('id="cfg-lane-nav"', html)
+        self.assertIn('id="cfg-next-action"', html)
+        self.assertIn('id="cfg-sticky-footer"', html)
+        self.assertIn('Configure UI configure-ui-p3', html)
+        self.assertIn('Advanced: Per-Stage Overrides', html)
+        self.assertIn('id="cfg-model-planner-fallback"', html)
+        self.assertIn('Reset to v1.5.1 Defaults', html)
+
+    def test_configure_page_script_is_valid_javascript(self) -> None:
+        html = wus._configure_page_body_rendered()
+        start = html.index('<script>')
+        end = html.index('cfgLoad();', start) + len('cfgLoad();')
+        js = html[start + len('<script>'):end].strip()
+        self.assertEqual(js.count('{'), js.count('}'))
+        self.assertEqual(js.count('('), js.count(')'))
+
     def test_investigation_layout_exposes_mode_banner_execution_monitor_and_next_action_workspace(self) -> None:
         html = wus.APP_HTML
         self.assertIn('id="invest-mode-banner"', html)
