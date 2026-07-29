@@ -167,6 +167,12 @@ class WebUiLayoutTests(unittest.TestCase):
 
     def test_investigation_layout_exposes_mode_banner_execution_monitor_and_next_action_workspace(self) -> None:
         html = wus.APP_HTML
+        self.assertIn('class="sidebar-rail"', html)
+        self.assertIn('class="app-shell"', html)
+        self.assertIn('class="rail-tooltip"', html)
+        self.assertIn('Splunk MCP Chat', html)
+        self.assertIn('LangGraph Graph', html)
+        self.assertNotIn('class="topnav"', html)
         self.assertIn('id="invest-mode-banner"', html)
         self.assertIn('Execution Monitor', html)
         self.assertIn('Next Action Workspace', html)
@@ -208,6 +214,15 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertIn('<summary>Execution Audit</summary>', html)
         self.assertIn('<summary>Advanced Review Trace</summary>', html)
         self.assertIn('Assessment, evidence, and next-step guidance stay above. Open this only when you need audit depth.', html)
+
+    def test_global_nav_renders_icon_rail_with_flyout(self) -> None:
+        nav = wus._global_nav("investigation")
+        self.assertIn('class="sidebar-rail"', nav)
+        self.assertIn('class="rail-item active"', nav)
+        self.assertIn('rail-item-flyout', nav)
+        self.assertIn('class="rail-flyout"', nav)
+        self.assertIn('LangGraph Graph', nav)
+        self.assertNotIn('class="topnav"', nav)
 
     def test_mcp_layout_exposes_mode_banner_summary_and_diagnostics_split(self) -> None:
         html = wus._mcp_page_body()

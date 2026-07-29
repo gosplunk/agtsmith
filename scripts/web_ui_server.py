@@ -1811,58 +1811,95 @@ def _mcp_probe(values: dict[str, str]) -> dict[str, Any]:
         }
 
 
+def _rail_icon_svg(path: str) -> str:
+    return (
+        '<svg class="rail-svg" xmlns="http://www.w3.org/2000/svg" width="22" height="22" '
+        'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" '
+        f'stroke-linecap="round" stroke-linejoin="round">{path}</svg>'
+    )
+
+
+_RAIL_ICONS: dict[str, str] = {
+    "mcp": _rail_icon_svg(
+        '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>'
+    ),
+    "investigation": _rail_icon_svg('<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>'),
+    "environment": _rail_icon_svg(
+        '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>'
+        '<path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/>'
+    ),
+    "artifacts": _rail_icon_svg(
+        '<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/>'
+    ),
+    "control": _rail_icon_svg(
+        '<line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/>'
+        '<line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/>'
+        '<line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/>'
+        '<line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/>'
+    ),
+    "logout": _rail_icon_svg(
+        '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>'
+        '<polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>'
+    ),
+}
+
+
 def _global_nav(active: str) -> str:
-    items = [
-        ("/mcp", "Splunk MCP Chat", "MCP", "mcp"),
-        ("/investigation", "Investigation UI", "Investigate", "investigation"),
-        ("/artifacts", "Artifact Repository", "Artifacts", "artifacts"),
-        ("__control__", "Control Center", "Control", "control"),
-        ("/logout", "Logout", "Session", "logout"),
+    items: list[tuple[str, str, str, str]] = [
+        ("/mcp", "Splunk MCP Chat", "mcp", "mcp"),
+        ("/investigation", "Investigation UI", "investigation", "investigation"),
+        ("/artifacts", "Artifact Repository", "artifacts", "artifacts"),
     ]
     if _can_show_environment_page():
-        items.insert(2, ("/environment", "Data Domains", "Profile", "environment"))
+        items.insert(2, ("/environment", "Data Domains", "environment", "environment"))
+    control_items = [
+        ("/architecture", "Architecture", "System flow and trust boundaries"),
+        ("/langgraph-graph", "LangGraph Graph", "Canonical workflow, active topology, and run path"),
+        ("/docs", "Docs", "Whitepapers, guides, and references"),
+        ("/configure", "Configuration", "Endpoints, models, validation"),
+        ("/admin/ollama-ops", "Ollama Ops", "GPU metrics and live Ollama logs"),
+        ("/cases", "Case Workspace", "Persistent cases, pivots, and branch history"),
+        ("/learning", "SPL Optimization", "AI-driven SPL improvement and review"),
+        ("/spl-assets", "SPL Asset Repository", "Approved reusable SPL assets"),
+        ("/users", "Users", "Local users and audit trail"),
+    ]
     links: list[str] = []
-    for href, label, kicker, key in items:
-        if href == "__control__":
-            dropdown_items = [
-                ("/architecture", "Architecture", "System flow and trust boundaries"),
-                ("/langgraph-graph", "LangGraph Graph", "Canonical workflow, active topology, and run path"),
-                ("/docs", "Docs", "Whitepapers, guides, and references"),
-                ("/configure", "Configuration", "Endpoints, models, validation"),
-                ("/admin/ollama-ops", "Ollama Ops", "GPU metrics and live Ollama logs"),
-                ("/cases", "Case Workspace", "Persistent cases, pivots, and branch history"),
-                ("/learning", "SPL Optimization", "AI-driven SPL improvement and review"),
-                ("/spl-assets", "SPL Asset Repository", "Approved reusable SPL assets"),
-                ("/users", "Users", "Local users and audit trail"),
-            ]
-            item_links = "".join(
-                f'<a class="nav-submenu-item" href="{sub_href}">'
-                f'<span class="nav-submenu-title">{html.escape(sub_label)}</span>'
-                f'<span class="nav-submenu-copy">{html.escape(sub_copy)}</span>'
-                "</a>"
-                for sub_href, sub_label, sub_copy in dropdown_items
-            )
-            cls = "nav-item nav-item-dropdown active" if key == active else "nav-item nav-item-dropdown"
-            links.append(
-                f'<div class="{cls}">'
-                f'<a class="nav-trigger" href="/configure">'
-                f'<span class="nav-kicker">{html.escape(kicker)}</span>'
-                f'<span class="nav-label">{html.escape(label)}</span>'
-                "</a>"
-                f'<div class="nav-submenu">{item_links}</div>'
-                "</div>"
-            )
-            continue
-        cls = "nav-item active" if key == active else "nav-item"
+    for href, label, icon_key, key in items:
+        cls = "rail-item active" if key == active else "rail-item"
         links.append(
-            f'<a class="{cls}" href="{html.escape(href)}">'
-            f'<span class="nav-kicker">{html.escape(kicker)}</span>'
-            f'<span class="nav-label">{html.escape(label)}</span>'
+            f'<a class="{cls}" href="{html.escape(href)}" aria-label="{html.escape(label)}">'
+            f'<span class="rail-icon">{_RAIL_ICONS[icon_key]}</span>'
+            f'<span class="rail-tooltip">{html.escape(label)}</span>'
             "</a>"
         )
+    flyout_links = "".join(
+        f'<a class="rail-flyout-item" href="{sub_href}">'
+        f'<span class="rail-flyout-title">{html.escape(sub_label)}</span>'
+        f'<span class="rail-flyout-copy">{html.escape(sub_copy)}</span>'
+        "</a>"
+        for sub_href, sub_label, sub_copy in control_items
+    )
+    control_cls = "rail-item rail-item-flyout active" if active == "control" else "rail-item rail-item-flyout"
+    links.append(
+        f'<div class="{control_cls}">'
+        f'<a class="rail-trigger" href="/configure" aria-label="Control Center">'
+        f'<span class="rail-icon">{_RAIL_ICONS["control"]}</span>'
+        "</a>"
+        f'<span class="rail-tooltip">Control Center <span class="rail-tooltip-chevron">›</span></span>'
+        f'<div class="rail-flyout">{flyout_links}</div>'
+        "</div>"
+    )
     return (
-        f'<nav class="topnav">{"".join(links)}'
-        f'<div class="nav-version-pill"><span>Release</span><strong>{html.escape(APP_VERSION_LABEL)}</strong></div>'
+        '<nav class="sidebar-rail" aria-label="Main navigation">'
+        '<div class="rail-logo" title="A.G.E.N.T. Smith">A.S.</div>'
+        f'<div class="rail-items">{"".join(links)}</div>'
+        '<div class="rail-footer">'
+        f'<a class="rail-item{" active" if active == "logout" else ""}" href="/logout" aria-label="Logout">'
+        f'<span class="rail-icon">{_RAIL_ICONS["logout"]}</span>'
+        '<span class="rail-tooltip">Logout</span>'
+        "</a>"
+        f'<div class="nav-version-pill rail-version-pill"><span>Release</span><strong>{html.escape(APP_VERSION_LABEL)}</strong></div>'
+        "</div>"
         "</nav>"
     )
 
@@ -3438,142 +3475,159 @@ APP_HTML = """<!doctype html>
       background-size:cover;
       color:var(--fg);
     }
+    .app-shell { display:grid; grid-template-columns:64px minmax(0,1fr); min-height:100vh; }
+    .app-main { min-width:0; min-height:100vh; }
     .wrap { max-width: 1740px; min-height:calc(100vh - 48px); margin: 24px auto; padding: 0 28px 32px; box-sizing:border-box; }
-    .topnav {
-      position:relative;
-      z-index:220;
+    .sidebar-rail {
+      position:sticky;
+      top:0;
+      align-self:start;
       display:flex;
-      flex-wrap:nowrap;
-      gap:4px;
-      margin-bottom:18px;
-      justify-content:flex-start;
-      align-items:stretch;
-      padding:6px;
-      border:1px solid rgba(34,66,92,.44);
-      border-radius:22px;
-      background:linear-gradient(180deg, rgba(7,18,31,.82), rgba(5,12,23,.72));
-      box-shadow:0 18px 34px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.03);
-      backdrop-filter:blur(16px);
+      flex-direction:column;
+      width:64px;
+      min-width:64px;
+      height:100vh;
+      background:#0a1628;
+      border-right:1px solid #1a2d45;
+      z-index:300;
+      box-sizing:border-box;
     }
-    .nav-version-pill{
-      flex:0 0 auto;
-      align-self:center;
-      display:inline-flex;
+    .rail-logo {
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      height:56px;
+      font-size:13px;
+      font-weight:900;
+      letter-spacing:.04em;
+      color:#f8fafc;
+      border-bottom:1px solid rgba(26,45,69,.72);
+      flex-shrink:0;
+    }
+    .rail-items {
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:2px;
+      padding:8px 0;
+      flex:1 1 auto;
+    }
+    .rail-footer {
+      display:flex;
+      flex-direction:column;
       align-items:center;
       gap:8px;
-      margin-left:8px;
-      padding:8px 14px;
-      border:1px solid #315a79;
-      border-radius:999px;
-      background:linear-gradient(180deg,#16324a,#102435);
-      color:#dbeafe;
-      box-shadow:0 10px 20px rgba(8,23,37,.26), inset 0 1px 0 rgba(255,255,255,.05);
-      white-space:nowrap;
+      padding:8px 0 12px;
+      border-top:1px solid rgba(26,45,69,.72);
+      flex-shrink:0;
     }
-    .nav-version-pill span{
-      font-size:10px;
-      font-weight:800;
-      letter-spacing:.12em;
-      text-transform:uppercase;
-      color:#8fd3ff;
-    }
-    .nav-version-pill strong{
-      font-size:12px;
-      font-weight:900;
-      color:#f8fafc;
-      letter-spacing:.02em;
-    }
-    .nav-item {
+    .rail-item, .rail-item-flyout {
       position:relative;
       display:flex;
-      flex-direction:column;
+      align-items:center;
       justify-content:center;
-      gap:2px;
-      min-width:0;
-      flex:1 1 0;
+      width:64px;
+      height:48px;
       text-decoration:none;
-      border:1px solid transparent;
-      border-radius:16px;
-      padding:8px 9px 9px;
-      background:linear-gradient(180deg, rgba(255,255,255,.015), rgba(255,255,255,.008));
-      color:#dce9f8;
-      box-shadow:inset 0 1px 0 rgba(255,255,255,.018);
-      transition:transform .16s ease, border-color .16s ease, box-shadow .16s ease, background .16s ease, color .16s ease;
-      overflow:hidden;
+      color:#8ea4ba;
+      transition:color .14s ease, background .14s ease;
     }
-    .nav-item-dropdown { overflow:visible; }
-    .nav-item-dropdown{ z-index:221; }
-    .nav-trigger {
+    .rail-item-flyout { display:block; }
+    .rail-trigger {
       display:flex;
-      flex-direction:column;
+      align-items:center;
       justify-content:center;
-      gap:2px;
-      min-width:0;
+      width:64px;
+      height:48px;
       text-decoration:none;
       color:inherit;
     }
-    .nav-item::after{
+    .rail-item::before, .rail-item-flyout::before {
       content:"";
       position:absolute;
-      left:12px;
-      right:12px;
-      bottom:0;
-      height:2px;
-      border-radius:999px;
-      background:linear-gradient(90deg, rgba(96,165,250,.82), rgba(45,212,191,.82));
-      opacity:0;
-      transform:scaleX(.5);
-      transition:opacity .16s ease, transform .16s ease;
-    }
-    .nav-item:hover {
-      border-color:rgba(81,127,163,.46);
-      background:linear-gradient(180deg, rgba(18,35,53,.74), rgba(9,21,34,.66));
-      transform:translateY(-1px);
-      box-shadow:0 10px 18px rgba(2,6,23,.16), inset 0 1px 0 rgba(255,255,255,.03);
-      color:#f8fbff;
-    }
-    .nav-item:hover::after{
-      opacity:.58;
-      transform:scaleX(1);
-    }
-    .nav-item.active {
-      border-color:rgba(61,105,136,.5);
-      background:linear-gradient(180deg, rgba(17,37,57,.92), rgba(10,24,39,.9));
-      color:#ecfdf5;
-      box-shadow:0 12px 22px rgba(2,6,23,.18), inset 0 1px 0 rgba(255,255,255,.04);
-    }
-    .nav-item.active::after{
-      opacity:1;
-      transform:scaleX(1);
-    }
-    .nav-kicker { font-size:9px; color:#7ea2c1; text-transform:uppercase; letter-spacing:.12em; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .nav-item.active .nav-kicker { color:#8fd3ff; }
-    .nav-label { font-size:13px; font-weight:900; line-height:1.15; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .nav-submenu {
-      position:absolute;
-      top:calc(100% + 10px);
       left:0;
-      min-width:320px;
+      top:8px;
+      bottom:8px;
+      width:3px;
+      border-radius:0 3px 3px 0;
+      background:linear-gradient(180deg,#22d3ee,#14b8a6);
+      opacity:0;
+      transition:opacity .14s ease;
+    }
+    .rail-item:hover, .rail-item-flyout:hover, .rail-item-flyout:focus-within {
+      color:#e5eef8;
+      background:rgba(15,29,50,.55);
+    }
+    .rail-item.active, .rail-item-flyout.active {
+      color:#22d3ee;
+      background:rgba(12,28,48,.72);
+    }
+    .rail-item.active::before, .rail-item-flyout.active::before { opacity:1; }
+    .rail-icon {
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      width:40px;
+      height:40px;
+      border-radius:10px;
+      transition:background .14s ease, box-shadow .14s ease;
+    }
+    .rail-item.active .rail-icon, .rail-item-flyout.active .rail-icon {
+      background:rgba(34,211,238,.12);
+      box-shadow:0 0 12px rgba(34,211,238,.18);
+    }
+    .rail-svg { display:block; }
+    .rail-tooltip {
+      position:absolute;
+      left:calc(100% + 10px);
+      top:50%;
+      transform:translateY(-50%) translateX(-4px);
+      padding:7px 12px;
+      border:1px solid #2a445c;
+      border-radius:999px;
+      background:linear-gradient(180deg,#0f1d32,#0a1628);
+      color:#e5eef8;
+      font-size:12px;
+      font-weight:700;
+      white-space:nowrap;
+      pointer-events:none;
+      opacity:0;
+      visibility:hidden;
+      transition:opacity .14s ease, transform .14s ease, visibility .14s ease;
+      z-index:320;
+      box-shadow:0 8px 18px rgba(0,0,0,.28);
+    }
+    .rail-tooltip-chevron { color:#7ea2c1; margin-left:2px; }
+    .rail-item:hover .rail-tooltip, .rail-item:focus-visible .rail-tooltip,
+    .rail-item-flyout:hover .rail-tooltip, .rail-item-flyout:focus-within .rail-tooltip {
+      opacity:1;
+      visibility:visible;
+      transform:translateY(-50%) translateX(0);
+    }
+    .rail-flyout {
+      position:absolute;
+      left:calc(100% + 8px);
+      top:0;
+      min-width:300px;
       display:grid;
-      gap:0;
+      gap:2px;
       padding:8px;
       border:1px solid rgba(46,82,110,.8);
-      border-radius:16px;
+      border-radius:14px;
       background:linear-gradient(180deg, rgba(10,22,36,.98), rgba(6,14,24,.96));
       box-shadow:0 18px 34px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.03);
       opacity:0;
       visibility:hidden;
-      transform:translateY(6px);
+      transform:translateX(-6px);
       transition:opacity .14s ease, transform .14s ease, visibility .14s ease;
-      z-index:260;
+      z-index:330;
     }
-    .nav-item-dropdown:hover .nav-submenu,
-    .nav-item-dropdown:focus-within .nav-submenu {
+    .rail-item-flyout:hover .rail-flyout, .rail-item-flyout:focus-within .rail-flyout {
       opacity:1;
       visibility:visible;
-      transform:translateY(0);
+      transform:translateX(0);
     }
-    .nav-submenu-item {
+    .rail-flyout-item {
       display:grid;
       gap:3px;
       padding:10px 12px;
@@ -3582,20 +3636,48 @@ APP_HTML = """<!doctype html>
       color:#e5eef8;
       transition:background .14s ease, transform .14s ease;
     }
-    .nav-submenu-item:hover {
+    .rail-flyout-item:hover {
       background:linear-gradient(180deg, rgba(18,37,57,.92), rgba(10,24,39,.88));
       transform:translateX(1px);
     }
-    .nav-submenu-title {
+    .rail-flyout-title {
       font-size:13px;
       font-weight:900;
       line-height:1.2;
       color:#eff6ff;
     }
-    .nav-submenu-copy {
+    .rail-flyout-copy {
       font-size:12px;
       line-height:1.4;
       color:#9fb4cc;
+    }
+    .nav-version-pill{
+      display:inline-flex;
+      flex-direction:column;
+      align-items:center;
+      gap:2px;
+      padding:6px 8px;
+      border:1px solid #315a79;
+      border-radius:10px;
+      background:linear-gradient(180deg,#16324a,#102435);
+      color:#dbeafe;
+      box-shadow:0 6px 14px rgba(8,23,37,.26), inset 0 1px 0 rgba(255,255,255,.05);
+    }
+    .rail-version-pill{ writing-mode:horizontal-tb; max-width:56px; text-align:center; }
+    .nav-version-pill span{
+      font-size:8px;
+      font-weight:800;
+      letter-spacing:.1em;
+      text-transform:uppercase;
+      color:#8fd3ff;
+    }
+    .nav-version-pill strong{
+      font-size:9px;
+      font-weight:900;
+      color:#f8fafc;
+      letter-spacing:.02em;
+      line-height:1.2;
+      word-break:break-word;
     }
     .stack { display:grid; grid-template-columns: 1fr; gap:14px; align-items:start; }
     .invest-shell {
@@ -3608,7 +3690,7 @@ APP_HTML = """<!doctype html>
       min-width:0;
       align-self:start;
       position:sticky;
-      top:88px;
+      top:24px;
     }
     .invest-sidebar-inner {
       max-height:calc(100vh - 88px);
@@ -6860,35 +6942,16 @@ APP_HTML = """<!doctype html>
     @media (max-width: 900px) { .timeline-detail-grid,.coverage-grid,.pivot-meta-grid,.brief-strip-metrics,.coverage-row,.execution-monitor-grid,.execution-monitor-meta,.timeline-decision-grid { grid-template-columns:1fr; } }
     @media (max-width: 900px) { .confidence-grid,.primary-action-note-grid,.evidence-note-grid { grid-template-columns:1fr; } }
     @media (max-width: 900px) { .timeline-decision-hero-head { display:grid; grid-template-columns:1fr; } }
-    @media (max-width: 980px) { .nav-version-pill{display:none;} }
+    @media (max-width: 980px) { .rail-tooltip{display:none;} }
     @media (max-width: 700px) { .control-grid { grid-template-columns:1fr; } }
     @media (max-width: 560px) { .row, .row-ops { grid-template-columns: 1fr; } .wrap{padding:0 12px 24px;} }
   </style>
 </head>
 <body>
-  <div class=\"wrap\">
-    <nav class=\"topnav\">
-      <a class=\"nav-item\" href=\"/mcp\"><span class=\"nav-kicker\">MCP</span><span class=\"nav-label\">Splunk MCP Chat</span></a>
-      <a class=\"nav-item active\" href=\"/investigation\"><span class=\"nav-kicker\">Investigate</span><span class=\"nav-label\">Investigation UI</span></a>
-      <a class=\"nav-item\" href=\"/environment\"><span class=\"nav-kicker\">Profile</span><span class=\"nav-label\">Data Domains</span></a>
-      <a class=\"nav-item\" href=\"/artifacts\"><span class=\"nav-kicker\">Artifacts</span><span class=\"nav-label\">Artifact Repository</span></a>
-      <div class=\"nav-item nav-item-dropdown\">
-        <a class=\"nav-trigger\" href=\"/configure\"><span class=\"nav-kicker\">Control</span><span class=\"nav-label\">Control Center</span></a>
-        <div class=\"nav-submenu\">
-          <a class=\"nav-submenu-item\" href=\"/architecture\"><span class=\"nav-submenu-title\">Architecture</span><span class=\"nav-submenu-copy\">System flow and trust boundaries</span></a>
-          <a class=\"nav-submenu-item\" href=\"/docs\"><span class=\"nav-submenu-title\">Docs</span><span class=\"nav-submenu-copy\">Whitepapers, guides, and references</span></a>
-          <a class=\"nav-submenu-item\" href=\"/configure\"><span class=\"nav-submenu-title\">Configuration</span><span class=\"nav-submenu-copy\">Endpoints, models, validation</span></a>
-          <a class=\"nav-submenu-item\" href=\"/admin/ollama-ops\"><span class=\"nav-submenu-title\">Ollama Ops</span><span class=\"nav-submenu-copy\">GPU metrics and live Ollama logs</span></a>
-          <a class=\"nav-submenu-item\" href=\"/cases\"><span class=\"nav-submenu-title\">Case Workspace</span><span class=\"nav-submenu-copy\">Persistent cases and branch history</span></a>
-          <a class=\"nav-submenu-item\" href=\"/learning\"><span class=\"nav-submenu-title\">SPL Optimization</span><span class=\"nav-submenu-copy\">AI-driven SPL improvement and review</span></a>
-          <a class=\"nav-submenu-item\" href=\"/spl-assets\"><span class=\"nav-submenu-title\">SPL Asset Repository</span><span class=\"nav-submenu-copy\">Approved reusable SPL assets</span></a>
-          <a class=\"nav-submenu-item\" href=\"/users\"><span class=\"nav-submenu-title\">Users</span><span class=\"nav-submenu-copy\">Local users and audit trail</span></a>
-        </div>
-      </div>
-      <a class=\"nav-item\" href=\"/logout\"><span class=\"nav-kicker\">Session</span><span class=\"nav-label\">Logout</span></a>
-      <div class=\"nav-version-pill\"><span>Release</span><strong>__APP_VERSION_LABEL__</strong></div>
-    </nav>
-
+  <div class=\"app-shell\">
+    __GLOBAL_NAV__
+    <div class=\"app-main\">
+      <div class=\"wrap\">
     <div class=\"invest-shell\" id=\"invest-layout\">
       <aside class=\"invest-sidebar\">
         <div class=\"invest-sidebar-inner\">
@@ -7355,6 +7418,8 @@ APP_HTML = """<!doctype html>
         </div>
       </div>
       </main>
+    </div>
+      </div>
     </div>
   </div>
   <script>
@@ -11437,87 +11502,166 @@ DOCS_SHELL_HTML = """<!doctype html>
       background-size:cover;
       color:var(--fg);
     }}
+    .app-shell {{
+      display:grid;
+      grid-template-columns:64px minmax(0,1fr);
+      min-height:100vh;
+    }}
+    .app-main {{
+      min-width:0;
+      min-height:100vh;
+    }}
     .wrap {{ max-width: 1740px; min-height:calc(100vh - 48px); margin: 24px auto; padding: 0 28px 32px; box-sizing:border-box; }}
-    .topnav {{
-      position:relative;
-      z-index:220;
-      display:flex;
-      flex-wrap:nowrap;
-      gap:4px;
-      margin-bottom:16px;
-      justify-content:flex-start;
-      align-items:stretch;
-      padding:6px;
-      border:1px solid rgba(34,66,92,.44);
-      border-radius:22px;
-      background:linear-gradient(180deg, rgba(7,18,31,.82), rgba(5,12,23,.72));
-      box-shadow:0 18px 34px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.03);
-      backdrop-filter:blur(16px);
-    }}
-    .nav-version-pill{{ flex:0 0 auto; align-self:center; display:inline-flex; align-items:center; gap:8px; margin-left:8px; padding:8px 14px; border:1px solid #315a79; border-radius:999px; background:linear-gradient(180deg,#16324a,#102435); color:#dbeafe; box-shadow:0 10px 20px rgba(8,23,37,.26), inset 0 1px 0 rgba(255,255,255,.05); white-space:nowrap; }}
-    .nav-version-pill span{{ font-size:10px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; color:#8fd3ff; }}
-    .nav-version-pill strong{{ font-size:12px; font-weight:900; color:#f8fafc; letter-spacing:.02em; }}
-    .nav-item {{
-      position:relative;
+    .sidebar-rail {{
+      position:sticky;
+      top:0;
+      align-self:start;
       display:flex;
       flex-direction:column;
+      width:64px;
+      min-width:64px;
+      height:100vh;
+      background:#0a1628;
+      border-right:1px solid #1a2d45;
+      z-index:300;
+      box-sizing:border-box;
+    }}
+    .rail-logo {{
+      display:flex;
+      align-items:center;
       justify-content:center;
+      height:56px;
+      font-size:13px;
+      font-weight:900;
+      letter-spacing:.04em;
+      color:#f8fafc;
+      border-bottom:1px solid rgba(26,45,69,.72);
+      flex-shrink:0;
+    }}
+    .rail-items {{
+      display:flex;
+      flex-direction:column;
+      align-items:center;
       gap:2px;
-      min-width:0;
-      flex:1 1 0;
+      padding:8px 0;
+      flex:1 1 auto;
+    }}
+    .rail-footer {{
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:8px;
+      padding:8px 0 12px;
+      border-top:1px solid rgba(26,45,69,.72);
+      flex-shrink:0;
+    }}
+    .rail-item, .rail-item-flyout {{
+      position:relative;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      width:64px;
+      height:48px;
       text-decoration:none;
-      border:1px solid transparent;
-      border-radius:16px;
-      padding:8px 9px 9px;
-      background:linear-gradient(180deg, rgba(255,255,255,.015), rgba(255,255,255,.008));
-      color:#dce9f8;
-      box-shadow:inset 0 1px 0 rgba(255,255,255,.018);
-      transition:transform .16s ease, border-color .16s ease, box-shadow .16s ease, background .16s ease, color .16s ease;
-      overflow:hidden;
+      color:#8ea4ba;
+      transition:color .14s ease, background .14s ease;
     }}
-    .nav-item-dropdown {{ overflow:visible; z-index:221; }}
-    .nav-trigger {{
+    .rail-item-flyout {{ display:block; }}
+    .rail-trigger {{
       display:flex;
-      flex-direction:column;
+      align-items:center;
       justify-content:center;
-      gap:2px;
-      min-width:0;
+      width:64px;
+      height:48px;
       text-decoration:none;
       color:inherit;
     }}
-    .nav-item::after{{ content:""; position:absolute; left:12px; right:12px; bottom:0; height:2px; border-radius:999px; background:linear-gradient(90deg, rgba(96,165,250,.82), rgba(45,212,191,.82)); opacity:0; transform:scaleX(.5); transition:opacity .16s ease, transform .16s ease; }}
-    .nav-item:hover {{ border-color:rgba(81,127,163,.46); background:linear-gradient(180deg, rgba(18,35,53,.74), rgba(9,21,34,.66)); transform:translateY(-1px); box-shadow:0 10px 18px rgba(2,6,23,.16), inset 0 1px 0 rgba(255,255,255,.03); color:#f8fbff; }}
-    .nav-item:hover::after{{ opacity:.58; transform:scaleX(1); }}
-    .nav-item.active {{ border-color:rgba(61,105,136,.5); background:linear-gradient(180deg, rgba(17,37,57,.92), rgba(10,24,39,.9)); color:#ecfdf5; box-shadow:0 12px 22px rgba(2,6,23,.18), inset 0 1px 0 rgba(255,255,255,.04); }}
-    .nav-item.active::after{{ opacity:1; transform:scaleX(1); }}
-    .nav-kicker {{ font-size:9px; color:#7ea2c1; text-transform:uppercase; letter-spacing:.12em; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-    .nav-item.active .nav-kicker {{ color:#8fd3ff; }}
-    .nav-label {{ font-size:13px; font-weight:900; line-height:1.15; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-    .nav-submenu {{
+    .rail-item::before, .rail-item-flyout::before {{
+      content:"";
       position:absolute;
-      top:calc(100% + 10px);
       left:0;
-      min-width:320px;
+      top:8px;
+      bottom:8px;
+      width:3px;
+      border-radius:0 3px 3px 0;
+      background:linear-gradient(180deg,#22d3ee,#14b8a6);
+      opacity:0;
+      transition:opacity .14s ease;
+    }}
+    .rail-item:hover, .rail-item-flyout:hover, .rail-item-flyout:focus-within {{
+      color:#e5eef8;
+      background:rgba(15,29,50,.55);
+    }}
+    .rail-item.active, .rail-item-flyout.active {{
+      color:#22d3ee;
+      background:rgba(12,28,48,.72);
+    }}
+    .rail-item.active::before, .rail-item-flyout.active::before {{ opacity:1; }}
+    .rail-icon {{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      width:40px;
+      height:40px;
+      border-radius:10px;
+      transition:background .14s ease, box-shadow .14s ease;
+    }}
+    .rail-item.active .rail-icon, .rail-item-flyout.active .rail-icon {{
+      background:rgba(34,211,238,.12);
+      box-shadow:0 0 12px rgba(34,211,238,.18);
+    }}
+    .rail-svg {{ display:block; }}
+    .rail-tooltip {{
+      position:absolute;
+      left:calc(100% + 10px);
+      top:50%;
+      transform:translateY(-50%) translateX(-4px);
+      padding:7px 12px;
+      border:1px solid #2a445c;
+      border-radius:999px;
+      background:linear-gradient(180deg,#0f1d32,#0a1628);
+      color:#e5eef8;
+      font-size:12px;
+      font-weight:700;
+      white-space:nowrap;
+      pointer-events:none;
+      opacity:0;
+      visibility:hidden;
+      transition:opacity .14s ease, transform .14s ease, visibility .14s ease;
+      z-index:320;
+      box-shadow:0 8px 18px rgba(0,0,0,.28);
+    }}
+    .rail-tooltip-chevron {{ color:#7ea2c1; margin-left:2px; }}
+    .rail-item:hover .rail-tooltip, .rail-item:focus-visible .rail-tooltip,
+    .rail-item-flyout:hover .rail-tooltip, .rail-item-flyout:focus-within .rail-tooltip {{
+      opacity:1;
+      visibility:visible;
+      transform:translateY(-50%) translateX(0);
+    }}
+    .rail-flyout {{
+      position:absolute;
+      left:calc(100% + 8px);
+      top:0;
+      min-width:300px;
       display:grid;
-      gap:0;
+      gap:2px;
       padding:8px;
       border:1px solid rgba(46,82,110,.8);
-      border-radius:16px;
+      border-radius:14px;
       background:linear-gradient(180deg, rgba(10,22,36,.98), rgba(6,14,24,.96));
       box-shadow:0 18px 34px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.03);
       opacity:0;
       visibility:hidden;
-      transform:translateY(6px);
+      transform:translateX(-6px);
       transition:opacity .14s ease, transform .14s ease, visibility .14s ease;
-      z-index:260;
+      z-index:330;
     }}
-    .nav-item-dropdown:hover .nav-submenu,
-    .nav-item-dropdown:focus-within .nav-submenu {{
+    .rail-item-flyout:hover .rail-flyout, .rail-item-flyout:focus-within .rail-flyout {{
       opacity:1;
       visibility:visible;
-      transform:translateY(0);
+      transform:translateX(0);
     }}
-    .nav-submenu-item {{
+    .rail-flyout-item {{
       display:grid;
       gap:3px;
       padding:10px 12px;
@@ -11526,21 +11670,25 @@ DOCS_SHELL_HTML = """<!doctype html>
       color:#e5eef8;
       transition:background .14s ease, transform .14s ease;
     }}
-    .nav-submenu-item:hover {{
+    .rail-flyout-item:hover {{
       background:linear-gradient(180deg, rgba(18,37,57,.92), rgba(10,24,39,.88));
       transform:translateX(1px);
     }}
-    .nav-submenu-title {{
+    .rail-flyout-title {{
       font-size:13px;
       font-weight:900;
       line-height:1.2;
       color:#eff6ff;
     }}
-    .nav-submenu-copy {{
+    .rail-flyout-copy {{
       font-size:12px;
       line-height:1.4;
       color:#9fb4cc;
     }}
+    .nav-version-pill{{ display:inline-flex; flex-direction:column; align-items:center; gap:2px; padding:6px 8px; border:1px solid #315a79; border-radius:10px; background:linear-gradient(180deg,#16324a,#102435); color:#dbeafe; box-shadow:0 6px 14px rgba(8,23,37,.26), inset 0 1px 0 rgba(255,255,255,.05); }}
+    .rail-version-pill{{ writing-mode:horizontal-tb; max-width:56px; text-align:center; }}
+    .nav-version-pill span{{ font-size:8px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; color:#8fd3ff; }}
+    .nav-version-pill strong{{ font-size:9px; font-weight:900; color:#f8fafc; letter-spacing:.02em; line-height:1.2; word-break:break-word; }}
     .control-center-shell {{
       display:grid;
       grid-template-columns:280px minmax(0,1fr);
@@ -11615,8 +11763,8 @@ DOCS_SHELL_HTML = """<!doctype html>
     @media (max-width: 980px) {{
       .control-center-shell {{ grid-template-columns:1fr; }}
       .control-pane {{ position:static; }}
+      .rail-tooltip {{ display:none; }}
     }}
-    @media (max-width: 980px) {{ .nav-version-pill{{display:none;}} }}
     .layout {{ display:grid; grid-template-columns: 320px minmax(0, 1fr); gap:0; align-items:start; }}
     .card {{
       background: linear-gradient(180deg, rgba(17,24,39,.96), rgba(13,20,34,.96));
@@ -12550,10 +12698,14 @@ DOCS_SHELL_HTML = """<!doctype html>
   </style>
 </head>
 <body data-smith-user="{onboarding_user}" data-smith-role="{onboarding_role}">
-  <div class=\"wrap\">
+  <div class=\"app-shell\">
     {nav}
-    {body}
-    <div class=\"shell-footer\"><span class=\"shell-version\">A.G.E.N.T. Smith {app_version}</span></div>
+    <div class=\"app-main\">
+      <div class=\"wrap\">
+        {body}
+        <div class=\"shell-footer\"><span class=\"shell-version\">A.G.E.N.T. Smith {app_version}</span></div>
+      </div>
+    </div>
   </div>
   {onboarding_modal}
   <script type="module">
@@ -16876,6 +17028,7 @@ def _configure_page_body_rendered() -> str:
 
 APP_HTML = APP_HTML.replace("__APP_VERSION_LABEL__", html.escape(APP_VERSION_LABEL))
 APP_HTML = APP_HTML.replace("__CONFIGURE_UI_TAG__", html.escape(CONFIGURE_UI_TAG))
+APP_HTML = APP_HTML.replace("__GLOBAL_NAV__", _global_nav("investigation"))
 
 
 def _remote_log_config_status() -> dict[str, Any]:
@@ -18376,7 +18529,7 @@ def _spl_asset_repository_page_body() -> str:
     .splrepo-grid{{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);gap:20px;align-items:start;min-width:0;}}
     .splrepo-grid > *{{min-width:0;}}
     .splrepo-side{{min-width:0;overflow:hidden;}}
-    .splrepo-side-rail{{display:grid;gap:16px;position:sticky;top:88px;align-self:start;min-width:0;max-width:100%;z-index:0;}}
+    .splrepo-side-rail{{display:grid;gap:16px;position:sticky;top:24px;align-self:start;min-width:0;max-width:100%;z-index:0;}}
     .splrepo-side-rail > *{{min-width:0;max-width:100%;}}
     .splrepo-main{{display:grid;gap:18px;min-width:0;position:relative;z-index:1;}}
     .splrepo-main > *{{min-width:0;}}
