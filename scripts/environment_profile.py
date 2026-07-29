@@ -659,6 +659,8 @@ INTENT_USE_CASE_ALIASES: dict[str, tuple[str, ...]] = {
     "windows_sysmon_network_activity": ("network_connection_triage", "lateral_movement_hunt"),
     "windows_sysmon_dns_activity": ("windows_process_activity",),
     "windows_credential_access_activity": ("windows_privilege_events", "credential_abuse"),
+    "windows_process_audit_activity": ("windows_process_creation", "windows_process_activity"),
+    "windows_privilege_assigned_activity": ("windows_privilege_events", "windows_auth_failures"),
     "apache_access_top_ips": ("apache_access_top_ips", "web_scanning"),
     "apache_404_spike": ("apache_404_spike", "web_scanning"),
     "aws_cloudtrail_activity": ("aws_cloudtrail_activity", "cloud_api_activity"),
@@ -680,6 +682,8 @@ INTENT_CANONICAL_ALIASES: dict[str, str] = {
     "windows_sysmon_dns_activity_summary": "windows_sysmon_dns_activity",
     "windows_dns_activity_summary": "windows_sysmon_dns_activity",
     "windows_credential_access_summary": "windows_credential_access_activity",
+    "windows_process_audit_summary": "windows_process_audit_activity",
+    "windows_privilege_assigned_summary": "windows_privilege_assigned_activity",
     "linux_session_activity_summary": "linux_session_activity",
 }
 
@@ -774,7 +778,13 @@ def _preferred_index_order(intent: str, question: str) -> list[str]:
     if intent_canonical.startswith("linux_"):
         return ["linux"]
     if intent_canonical.startswith("windows_"):
-        return ["windows_sysmon", "windows"]
+        return ["windows_sysmon", "windows", "soc_windows", "botsv3"]
+    if intent_canonical == "aws_cloudtrail_activity":
+        return ["aws_prod", "aws_cloudtrail", "cloudtrail", "aws"]
+    if intent_canonical == "o365_management_activity":
+        return ["o365_prod", "o365"]
+    if intent_canonical == "stream_dns_activity":
+        return ["botsv3", "soc_linux", "main"]
     return []
 
 
@@ -991,11 +1001,17 @@ def _domain_supports_intent(
             or "o365:management" in st_joined
             or {"UserId", "Operation", "Workload", "ClientIP"} <= all_populated_fields
         )
-    if intent in {"windows_process_activity", "windows_sysmon_network_activity", "windows_sysmon_dns_activity"}:
+    if intent in {"windows_process_activity", "windows_sysmon_network_activity", "windows_sysmon_dns_activity", "windows_process_audit_activity"}:
         return bool(
             {"windows_process_creation", "windows_process_activity", "network_connection_triage", "lateral_movement_hunt"} & use_cases
-            or {"Image", "CommandLine", "DestinationIp", "QueryName", "Computer", "EventCode", "EventID"} & all_populated_fields
+            or {"Image", "CommandLine", "DestinationIp", "QueryName", "Computer", "EventCode", "EventID", "New_Process_Name", "Process_Command_Line"} & all_populated_fields
             or any(tok in st_joined for tok in ("xmlwineventlog", "sysmon"))
+        )
+    if intent == "windows_privilege_assigned_activity":
+        return bool(
+            {"windows_privilege_events", "windows_auth_failures"} & use_cases
+            or {"PrivilegeList", "SubjectUserName"} & all_populated_fields
+            or "xmlwineventlog" in st_joined
         )
     return True
 
@@ -1009,6 +1025,11 @@ INTENT_FALLBACK_SOURCETYPES: dict[str, tuple[str, ...]] = {
     "windows_auth_failures": ("xmlwineventlog:security", "xmlwineventlog", "XmlWinEventLog", "WinEventLog"),
     "windows_successful_logons": ("xmlwineventlog:security", "xmlwineventlog", "XmlWinEventLog", "WinEventLog"),
     "windows_process_activity": ("xmlwineventlog", "XmlWinEventLog"),
+    "windows_process_audit_activity": ("xmlwineventlog:security", "xmlwineventlog", "XmlWinEventLog"),
+    "windows_privilege_assigned_activity": ("xmlwineventlog:security", "xmlwineventlog", "XmlWinEventLog"),
+    "windows_sysmon_network_activity": ("xmlwineventlog", "XmlWinEventLog"),
+    "windows_sysmon_dns_activity": ("xmlwineventlog", "XmlWinEventLog"),
+    "windows_credential_access_activity": ("xmlwineventlog:security", "xmlwineventlog", "XmlWinEventLog"),
     "apache_access_top_ips": ("access_combined", "apache:access"),
     "apache_404_spike": ("access_combined", "apache:access"),
     "aws_cloudtrail_activity": ("aws:cloudtrail",),
@@ -1262,6 +1283,11 @@ def _is_windows_only_domain(domain: dict[str, Any]) -> bool:
     return "windows" in styles and "linux" not in styles
 
 
+def _is_linux_only_domain(domain: dict[str, Any]) -> bool:
+    styles = _domain_style_set(domain)
+    return "linux" in styles and "windows" not in styles
+
+
 def _has_windows_only_domain(domains: list[dict[str, Any]]) -> bool:
     return any(_is_windows_only_domain(domain) for domain in domains)
 
@@ -1281,13 +1307,63 @@ def _question_requests_cross_platform_auth(question: str) -> bool:
     return "linux" in platforms and "windows" in platforms
 
 
+def _question_is_bare_failed_logons_phrasing(question: str) -> bool:
+    q = str(question or "").strip().lower()
+    if any(tok in q for tok in ("show ", "list ", "across", "linux and windows", "windows and linux")):
+        return False
+    return "failed logon" in q or "failed logons" in q
+
+
+def _question_implies_windows_auth(question: str) -> bool:
+    q = str(question or "").strip().lower()
+    return any(
+        tok in q
+        for tok in (
+            "windows",
+            "wineventlog",
+            "xmlwineventlog",
+            "4625",
+            "4624",
+            "eventcode",
+            "event code",
+            "event id",
+            "sysmon",
+        )
+    )
+
+
+def _is_sysmon_only_domain(domain: dict[str, Any]) -> bool:
+    idx = str(domain.get("index", "")).strip().lower()
+    if "sysmon" in idx:
+        return True
+    sourcetypes = [str(st).strip().lower() for st in domain.get("sourcetypes", []) if str(st).strip()]
+    return bool(sourcetypes) and all("sysmon" in st or st == "xmlwineventlog" for st in sourcetypes)
+
+
+def _has_windows_auth_domain(domains: list[dict[str, Any]]) -> bool:
+    for domain in domains:
+        if not _is_windows_only_domain(domain):
+            continue
+        if _is_sysmon_only_domain(domain):
+            continue
+        return True
+    return False
+
+
 def _should_strip_cross_platform_windows_append(domains: list[dict[str, Any]], *, question: str = "") -> bool:
-    """Strip generic Windows append branches when a dedicated linux index exists without soc_windows."""
+    """Strip generic Windows append branches when the question targets Linux auth only."""
     if _question_requests_cross_platform_auth(question):
         return False
-    if _has_windows_only_domain(domains):
+    if _question_implies_windows_auth(question):
         return False
-    return _has_linux_only_domain(domains)
+    if _has_windows_auth_domain(domains):
+        return False
+    primary_idx = str((domains[0] if domains else {}).get("index", "")).strip().lower()
+    if primary_idx == "linux" and _question_is_bare_failed_logons_phrasing(question):
+        return True
+    if _has_linux_only_domain(domains) and not domains[1:]:
+        return True
+    return False
 
 
 def profile_auth_routing_intent(
@@ -1334,6 +1410,17 @@ def profile_auth_routing_intent(
     if has_windows_only and not has_linux_only:
         return fallback_windows
     if has_linux_only and has_windows_only:
+        primary_idx = str((domains[0] if domains else {}).get("index", "")).strip().lower()
+        if (
+            primary_idx == "linux"
+            and _question_is_bare_failed_logons_phrasing(question)
+            and not _question_implies_windows_auth(question)
+        ):
+            return fallback_linux
+        if _question_implies_windows_auth(question):
+            for domain in domains:
+                if _is_windows_only_domain(domain):
+                    return fallback_windows
         return candidate_intent
     return None
 
@@ -1575,8 +1662,10 @@ def apply_environment_query_constraints(
 
     primary = domains[0]
     cross_platform_auth = str(intent or "").strip() in {"failed_login_activity", "successful_login_activity"} and _question_requests_cross_platform_auth(question)
-    has_windows_only = _has_windows_only_domain(domains)
-    windows_capable = has_windows_only or (cross_platform_auth and _select_domain_by_style(domains, "windows") is not None)
+    has_windows_auth = _has_windows_auth_domain(domains)
+    windows_capable = has_windows_auth or (
+        cross_platform_auth and _select_domain_by_style(domains, "windows") is not None
+    )
     strip_windows_append = _should_strip_cross_platform_windows_append(domains, question=question)
     linux_domain = _select_domain_by_style(domains, "linux")
     windows_domain = _select_domain_by_style(domains, "windows") if windows_capable else None
@@ -1650,6 +1739,12 @@ def apply_environment_query_constraints(
         )
         rendered = re.sub(
             r"\|\s*append\s*\[\s*search\s+[^\]]*(EventCode=4625|EventID=4625|An account failed to log on|EventCode=4624|EventID=4624|An account was successfully logged on)[^\]]*\]\s*",
+            " ",
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        rendered = re.sub(
+            r"\|\s*append\s*\[\s*search\s+(?:\([^)]+\)\s+OR\s+)*\([^)]*(?:EventCode=4625|EventID=4625|EventCode=4624|EventID=4624)[^)]*\)[^\]]*\]\s*",
             " ",
             rendered,
             flags=re.IGNORECASE,

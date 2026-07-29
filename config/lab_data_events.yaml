@@ -90,10 +90,11 @@ event_sets:
 
   win_sysmon_network:
     domain: windows_sysmon
-    benchmark_case: windows_sysmon_network_30d
+    benchmark_case: windows_sysmon_network_3_24h
     format: json
     source: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
     payload:
+      Channel: "Microsoft-Windows-Sysmon/Operational"
       EventCode: "3"
       EventID: "3"
       Image: "C:\\Windows\\System32\\svchost.exe"
@@ -127,4 +128,311 @@ event_sets:
       src_ip: ["10.0.0.5", "10.0.0.88", "192.168.1.10"]
       dest_ip: ["8.8.8.8", "1.1.1.1", "9.9.9.9"]
     verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  linux_failed_ssh_soc:
+    domain: linux_auth_soc
+    benchmark_case: linux_auth_failures_24h
+    format: raw
+    source: /var/log/secure
+    templates:
+      - 'Failed password for invalid user {user} from {src_ip} port {port} ssh2'
+      - 'Failed password for {user} from {src_ip} port {port} ssh2'
+    fields:
+      user: ["admin", "root", "testuser", "deploy"]
+      src_ip: ["10.0.0.99", "10.0.0.88", "192.168.1.50"]
+      port: ["22", "2222"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator ("Failed password" OR "Invalid user") earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  apache_access_soc:
+    domain: web_access_soc
+    benchmark_case: apache_access_top_ips_24h
+    format: raw
+    source: /var/log/apache2/access.log
+    templates:
+      - '{clientip} - - [{time}] "GET /index.html HTTP/1.1" 200 1234 "-" "Mozilla/5.0"'
+    fields:
+      clientip: ["10.0.0.5", "10.0.0.12", "203.0.113.44"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  apache_error_soc:
+    domain: web_error_soc
+    benchmark_case: apache_404_spike_24h
+    format: raw
+    source: /var/log/apache2/error.log
+    templates:
+      - '[{time}] [error] [client {clientip}] File does not exist: /var/www/html/admin/login.php'
+    fields:
+      clientip: ["10.0.0.77", "198.51.100.99"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_4625_soc:
+    domain: windows_auth_soc
+    benchmark_case: windows_failed_logon_4625_24h
+    format: json
+    source: WinEventLog:Security
+    payload:
+      EventCode: "4625"
+      EventID: "4625"
+      LogName: Security
+      TargetUserName: "{user}"
+      IpAddress: "{src_ip}"
+      Source_Network_Address: "{src_ip}"
+      lab_data_source: agtsmith_generator
+    fields:
+      user: ["alice", "bob", "administrator"]
+      src_ip: ["10.0.0.55", "192.168.1.100"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4625 OR EventID=4625) earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_sysmon_soc:
+    domain: windows_sysmon_soc
+    benchmark_case: windows_sysmon_network_3_24h
+    format: json
+    source: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
+    payload:
+      Channel: "Microsoft-Windows-Sysmon/Operational"
+      EventCode: "3"
+      EventID: "3"
+      DestinationIp: "{dest_ip}"
+      DestinationPort: "{dest_port}"
+      SourceIp: "{src_ip}"
+      lab_data_source: agtsmith_generator
+    fields:
+      dest_ip: ["10.0.0.20", "192.168.1.50"]
+      dest_port: ["443", "80"]
+      src_ip: ["10.0.0.5"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator EventCode=3 earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  linux_failed_ssh_test:
+    domain: linux_auth_test
+    benchmark_case: linux_auth_failures_24h
+    format: raw
+    source: /var/log/auth.log
+    templates:
+      - 'Failed password for {user} from {src_ip} port {port} ssh2'
+    fields:
+      user: ["admin", "root", "testuser"]
+      src_ip: ["10.0.0.99", "10.0.0.88"]
+      port: ["22"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator "Failed password" earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_4625_test:
+    domain: windows_auth_test
+    benchmark_case: windows_failed_logon_4625_24h
+    format: json
+    source: WinEventLog:Security
+    payload:
+      EventCode: "4625"
+      EventID: "4625"
+      TargetUserName: "{user}"
+      IpAddress: "{src_ip}"
+      lab_data_source: agtsmith_generator
+    fields:
+      user: ["alice", "bob"]
+      src_ip: ["10.0.0.55"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4625 OR EventID=4625) earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  linux_failed_ssh_cross:
+    domain: linux_auth_test
+    benchmark_case: failed_login_cross_platform_24h
+    format: raw
+    source: /var/log/auth.log
+    templates:
+      - 'Failed password for {user} from {src_ip} port {port} ssh2'
+    fields:
+      user: ["admin", "root", "testuser"]
+      src_ip: ["10.0.0.99", "10.0.0.88"]
+      port: ["22"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator "Failed password" earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_4625_cross:
+    domain: windows_auth_test
+    benchmark_case: failed_login_cross_platform_24h
+    format: json
+    source: WinEventLog:Security
+    payload:
+      EventCode: "4625"
+      EventID: "4625"
+      TargetUserName: "{user}"
+      IpAddress: "{src_ip}"
+      lab_data_source: agtsmith_generator
+    fields:
+      user: ["alice", "bob"]
+      src_ip: ["10.0.0.55"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4625 OR EventID=4625) earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  aws_cloudtrail_api:
+    domain: aws_cloudtrail
+    benchmark_case: aws_cloudtrail_activity_24h
+    format: json
+    source: aws:cloudtrail
+    payload:
+      eventSource: "{event_source}"
+      eventName: "{event_name}"
+      sourceIPAddress: "{src_ip}"
+      userIdentity:
+        type: IAMUser
+        arn: "arn:aws:iam::123456789012:user/{user}"
+        principalId: "{user}"
+      userAgent: "aws-cli/2.0"
+      errorCode: "{error_code}"
+      lab_data_source: agtsmith_generator
+    fields:
+      event_source: ["iam.amazonaws.com", "s3.amazonaws.com", "ec2.amazonaws.com"]
+      event_name: ["CreateUser", "DeleteBucket", "RunInstances", "PutObject"]
+      src_ip: ["203.0.113.10", "198.51.100.20", "10.0.0.15"]
+      user: ["deploy", "admin", "svc_backup"]
+      error_code: ["", "AccessDenied", ""]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  o365_management_activity:
+    domain: o365_management
+    benchmark_case: o365_management_activity_24h
+    format: json
+    source: o365:management:activity
+    payload:
+      Operation: "{operation}"
+      UserId: "{user}"
+      Workload: "{workload}"
+      ResultStatus: "{status}"
+      ClientIP: "{src_ip}"
+      lab_data_source: agtsmith_generator
+    fields:
+      operation: ["UserLoggedIn", "FileDownloaded", "Add member to group.", "Set-Mailbox"]
+      user: ["alice@example.com", "bob@example.com", "admin@example.com"]
+      workload: ["AzureActiveDirectory", "SharePoint", "Exchange"]
+      status: ["Success", "Success", "Failed"]
+      src_ip: ["203.0.113.44", "10.0.0.12"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_4624:
+    domain: windows_auth_test
+    benchmark_case: windows_successful_logon_4624_24h
+    format: json
+    source: WinEventLog:Security
+    payload:
+      Channel: "Security"
+      EventCode: "4624"
+      EventID: "4624"
+      Message: "An account was successfully logged on."
+      TargetUserName: "{user}"
+      IpAddress: "{src_ip}"
+      Source_Network_Address: "{src_ip}"
+      LogonType: "10"
+      lab_data_source: agtsmith_generator
+    fields:
+      user: ["alice", "bob", "administrator"]
+      src_ip: ["10.0.0.55", "192.168.1.100"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4624 OR EventID=4624) earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_sysmon_process:
+    domain: windows_sysmon
+    benchmark_case: windows_sysmon_process_1_24h
+    format: json
+    source: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
+    payload:
+      Channel: "Microsoft-Windows-Sysmon/Operational"
+      EventCode: "1"
+      EventID: "1"
+      Image: "C:\\Windows\\System32\\{process}.exe"
+      CommandLine: "{process}.exe -arg"
+      User: "NT AUTHORITY\\SYSTEM"
+      ParentImage: "C:\\Windows\\System32\\services.exe"
+      Computer: agtsmith-win-lab
+      lab_data_source: agtsmith_generator
+    fields:
+      process: ["cmd", "powershell", "svchost"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=1 OR EventID=1) earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_sysmon_dns:
+    domain: windows_sysmon
+    benchmark_case: windows_sysmon_dns_22_24h
+    format: json
+    source: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
+    payload:
+      Channel: "Microsoft-Windows-Sysmon/Operational"
+      EventCode: "22"
+      EventID: "22"
+      Image: "C:\\Windows\\System32\\svchost.exe"
+      QueryName: "{query_name}"
+      QueryResults: "{query_result}"
+      Computer: agtsmith-win-lab
+      lab_data_source: agtsmith_generator
+    fields:
+      query_name: ["example.com", "update.microsoft.com", "malicious.test"]
+      query_result: ["10.0.0.1", "NXDOMAIN", "203.0.113.5"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=22 OR EventID=22) earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_4688:
+    domain: windows_auth
+    benchmark_case: windows_process_audit_4688_24h
+    format: json
+    source: WinEventLog:Security
+    payload:
+      EventCode: "4688"
+      EventID: "4688"
+      Message: "A new process has been created."
+      New_Process_Name: "C:\\Windows\\System32\\{process}.exe"
+      Process_Command_Line: "{process}.exe /c whoami"
+      SubjectUserName: "{user}"
+      Creator_Process_Name: "C:\\Windows\\System32\\services.exe"
+      Computer: agtsmith-win-lab
+      lab_data_source: agtsmith_generator
+    fields:
+      process: ["cmd", "powershell", "notepad"]
+      user: ["alice", "SYSTEM", "administrator"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4688 OR EventID=4688) earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_5379:
+    domain: windows_auth_test
+    benchmark_case: windows_credential_access_5379_24h
+    format: json
+    source: WinEventLog:Security
+    payload:
+      EventCode: "5379"
+      EventID: "5379"
+      SubjectUserName: "{user}"
+      TargetName: "{target}"
+      CountOfCredentialsReturned: "{count}"
+      ClientProcessId: "1234"
+      Computer: agtsmith-win-lab
+      lab_data_source: agtsmith_generator
+    fields:
+      user: ["alice", "bob"]
+      target: ["MicrosoftAccount:target=storage", "LegacyGeneric:target=slack"]
+      count: ["1", "2"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=5379 OR EventID=5379) earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  win_4672:
+    domain: windows_auth
+    benchmark_case: windows_privilege_assigned_4672_24h
+    format: json
+    source: WinEventLog:Security
+    payload:
+      EventCode: "4672"
+      EventID: "4672"
+      Message: "Special privileges assigned to new logon."
+      SubjectUserName: "{user}"
+      PrivilegeList: "SeSecurityPrivilege\tSeTakeOwnershipPrivilege"
+      Computer: agtsmith-win-lab
+      lab_data_source: agtsmith_generator
+    fields:
+      user: ["administrator", "SYSTEM", "alice"]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4672 OR EventID=4672) earliest=-24h | stats count'
     min_expected_rows: 1

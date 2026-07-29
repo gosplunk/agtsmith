@@ -24,6 +24,7 @@ from environment_profile import (
 from local_learning import approved_learning_records
 from question_intelligence import build_question_profile_text, infer_question_dimensions
 from spl_offline_docs_rag import build_offline_docs_context, offline_docs_index_available
+from windows_event_code_catalog import build_event_code_rag_context, rag_tokens_for_intent
 
 RAG_SOURCES: tuple[str, ...] = (
     "docs/reference/rag_sources/agtsmith_spl_authoring_playbook.md",
@@ -33,6 +34,7 @@ RAG_SOURCES: tuple[str, ...] = (
     "docs/reference/rag_sources/search_commands_datamodel.md",
     "docs/reference/rag_sources/search_commands_tstats.md",
     "docs/reference/rag_sources/search_commands_eventcode_4688.md",
+    "docs/reference/rag_sources/windows_event_code_catalog.md",
     "docs/reference/rag_sources/security_correlation_searches.md",
     "docs/reference/rag_sources/escu_correlation_searches.md",
     "docs/reference/rag_sources/ioc_threat_hunting_example.md",
@@ -61,7 +63,11 @@ QUESTION_HINTS: dict[str, tuple[str, ...]] = {
     "botsv3_overview": ("botsv3", "sourcetype", "stats", "overview"),
     "cloudtrail": ("cloudtrail", "aws", "eventname", "botsv3"),
     "stream_dns": ("stream:dns", "dns", "reply_code", "spath"),
-    "sysmon": ("sysmon", "xmlwineventlog", "eventcode", "process"),
+    "sysmon": ("sysmon", "xmlwineventlog", "eventcode", "eventid", "process", "queryname", "destinationip"),
+    "windows_auth": ("4625", "4624", "xmlwineventlog", "logon", "failed", "targetusername"),
+    "windows_process": ("4688", "eventid 1", "image", "commandline", "parentimage", "new_process_name"),
+    "windows_credential": ("5379", "countofcredentialsreturned", "targetname", "credential"),
+    "windows_privilege": ("4672", "privilegelist", "special privileges"),
 }
 
 
@@ -330,7 +336,14 @@ def _question_hints(question: str, *, intent: str = "") -> list[str]:
         "stream_dns_activity": "stream_dns",
         "aws_vpc_flow_activity": "cloudtrail",
         "windows_sysmon_network_activity": "sysmon",
-        "windows_process_activity": "sysmon",
+        "windows_sysmon_dns_activity": "sysmon",
+        "windows_process_activity": "windows_process",
+        "windows_process_audit_activity": "windows_process",
+        "windows_auth_failures": "windows_auth",
+        "windows_successful_logons": "windows_auth",
+        "windows_credential_access_activity": "windows_credential",
+        "windows_privilege_assigned_activity": "windows_privilege",
+        "failed_login_activity": "windows_auth",
     }
     mapped = intent_hint_map.get(str(intent or "").strip(), "")
     if mapped and mapped in QUESTION_HINTS:
@@ -340,6 +353,8 @@ def _question_hints(question: str, *, intent: str = "") -> list[str]:
             hints.update(v.lower() for v in vals)
     for token in re.findall(r"[a-z0-9_]{3,}", q):
         hints.add(token)
+    if intent:
+        hints.update(rag_tokens_for_intent(intent))
     return sorted(hints)
 
 
@@ -527,6 +542,7 @@ def build_spl_rag_context(
             max_topics=3,
             max_chars=max(360, int(max_chars * 0.45)),
         )
+    event_code_ctx = build_event_code_rag_context(question, intent=intent, max_chars=max(320, int(max_chars * 0.35)))
     question_profile = build_question_profile_text(question)
     reserve = len(constraints) + 2
     if env_ctx:
@@ -537,6 +553,8 @@ def build_spl_rag_context(
         reserve += len(skill_ctx) + 2
     if domain_ctx:
         reserve += len(domain_ctx) + 2
+    if event_code_ctx:
+        reserve += len(event_code_ctx) + 2
     if meta_ctx:
         reserve += len(meta_ctx) + 2
     if authoring_ctx:
@@ -555,6 +573,7 @@ def build_spl_rag_context(
         meta_ctx.strip(),
         question_profile.strip(),
         domain_ctx.strip(),
+        event_code_ctx.strip(),
         merged_sources.strip(),
         offline_docs_ctx.strip(),
         env_ctx.strip(),

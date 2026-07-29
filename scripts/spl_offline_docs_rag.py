@@ -12,6 +12,15 @@ from typing import Any
 
 from question_intelligence import infer_question_dimensions
 
+try:
+    from windows_event_code_catalog import intents_for_question, rag_tokens_for_intent
+except ImportError:  # pragma: no cover
+    def intents_for_question(_question: str) -> list[str]:
+        return []
+
+    def rag_tokens_for_intent(_intent: str) -> set[str]:
+        return set()
+
 INDEX_PATH_DEFAULT = Path("artifacts/knowledge/spl_offline_docs_rag_index.json")
 
 FORBIDDEN_SNIPPET_TERMS: tuple[str, ...] = (
@@ -75,6 +84,22 @@ def _question_tokens(question: str, *, intent: str = "") -> set[str]:
         tokens.update({"dns", "stream", "spath", "reply_code"})
     elif intent_name in {"windows_auth_failures", "failed_login_activity"}:
         tokens.update({"4625", "xmlwineventlog", "logon", "failed"})
+    elif intent_name in {"windows_successful_logons"}:
+        tokens.update({"4624", "xmlwineventlog", "logon", "successful"})
+    elif intent_name in {"windows_process_activity"}:
+        tokens.update({"eventid", "1", "sysmon", "image", "commandline", "parentimage"})
+    elif intent_name in {"windows_process_audit_activity"}:
+        tokens.update({"4688", "process", "command_line", "new_process_name"})
+    elif intent_name in {"windows_sysmon_network_activity"}:
+        tokens.update({"sysmon", "eventid", "3", "destinationip", "network"})
+    elif intent_name in {"windows_sysmon_dns_activity"}:
+        tokens.update({"sysmon", "eventid", "22", "queryname", "dns"})
+    elif intent_name in {"windows_credential_access_activity"}:
+        tokens.update({"5379", "credential", "targetname"})
+    elif intent_name in {"windows_privilege_assigned_activity"}:
+        tokens.update({"4672", "privilege", "privilegelist"})
+    for intent_guess in intents_for_question(question):
+        tokens.update(rag_tokens_for_intent(intent_guess))
     return tokens
 
 

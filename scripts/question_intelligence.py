@@ -262,6 +262,17 @@ def score_template_for_question(template: Any, question: str) -> tuple[int, list
         if intent == "aad_signin_activity":
             score += 18
             reasons.append("aad_signin_bonus")
+    if any(tok in q for tok in ("4688", "security audit process", "process creation audit", "audit process creation")):
+        if intent == "windows_process_audit_activity":
+            score += 22
+            reasons.append("windows_process_audit_bonus")
+        if intent == "windows_process_activity":
+            score -= 15
+            reasons.append("windows_process_audit_penalty:prefer_4688_audit")
+    if any(tok in q for tok in ("4672", "special privileges assigned", "privileges assigned to new logon")):
+        if intent == "windows_privilege_assigned_activity":
+            score += 22
+            reasons.append("windows_privilege_assigned_bonus")
     if any(tok in q for tok in ("process creation", "process activity", "sysmon process", "new processes")):
         if intent == "windows_process_activity":
             score += 18

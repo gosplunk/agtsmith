@@ -42,6 +42,28 @@ def _row_count(structured: dict[str, Any]) -> int:
     return 0
 
 
+def _aggregate_benchmark_expectations(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        benchmark_case = row.get("benchmark_case")
+        if not benchmark_case:
+            continue
+        grouped.setdefault(str(benchmark_case), []).append(row)
+
+    expectations: dict[str, dict[str, Any]] = {}
+    for benchmark_case, entries in grouped.items():
+        min_rows = max(int(entry.get("min_expected_rows", 0) or 0) for entry in entries)
+        actual_rows = min(int(entry.get("row_count") or 0) for entry in entries)
+        ok = all(bool(entry.get("ok")) for entry in entries)
+        expectations[benchmark_case] = {
+            "min_rows": min_rows,
+            "actual_rows": actual_rows,
+            "ok": ok,
+            "event_sets": [str(entry.get("event_set", "")) for entry in entries if entry.get("event_set")],
+        }
+    return expectations
+
+
 def verify(*, layout: str, skip_mcp: bool) -> dict[str, Any]:
     ui_env = load_ui_env()
     layout_name = resolve_layout_name(layout, profile_path=PROFILE_PATH_DEFAULT, ui_env=ui_env)
@@ -59,6 +81,9 @@ def verify(*, layout: str, skip_mcp: bool) -> dict[str, Any]:
         domain = str(event_set.get("domain", "")).strip()
         try:
             target = resolve_domain_target(layout_name, domain)
+        except KeyError:
+            rows.append({"event_set": name, "ok": True, "skipped": True, "reason": "domain_not_in_layout", "domain": domain})
+            continue
         except Exception as exc:
             rows.append({"event_set": name, "ok": False, "error": str(exc)})
             all_ok = False
@@ -120,15 +145,7 @@ def verify(*, layout: str, skip_mcp: bool) -> dict[str, Any]:
         "all_ok": all_ok,
         "skip_mcp": skip_mcp,
         "domains": rows,
-        "benchmark_case_expectations": {
-            str(row.get("benchmark_case")): {
-                "min_rows": row.get("min_expected_rows", 0),
-                "actual_rows": row.get("row_count"),
-                "ok": row.get("ok"),
-            }
-            for row in rows
-            if row.get("benchmark_case")
-        },
+        "benchmark_case_expectations": _aggregate_benchmark_expectations(rows),
     }
     path = write_verify_manifest(manifest)
     manifest["manifest_path"] = str(path)

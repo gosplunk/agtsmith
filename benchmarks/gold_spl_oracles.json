@@ -734,6 +734,52 @@
       ],
       "min_branches": 2,
       "allow_zero_rows": true
+    },
+    {
+      "id": "windows_sysmon_process_expanded_lab",
+      "intent": "windows_process_activity",
+      "variant": "existing_lab",
+      "question": "Show Windows Sysmon process creation events in the last 24 hours",
+      "required_substrings": [
+        "index=botsv3",
+        "EventID",
+        "Image"
+      ],
+      "forbidden_patterns": [
+        "4625"
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "windows_process_audit_expanded_lab",
+      "intent": "windows_process_audit_activity",
+      "variant": "existing_lab",
+      "question": "Show Windows Security audit process creation events (4688) in the last 24 hours",
+      "required_substrings": [
+        "4688",
+        "process_name"
+      ],
+      "forbidden_patterns": [
+        "EventID=1"
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "windows_credential_access_expanded_lab",
+      "intent": "windows_credential_access_activity",
+      "variant": "existing_lab",
+      "question": "Show Windows credential manager access events (5379) in the last 24 hours",
+      "required_substrings": [
+        "5379",
+        "TargetName"
+      ],
+      "forbidden_patterns": [
+        "4625"
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
     }
   ]
 }

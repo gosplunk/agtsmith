@@ -193,11 +193,30 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
             ("table ",),
         ),
         "windows_credential_access_activity": (
-            ("index=windows",),
+            ("index=windows", "index=botsv3", "index=soc_windows"),
             ("sourcetype=xmlwineventlog",),
             ("5379", "countofcredentialsreturned"),
             ("subjectusername",),
             ("targetname",),
+            ("table ",),
+        ),
+        "windows_process_audit_activity": (
+            ("index=windows", "index=botsv3", "index=soc_windows"),
+            ("sourcetype=xmlwineventlog",),
+            ("4688",),
+            ("new_process_name", "process_command_line"),
+            ("table ",),
+        ),
+        "windows_privilege_assigned_activity": (
+            ("index=windows", "index=botsv3", "index=soc_windows"),
+            ("sourcetype=xmlwineventlog",),
+            ("4672", "privilegelist"),
+            ("table ",),
+        ),
+        "windows_successful_logons": (
+            ("index=windows", "index=botsv3", "index=soc_windows"),
+            ("sourcetype=xmlwineventlog",),
+            ("4624", "successfully logged on"),
             ("table ",),
         ),
         "linux_privilege_escalation": (

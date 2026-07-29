@@ -62,8 +62,12 @@ def detect_layout_from_profile(profile: dict[str, Any]) -> str:
         for row in profile.get("indexes", [])
         if isinstance(row, dict) and str(row.get("index", "")).strip()
     }
+    if {"aws_prod", "o365_prod"}.issubset(index_names) and index_names & {"linux", "botsv3", "soc_linux", "soc_windows"}:
+        return "expanded_lab"
     if {"soc_linux", "soc_windows"}.issubset(index_names):
         return "multi_index_ideal"
+    if {"aws_prod", "o365_prod"}.issubset(index_names) and not (index_names & {"linux", "botsv3", "soc_linux"}):
+        return "cloud_only"
     if "linux" in index_names and "botsv3" in index_names:
         return "existing_lab"
     if "agtsmith_test" in index_names:
@@ -79,7 +83,7 @@ def resolve_layout_name(
 ) -> str:
     if layout and layout.strip():
         return layout.strip()
-    env = ui_env or load_ui_env()
+    env = load_ui_env() if ui_env is None else ui_env
     from_env = str(env.get("LAB_DATA_LAYOUT", "")).strip()
     if from_env:
         return from_env

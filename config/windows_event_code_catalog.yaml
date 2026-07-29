@@ -1,0 +1,134 @@
+# Tier-1 Windows Security + Sysmon event codes for RAG, skillpack, lab data, and benchmarks.
+# Loaded by scripts/windows_event_code_catalog.py
+
+version: "1.0"
+tier: 1
+
+entries:
+  - event_codes: ["4625"]
+    name: "Failed Logon"
+    channel: Security
+    intent: windows_auth_failures
+    mitre: ["T1110"]
+    key_fields: [TargetUserName, SubjectUserName, IpAddress, Source_Network_Address, LogonType, FailureReason, SubStatus]
+    spl_filter: '(EventCode=4625 OR EventID=4625 OR "An account failed to log on")'
+    coalesce_fields:
+      src_ip: "coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip)"
+      user_name: "coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,Caller_User_Name)"
+    anti_patterns:
+      - "do not use 4625 on linux_secure or auth.log sourcetypes"
+      - "do not answer process-creation questions with 4625"
+    lab_benchmark_case: windows_failed_logon_4625_24h
+
+  - event_codes: ["4624"]
+    name: "Successful Logon"
+    channel: Security
+    intent: windows_successful_logons
+    mitre: ["T1078"]
+    key_fields: [TargetUserName, SubjectUserName, IpAddress, Source_Network_Address, LogonType, WorkstationName, AuthenticationPackageName]
+    spl_filter: '(EventCode=4624 OR EventID=4624 OR "An account was successfully logged on")'
+    coalesce_fields:
+      src_ip: "coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip)"
+      user_name: "coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,Caller_User_Name)"
+    anti_patterns:
+      - "do not mix 4624 with failed-login strings or 4625 filters"
+    lab_benchmark_case: windows_successful_logon_4624_24h
+
+  - event_codes: ["4672"]
+    name: "Special Privileges Assigned"
+    channel: Security
+    intent: windows_privilege_assigned_activity
+    mitre: ["T1078", "T1548"]
+    key_fields: [SubjectUserName, SubjectDomainName, PrivilegeList, Computer]
+    spl_filter: '(EventCode=4672 OR EventID=4672 OR "Special privileges assigned to new logon")'
+    coalesce_fields:
+      user_name: "coalesce(SubjectUserName,TargetUserName,user,username)"
+    anti_patterns:
+      - "do not confuse 4672 privilege assignment with 4625 failed logons"
+    lab_benchmark_case: windows_privilege_assigned_4672_24h
+
+  - event_codes: ["4688"]
+    name: "Process Creation (Security Audit)"
+    channel: Security
+    intent: windows_process_audit_activity
+    mitre: ["T1059", "T1204"]
+    key_fields: [New_Process_Name, Process_Command_Line, SubjectUserName, Creator_Process_Name, Computer]
+    spl_filter: '(EventCode=4688 OR EventID=4688 OR "A new process has been created")'
+    coalesce_fields:
+      process_name: "coalesce(New_Process_Name,Process_Name,Image)"
+      command_line: "coalesce(Process_Command_Line,CommandLine)"
+      user_name: "coalesce(SubjectUserName,TargetUserName,user,username)"
+    anti_patterns:
+      - "do not answer 4688 audit questions with Sysmon EventID 1 unless Sysmon is the only source"
+      - "do not drop Process_Command_Line when process audit is requested"
+    lab_benchmark_case: windows_process_audit_4688_24h
+
+  - event_codes: ["1"]
+    name: "Sysmon Process Create"
+    channel: "Microsoft-Windows-Sysmon/Operational"
+    intent: windows_process_activity
+    mitre: ["T1059", "T1204"]
+    key_fields: [Image, CommandLine, User, ParentImage, Computer, ProcessId, ParentProcessId]
+    spl_filter: '("<EventID>1</EventID>" OR EventID=1 OR EventCode=1)'
+    coalesce_fields:
+      process_name: "coalesce(Image,ProcessName)"
+      command_line: "coalesce(CommandLine,Process_Command_Line)"
+      user_name: "coalesce(User,SubjectUserName,Account_Name)"
+    anti_patterns:
+      - "do not answer Sysmon process creation with 4625 failed logons"
+      - "preserve CommandLine and ParentImage in result shape"
+    lab_benchmark_case: windows_sysmon_process_1_24h
+
+  - event_codes: ["3"]
+    name: "Sysmon Network Connection"
+    channel: "Microsoft-Windows-Sysmon/Operational"
+    intent: windows_sysmon_network_activity
+    mitre: ["T1071", "T1021"]
+    key_fields: [Image, SourceIp, DestinationIp, DestinationPort, Protocol, Computer]
+    spl_filter: 'Channel="Microsoft-Windows-Sysmon/Operational" (EventID=3 OR EventCode=3 OR DestinationIp=*)'
+    coalesce_fields:
+      src_ip: "coalesce(SourceIp,SourceIP,src,src_ip)"
+      dest_ip: "coalesce(DestinationIp,DestinationIP,dest,dest_ip)"
+    anti_patterns:
+      - "do not replace Sysmon network events with VPC flow or firewall-only data"
+      - "do not drop Image from network connection results"
+    lab_benchmark_case: windows_sysmon_network_3_24h
+
+  - event_codes: ["22"]
+    name: "Sysmon DNS Query"
+    channel: "Microsoft-Windows-Sysmon/Operational"
+    intent: windows_sysmon_dns_activity
+    mitre: ["T1071", "T1568"]
+    key_fields: [Image, QueryName, QueryResults, Computer]
+    spl_filter: 'Channel="Microsoft-Windows-Sysmon/Operational" (EventID=22 OR EventCode=22 OR QueryName=*)'
+    coalesce_fields:
+      query_name: "coalesce(QueryName,query)"
+      process_name: "coalesce(Image,ProcessName)"
+    anti_patterns:
+      - "do not answer Sysmon DNS with stream:dns unless explicitly asked for network stream DNS"
+      - "preserve QueryName in result shape"
+    lab_benchmark_case: windows_sysmon_dns_22_24h
+
+  - event_codes: ["5379"]
+    name: "Credential Manager Access"
+    channel: Security
+    intent: windows_credential_access_activity
+    mitre: ["T1555", "T1003"]
+    key_fields: [SubjectUserName, TargetName, CountOfCredentialsReturned, ClientProcessId, Computer]
+    spl_filter: '(EventID=5379 OR EventCode=5379 OR "CountOfCredentialsReturned")'
+    coalesce_fields:
+      user_name: "coalesce(SubjectUserName,TargetUserName,user,username)"
+    anti_patterns:
+      - "do not drift from 5379 into generic 4625 authentication failures"
+    lab_benchmark_case: windows_credential_access_5379_24h
+
+intent_index:
+  windows_auth_failures: "4625"
+  windows_successful_logons: "4624"
+  windows_privilege_assigned_activity: "4672"
+  windows_process_audit_activity: "4688"
+  windows_process_activity: "1"
+  windows_sysmon_network_activity: "3"
+  windows_sysmon_dns_activity: "22"
+  windows_credential_access_activity: "5379"
+  failed_login_activity: "4625"

@@ -37,6 +37,34 @@ class LabDataConfigTests(unittest.TestCase):
         profile = {"indexes": [{"index": "agtsmith_test"}]}
         self.assertEqual(detect_layout_from_profile(profile), "minimal_ci")
 
+    def test_detect_layout_cloud_only(self) -> None:
+        profile = {"indexes": [{"index": "aws_prod"}, {"index": "o365_prod"}]}
+        self.assertEqual(detect_layout_from_profile(profile), "cloud_only")
+
+    def test_detect_layout_expanded_lab(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "linux"},
+                {"index": "botsv3"},
+                {"index": "soc_linux"},
+                {"index": "soc_windows"},
+                {"index": "aws_prod"},
+                {"index": "o365_prod"},
+            ]
+        }
+        self.assertEqual(detect_layout_from_profile(profile), "expanded_lab")
+
+    def test_resolve_domain_target_expanded_cloud(self) -> None:
+        target = resolve_domain_target("expanded_lab", "aws_cloudtrail")
+        self.assertEqual(target["index"], "aws_prod")
+        self.assertEqual(target["sourcetype"], "aws:cloudtrail")
+
+    def test_layout_index_names_expanded_lab(self) -> None:
+        names = layout_index_names("expanded_lab")
+        self.assertIn("aws_prod", names)
+        self.assertIn("soc_linux", names)
+        self.assertIn("agtsmith_test", names)
+
     def test_resolve_domain_target_existing_lab(self) -> None:
         target = resolve_domain_target("existing_lab", "linux_auth")
         self.assertEqual(target["index"], "linux")
@@ -80,6 +108,31 @@ class LabDataConfigTests(unittest.TestCase):
             assert loaded is not None
             self.assertTrue(loaded["all_ok"])
             self.assertIn("linux_auth_failures_24h", loaded["benchmark_case_expectations"])
+
+    def test_aggregate_benchmark_expectations_merges_shared_cases(self) -> None:
+        from lab_data_verify import _aggregate_benchmark_expectations
+
+        rows = [
+            {
+                "event_set": "linux_failed_ssh_cross",
+                "benchmark_case": "failed_login_cross_platform_24h",
+                "min_expected_rows": 1,
+                "row_count": 1,
+                "ok": True,
+            },
+            {
+                "event_set": "win_4625_cross",
+                "benchmark_case": "failed_login_cross_platform_24h",
+                "min_expected_rows": 1,
+                "row_count": 1,
+                "ok": True,
+            },
+        ]
+        merged = _aggregate_benchmark_expectations(rows)
+        entry = merged["failed_login_cross_platform_24h"]
+        self.assertTrue(entry["ok"])
+        self.assertEqual(entry["actual_rows"], 1)
+        self.assertEqual(len(entry["event_sets"]), 2)
 
     def test_resolve_layout_name_from_profile_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

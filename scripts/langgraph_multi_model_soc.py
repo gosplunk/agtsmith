@@ -46,6 +46,7 @@ from question_intelligence import build_question_profile_text
 from query_templates import TEMPLATES, QueryTemplate
 from query_policy import validate_query_args
 from spl_rag_context import build_resolved_domain_hints, build_spl_rag_context
+from windows_event_code_catalog import build_event_code_reviewer_context
 from spl_query_repair import attempt_query_repair_once
 from tdir_core import build_tdir_case
 from environment_profile import apply_environment_query_constraints, load_environment_profile, normalize_query_index_aliases, validate_query_against_environment
@@ -93,6 +94,8 @@ FORCE_QUERY_INTENTS = {
     "windows_sysmon_network_activity",
     "windows_sysmon_dns_activity",
     "windows_credential_access_activity",
+    "windows_process_audit_activity",
+    "windows_privilege_assigned_activity",
     "linux_auth_failures",
     "linux_successful_logins",
     "successful_login_activity",
@@ -120,6 +123,8 @@ WINDOWS_STYLE_INTENTS = {
     "windows_sysmon_network_activity",
     "windows_sysmon_dns_activity",
     "windows_credential_access_activity",
+    "windows_process_audit_activity",
+    "windows_privilege_assigned_activity",
 }
 WEB_STYLE_INTENTS = {"apache_access_top_ips", "apache_404_spike"}
 AUTH_FAMILY_INTENTS = {
@@ -143,6 +148,8 @@ DETERMINISTIC_RUN_QUERY_INTENTS = {
     "windows_sysmon_network_activity",
     "windows_sysmon_dns_activity",
     "windows_credential_access_activity",
+    "windows_process_audit_activity",
+    "windows_privilege_assigned_activity",
     "linux_privilege_escalation",
     "linux_privilege_escalation_first_seen",
     "linux_session_activity",
@@ -1182,6 +1189,8 @@ def security_review_node(state: MultiModelState) -> MultiModelState:
     rag_context = build_spl_rag_context(question, max_chars=RAG_MAX_CHARS) if RAG_ENABLED else ""
     planner_output = state.get("planner_output", {}) or {}
     writer_output = state.get("writer_output", {}) or {}
+    planner_intent = str(planner_output.get("intent", "")).strip()
+    writer_query = str((writer_output.get("tool_args", {}) or {}).get("query", ""))
     system = (
         "You are the reviewer / critic in a guarded Splunk workflow. "
         "Review the generated SPL against the planner intent and strategy. "
@@ -1202,6 +1211,11 @@ def security_review_node(state: MultiModelState) -> MultiModelState:
             "propose a safer or more informative read-only rewrite when needed",
         ],
         "rag_context": rag_context,
+        "windows_event_code_context": build_event_code_reviewer_context(
+            question=question,
+            intent=planner_intent,
+            query=writer_query,
+        ),
     }
 
     reviewer_output: dict[str, Any]
@@ -1696,6 +1710,11 @@ def evidence_review_node(state: MultiModelState) -> MultiModelState:
         "rows_returned": len(rows) if isinstance(rows, list) else 0,
         "total_rows": total_rows,
         "sample_rows": rows[:25] if isinstance(rows, list) else [],
+        "windows_event_code_context": build_event_code_reviewer_context(
+            question=str(state.get("question", "")),
+            intent=str(plan.get("intent", "")),
+            query=str((plan.get("tool_args", {}) or {}).get("query", "")),
+        ),
     }
     review: dict[str, Any]
     try:

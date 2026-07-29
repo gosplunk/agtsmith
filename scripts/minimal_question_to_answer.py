@@ -151,6 +151,13 @@ def map_question_to_template(question: str, *, profile_path: str | Path | None =
         for template in TEMPLATES:
             if template.intent == "windows_sysmon_network_activity":
                 return template
+    if "windows" in platforms and "process_activity" in activities and any(
+        tok in normalized
+        for tok in ("4688", "security audit", "process audit", "process creation audit", "audit process")
+    ):
+        for template in TEMPLATES:
+            if template.intent == "windows_process_audit_activity":
+                return template
     if "windows" in platforms and "process_activity" in activities:
         for template in TEMPLATES:
             if template.intent == "windows_process_activity":

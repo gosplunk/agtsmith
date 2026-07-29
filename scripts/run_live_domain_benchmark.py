@@ -14,10 +14,12 @@ from typing import Any
 from environment_profile import (
     PROFILE_PATH_DEFAULT,
     _fallback_domains_from_profile,
+    apply_environment_query_constraints,
     attach_semantics,
     load_environment_profile,
     resolve_authoritative_domains_for_question,
 )
+from query_templates import TEMPLATES
 from intent_field_contracts import validate_platform_sourcetype_coherence
 from minimal_question_to_answer import (
     map_question_to_template,
@@ -39,6 +41,8 @@ DEFAULT_EARLIEST_TIME = "-24h"
 EARLIEST_TIME_CHOICES = ("-24h", "-7d")
 MANIFEST_CASE_ALIASES = {
     "failed_logons_phrasing_24h": "linux_auth_failures_24h",
+    "stream_dns_overview_24h": "botsv3_stream_dns_all_time",
+    "windows_sysmon_network_30d": "windows_sysmon_network_3_24h",
 }
 
 _INDEX_RE = re.compile(r"\bindex=(?P<idx>[^\s\)|]+)", re.IGNORECASE)
@@ -58,6 +62,7 @@ class BenchmarkCase:
     allow_zero_rows: bool
     min_rows: int
     skip_if_no_windows_domain: bool = False
+    skip_if_no_cloud_domain: bool = False
     expected_min_rows_from_manifest: bool = False
 
 
@@ -163,6 +168,7 @@ def _row_to_case(row: dict[str, Any]) -> BenchmarkCase:
         min_rows=int(row.get("min_rows", 0)),
         expected_min_rows_from_manifest=bool(row.get("expected_min_rows_from_manifest", False)),
         skip_if_no_windows_domain=bool(row.get("skip_if_no_windows_domain", False)),
+        skip_if_no_cloud_domain=bool(row.get("skip_if_no_cloud_domain", False)),
     )
 
 
@@ -262,6 +268,26 @@ def _windows_domain_available(profile_path: Path) -> bool:
     return False
 
 
+def _cloud_domain_available(profile_path: Path) -> bool:
+    profile = load_environment_profile(profile_path)
+    if not isinstance(profile, dict):
+        return False
+    index_names = {
+        str(row.get("index", "")).strip().lower()
+        for row in profile.get("indexes", [])
+        if isinstance(row, dict) and str(row.get("index", "")).strip()
+    }
+    if {"aws_prod", "o365_prod"}.issubset(index_names):
+        return True
+    st_to_indexes = profile.get("sourcetype_to_indexes", {})
+    if not isinstance(st_to_indexes, dict):
+        return False
+    for st in ("aws:cloudtrail", "o365:management:activity"):
+        if st in st_to_indexes or any(k.lower() == st.lower() for k in st_to_indexes):
+            return True
+    return False
+
+
 def render_gold_spl(case: BenchmarkCase, profile_path: Path) -> tuple[str, dict[str, Any]]:
     """Render profile-resolved gold SPL for a benchmark case."""
     domains, primary = _resolve_case_domain(case, profile_path)
@@ -318,9 +344,9 @@ def render_gold_spl(case: BenchmarkCase, profile_path: Path) -> tuple[str, dict[
             '| stats count by host process_name actor tty src_ip sourcetype | sort - count'
         )
     elif intent == "windows_auth_failures":
-        win_st = _pick_sourcetype(sourcetypes, "xmlwineventlog:security", "xmlwineventlog", "WinEventLog")
+        win_st = _pick_sourcetype(sourcetypes, "xmlwineventlog:security", "xmlwineventlog", "WinEventLog", "XmlWinEventLog")
         query = (
-            f"search index={index} sourcetype={win_st} "
+            f"search index={index} (sourcetype={win_st} OR sourcetype=XmlWinEventLog OR sourcetype=xmlwineventlog OR sourcetype=WinEventLog) "
             '(EventCode=4625 OR EventID=4625 OR "An account failed to log on") '
             "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
             "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,Caller_User_Name) "
@@ -335,7 +361,16 @@ def render_gold_spl(case: BenchmarkCase, profile_path: Path) -> tuple[str, dict[
             "| timechart span=1h count by host limit=10"
         )
     else:
-        raise ValueError(f"unsupported_gold_intent:{intent}")
+        template = next((item for item in TEMPLATES if item.intent == intent), None)
+        if template is None:
+            raise ValueError(f"unsupported_gold_intent:{intent}")
+        query = apply_environment_query_constraints(
+            case.question,
+            intent,
+            template.query,
+            profile_path=profile_path,
+        )
+        meta["render_source"] = "query_template_with_profile_constraints"
 
     return query.strip(), meta
 
@@ -700,6 +735,12 @@ def run_benchmark(
         if case.skip_if_no_windows_domain and not _windows_domain_available(profile_path):
             row["status"] = "skipped"
             row["skip_reason"] = "no_windows_domain_in_profile"
+            results.append(row)
+            continue
+
+        if case.skip_if_no_cloud_domain and not _cloud_domain_available(profile_path):
+            row["status"] = "skipped"
+            row["skip_reason"] = "no_cloud_domain_in_profile"
             results.append(row)
             continue
 

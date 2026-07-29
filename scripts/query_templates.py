@@ -133,12 +133,12 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "failed logon windows",
         ),
         query=(
-            "search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
-            "(Channel=Security OR source=\"XmlWinEventLog:Security\") "
+            "search (index=windows OR index=windows_sysmon OR index=botsv3 OR index=soc_windows) "
+            "(sourcetype=XmlWinEventLog OR sourcetype=xmlwineventlog OR sourcetype=WinEventLog) "
             "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
             "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
             "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,Caller_User_Name) "
-            "| table _time index host Computer Channel EventCode EventID user_name src_ip LogonType FailureReason SubStatus "
+            "| table _time index host Computer EventCode EventID user_name src_ip LogonType FailureReason SubStatus "
             "TargetUserName SubjectUserName Account_Name Caller_User_Name Source_Network_Address IpAddress"
         ),
         tags=("windows", "auth_failure", "summary"),
@@ -155,11 +155,10 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         ),
         query=(
             "search index=windows sourcetype=XmlWinEventLog "
-            "(Channel=Security OR source=\"XmlWinEventLog:Security\") "
             "(EventCode=4624 OR EventID=4624 OR \"An account was successfully logged on\") "
             "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
             "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,Caller_User_Name) "
-            "| table _time index host Computer Channel EventCode EventID user_name src_ip LogonType WorkstationName AuthenticationPackageName IpAddress Source_Network_Address"
+            "| table _time index host Computer EventCode EventID user_name src_ip LogonType WorkstationName AuthenticationPackageName IpAddress Source_Network_Address"
         ),
         tags=("windows", "auth_success", "summary"),
         summary_hint="Focus on Windows successful logon evidence rows with host, user, source IP, and workstation context.",
@@ -174,14 +173,22 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "process monitoring windows",
         ),
         query=(
-            "search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog \"<EventID>1</EventID>\" "
-            "| rex field=_raw \"<Data Name='Image'>(?<Image>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Data Name='CommandLine'>(?<CommandLine>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Data Name='User'>(?<User>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Data Name='ParentImage'>(?<ParentImage>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Computer>(?<Computer>[^<]+)</Computer>\" "
-            "| stats count by Computer Image CommandLine User ParentImage "
-            "| sort - count | head 20"
+            "search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
+            "(\"Microsoft-Windows-Sysmon/Operational\" OR EventCode=1 OR EventID=1 OR \"<EventID>1</EventID>\") "
+            "| spath input=_raw "
+            "| search Channel=\"Microsoft-Windows-Sysmon/Operational\" (EventCode=1 OR EventID=1) "
+            "| rex field=_raw \"<Data Name='Image'>(?<Image_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name='CommandLine'>(?<CommandLine_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name='User'>(?<User_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name='ParentImage'>(?<ParentImage_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Computer>(?<Computer_xml>[^<]+)</Computer>\" "
+            "| eval Image=coalesce(Image,Image_xml) "
+            "| eval CommandLine=coalesce(CommandLine,CommandLine_xml) "
+            "| eval User=coalesce(User,User_xml) "
+            "| eval ParentImage=coalesce(ParentImage,ParentImage_xml) "
+            "| eval Computer=coalesce(Computer,Computer_xml) "
+            "| table _time Computer Image CommandLine User ParentImage "
+            "| head 20"
         ),
         tags=("windows", "investigate", "summary"),
         summary_hint="Focus on Windows Sysmon process creation with image, command line, user, and parent image context.",
@@ -197,8 +204,9 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         ),
         query=(
             "search (index=windows_sysmon OR index=windows) sourcetype=XmlWinEventLog "
-            "Channel=\"Microsoft-Windows-Sysmon/Operational\" "
-            "(EventID=3 OR EventCode=3 OR DestinationIp=*) "
+            "(\"Microsoft-Windows-Sysmon/Operational\" OR EventCode=3 OR EventID=3 OR DestinationIp=*) "
+            "| spath input=_raw "
+            "| search Channel=\"Microsoft-Windows-Sysmon/Operational\" (EventID=3 OR EventCode=3 OR DestinationIp=*) "
             "| table _time Computer Image SourceIp DestinationIp DestinationPort Protocol "
             "| head 20"
         ),
@@ -218,8 +226,9 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         ),
         query=(
             "search (index=windows_sysmon OR index=windows) sourcetype=XmlWinEventLog "
-            "Channel=\"Microsoft-Windows-Sysmon/Operational\" "
-            "(EventID=22 OR EventCode=22 OR QueryName=*) "
+            "(\"Microsoft-Windows-Sysmon/Operational\" OR EventCode=22 OR EventID=22 OR QueryName=*) "
+            "| spath input=_raw "
+            "| search Channel=\"Microsoft-Windows-Sysmon/Operational\" (EventID=22 OR EventCode=22 OR QueryName=*) "
             "| table _time Computer Image QueryName QueryResults "
             "| head 20"
         ),
@@ -237,7 +246,10 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "credential access windows",
         ),
         query=(
-            "search index=windows sourcetype=XmlWinEventLog (EventID=5379 OR EventCode=5379 OR \"CountOfCredentialsReturned\") "
+            "search index=windows sourcetype=XmlWinEventLog "
+            "(EventID=5379 OR EventCode=5379 OR \"CountOfCredentialsReturned\") "
+            "| spath input=_raw "
+            "| search (EventID=5379 OR EventCode=5379 OR CountOfCredentialsReturned=*) "
             "| rex field=_raw \"<Data Name='SubjectUserName'>(?<SubjectUserName>[^<]+)</Data>\" "
             "| rex field=_raw \"<Data Name='TargetName'>(?<TargetName>[^<]+)</Data>\" "
             "| rex field=_raw \"<Data Name='CountOfCredentialsReturned'>(?<CountOfCredentialsReturned>[^<]+)</Data>\" "
@@ -248,6 +260,43 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         tags=("windows", "investigate", "summary"),
         row_limit=50,
         summary_hint="Focus on Windows credential manager access events with user, target credential, and client process context.",
+    ),
+    QueryTemplate(
+        intent="windows_process_audit_activity",
+        keywords=(
+            "4688",
+            "process creation audit",
+            "new process has been created",
+            "windows process audit",
+            "security process creation",
+        ),
+        query=(
+            "search (index=windows OR index=botsv3 OR index=soc_windows) sourcetype=XmlWinEventLog "
+            "(EventCode=4688 OR EventID=4688 OR \"A new process has been created\") "
+            "| eval process_name=coalesce(New_Process_Name,Process_Name,Image) "
+            "| eval command_line=coalesce(Process_Command_Line,CommandLine) "
+            "| eval user_name=coalesce(SubjectUserName,TargetUserName,user,username) "
+            "| table _time Computer EventCode EventID user_name process_name command_line Creator_Process_Name"
+        ),
+        tags=("windows", "process", "audit", "summary"),
+        summary_hint="Focus on Security-audit process creation (4688) with executable path and command line.",
+    ),
+    QueryTemplate(
+        intent="windows_privilege_assigned_activity",
+        keywords=(
+            "4672",
+            "special privileges assigned",
+            "privilege assignment",
+            "admin privileges windows",
+        ),
+        query=(
+            "search (index=windows OR index=botsv3 OR index=soc_windows) sourcetype=XmlWinEventLog "
+            "(EventCode=4672 OR EventID=4672 OR \"Special privileges assigned to new logon\") "
+            "| eval user_name=coalesce(SubjectUserName,TargetUserName,user,username) "
+            "| table _time Computer user_name PrivilegeList EventCode EventID"
+        ),
+        tags=("windows", "privilege", "summary"),
+        summary_hint="Focus on special privilege assignment at logon with user and privilege list context.",
     ),
     QueryTemplate(
         intent="linux_privilege_escalation",

@@ -109,6 +109,132 @@
       "skip_if_no_windows_domain": true
     },
     {
+      "id": "windows_successful_logon_4624_24h",
+      "theme": "windows_auth",
+      "question": "Show Windows successful logon events (EventCode 4624) in the last 24 hours",
+      "intent": "windows_successful_logons",
+      "profile_domain_hints": {
+        "platform": "windows",
+        "use_cases": ["windows_auth_failures"],
+        "preferred_sourcetypes": ["XmlWinEventLog", "xmlwineventlog"]
+      },
+      "expected_shape": "table",
+      "required_terms": ["4624", "EventCode", "user_name", "src_ip"],
+      "forbidden_patterns": ["4625", "index=linux"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true,
+      "skip_if_no_windows_domain": true
+    },
+    {
+      "id": "windows_sysmon_process_1_24h",
+      "theme": "windows_sysmon",
+      "question": "Show Windows Sysmon process creation events in the last 24 hours",
+      "intent": "windows_process_activity",
+      "profile_domain_hints": {
+        "platform": "windows",
+        "use_cases": ["windows_process_creation"],
+        "preferred_sourcetypes": ["XmlWinEventLog"]
+      },
+      "expected_shape": "table",
+      "required_terms": ["EventID", "Image", "CommandLine"],
+      "forbidden_patterns": ["4625", "index=linux"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true,
+      "skip_if_no_windows_domain": true
+    },
+    {
+      "id": "windows_sysmon_network_3_24h",
+      "theme": "windows_sysmon",
+      "question": "Show Windows Sysmon network connections in the last 24 hours",
+      "intent": "windows_sysmon_network_activity",
+      "profile_domain_hints": {
+        "platform": "windows",
+        "use_cases": ["network_connection_triage"],
+        "preferred_sourcetypes": ["XmlWinEventLog"]
+      },
+      "expected_shape": "table",
+      "required_terms": ["Sysmon", "DestinationIp", "EventID"],
+      "forbidden_patterns": ["4625", "index=linux"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true,
+      "skip_if_no_windows_domain": true
+    },
+    {
+      "id": "windows_sysmon_dns_22_24h",
+      "theme": "windows_sysmon",
+      "question": "Show Windows Sysmon DNS queries in the last 24 hours",
+      "intent": "windows_sysmon_dns_activity",
+      "profile_domain_hints": {
+        "platform": "windows",
+        "use_cases": ["windows_process_activity"],
+        "preferred_sourcetypes": ["XmlWinEventLog"]
+      },
+      "expected_shape": "table",
+      "required_terms": ["QueryName", "EventID", "Sysmon"],
+      "forbidden_patterns": ["4625", "stream:dns"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true,
+      "skip_if_no_windows_domain": true
+    },
+    {
+      "id": "windows_process_audit_4688_24h",
+      "theme": "windows_process",
+      "question": "Show Windows Security audit process creation events (4688) in the last 24 hours",
+      "intent": "windows_process_audit_activity",
+      "profile_domain_hints": {
+        "platform": "windows",
+        "use_cases": ["windows_process_creation"],
+        "preferred_sourcetypes": ["XmlWinEventLog"]
+      },
+      "expected_shape": "table",
+      "required_terms": ["4688", "process_name", "command_line"],
+      "forbidden_patterns": ["4625", "EventID=1"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true,
+      "skip_if_no_windows_domain": true
+    },
+    {
+      "id": "windows_credential_access_5379_24h",
+      "theme": "windows_credential",
+      "question": "Show Windows credential manager access events (5379) in the last 24 hours",
+      "intent": "windows_credential_access_activity",
+      "profile_domain_hints": {
+        "platform": "windows",
+        "use_cases": ["windows_privilege_events"],
+        "preferred_sourcetypes": ["XmlWinEventLog"]
+      },
+      "expected_shape": "table",
+      "required_terms": ["5379", "TargetName", "SubjectUserName"],
+      "forbidden_patterns": ["4625", "index=linux"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true,
+      "skip_if_no_windows_domain": true
+    },
+    {
+      "id": "windows_privilege_assigned_4672_24h",
+      "theme": "windows_privilege",
+      "question": "Show Windows special privilege assignment events (4672) in the last 24 hours",
+      "intent": "windows_privilege_assigned_activity",
+      "profile_domain_hints": {
+        "platform": "windows",
+        "use_cases": ["windows_privilege_events"],
+        "preferred_sourcetypes": ["XmlWinEventLog"]
+      },
+      "expected_shape": "table",
+      "required_terms": ["4672", "PrivilegeList"],
+      "forbidden_patterns": ["4625", "index=linux"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true,
+      "skip_if_no_windows_domain": true
+    },
+    {
       "id": "apache_404_spike_24h",
       "theme": "web_404",
       "question": "Show 404 spike from Apache access logs in the last 24 hours",
@@ -121,6 +247,75 @@
       "expected_shape": "timechart",
       "required_terms": ["access_combined", "404", "timechart"],
       "forbidden_patterns": ["index=\\*", "index=linux"],
+      "allow_zero_rows": true,
+      "min_rows": 0
+    },
+    {
+      "id": "failed_login_cross_platform_24h",
+      "theme": "auth_cross",
+      "question": "Show failed logon activity in the last 24 hours",
+      "intent": "failed_login_activity",
+      "profile_domain_hints": {
+        "platform": "cross",
+        "use_cases": ["failed_login_activity"],
+        "preferred_sourcetypes": ["auth.log", "linux_secure", "XmlWinEventLog"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["4625", "Failed password", "stats"],
+      "forbidden_patterns": ["linux_secure.*4625", "4625.*linux_secure"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true
+    },
+    {
+      "id": "aws_cloudtrail_activity_24h",
+      "theme": "cloud_aws",
+      "question": "Show AWS CloudTrail API activity in the last 24 hours",
+      "intent": "aws_cloudtrail_activity",
+      "profile_domain_hints": {
+        "platform": "aws",
+        "use_cases": ["aws_cloudtrail_activity"],
+        "preferred_sourcetypes": ["aws:cloudtrail"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["aws:cloudtrail", "eventSource", "stats"],
+      "forbidden_patterns": ["index=\\*", "index=linux"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true,
+      "skip_if_no_cloud_domain": true
+    },
+    {
+      "id": "o365_management_activity_24h",
+      "theme": "cloud_o365",
+      "question": "Show Office 365 management activity in the last 24 hours",
+      "intent": "o365_management_activity",
+      "profile_domain_hints": {
+        "platform": "o365",
+        "use_cases": ["o365_management_activity"],
+        "preferred_sourcetypes": ["o365:management:activity"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["Operation", "stats"],
+      "forbidden_patterns": ["index=\\*", "4625"],
+      "allow_zero_rows": false,
+      "min_rows": 1,
+      "expected_min_rows_from_manifest": true,
+      "skip_if_no_cloud_domain": true
+    },
+    {
+      "id": "stream_dns_overview_24h",
+      "theme": "dns",
+      "question": "Show DNS query overview from stream dns logs in the last 24 hours",
+      "intent": "stream_dns_activity",
+      "profile_domain_hints": {
+        "platform": "network",
+        "use_cases": ["stream_dns_activity"],
+        "preferred_sourcetypes": ["stream:dns"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["stream:dns", "stats"],
+      "forbidden_patterns": ["index=\\*"],
       "allow_zero_rows": true,
       "min_rows": 0
     }

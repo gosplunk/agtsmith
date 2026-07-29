@@ -24,18 +24,18 @@ from environment_profile import PROFILE_PATH_DEFAULT  # noqa: E402
 
 
 def _auth_headers(ui_env: dict[str, str]) -> dict[str, str]:
-    token = str(ui_env.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
     user = str(ui_env.get("SPLUNK_USER", ui_env.get("SOC_UI_AUTH_USERNAME", ""))).strip()
-    password = str(ui_env.get("SPLUNK_PASS", ui_env.get("SOC_UI_AUTH_PASSWORD", ""))).strip()
+    password = str(ui_env.get("SPLUNK_PASS", ui_env.get("SOC_UI_AUTH_PASSWORD", ui_env.get("SPLUNK_PASSWORD", "")))).strip()
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    elif user and password:
+    if user and password:
         cred = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
         headers["Authorization"] = f"Basic {cred}"
-    else:
-        raise RuntimeError("provision_auth_missing")
-    return headers
+        return headers
+    token = str(ui_env.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        return headers
+    raise RuntimeError("provision_auth_missing")
 
 
 def _ssl_context() -> ssl.SSLContext:

@@ -23,7 +23,7 @@ layouts:
         sourcetype: linux_secure
       windows_sysmon:
         index: botsv3
-        sourcetype: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
+        sourcetype: XmlWinEventLog
       stream_dns:
         index: botsv3
         sourcetype: stream:dns
@@ -50,6 +50,9 @@ layouts:
       windows_auth:
         index: soc_windows
         sourcetype: XmlWinEventLog:Security
+      windows_sysmon:
+        index: soc_windows
+        sourcetype: XmlWinEventLog
 
   minimal_ci:
     description: "Single test index — all sourcetypes in agtsmith_test"
@@ -71,3 +74,82 @@ layouts:
       linux_secure:
         index: agtsmith_test
         sourcetype: linux_secure
+
+  cloud_only:
+    description: "Cloud-only indexes — AWS CloudTrail + O365 management"
+    provision_indexes:
+      - aws_prod
+      - o365_prod
+    indexes:
+      aws_cloudtrail:
+        index: aws_prod
+        sourcetype: aws:cloudtrail
+      o365_management:
+        index: o365_prod
+        sourcetype: o365:management:activity
+
+  expanded_lab:
+    description: "Superset heterogeneous lab — on-prem + multi-index + cloud indexes for expanded benchmarking"
+    provision_indexes:
+      - linux
+      - botsv3
+      - soc_linux
+      - soc_windows
+      - agtsmith_test
+      - aws_prod
+      - o365_prod
+    indexes:
+      linux_auth:
+        index: linux
+        sourcetype: auth.log
+      linux_syslog:
+        index: linux
+        sourcetype: syslog
+      web_access:
+        index: botsv3
+        sourcetype: access_combined
+      windows_auth:
+        index: botsv3
+        sourcetype: XmlWinEventLog
+      linux_secure:
+        index: botsv3
+        sourcetype: linux_secure
+      windows_sysmon:
+        index: botsv3
+        sourcetype: XmlWinEventLog
+      stream_dns:
+        index: botsv3
+        sourcetype: stream:dns
+      linux_auth_soc:
+        index: soc_linux
+        sourcetype: linux_secure
+      linux_syslog_soc:
+        index: soc_linux
+        sourcetype: syslog
+      web_access_soc:
+        index: soc_linux
+        sourcetype: access_combined
+      web_error_soc:
+        index: soc_linux
+        sourcetype: apache:error
+      windows_auth_soc:
+        index: soc_windows
+        sourcetype: XmlWinEventLog:Security
+      windows_sysmon_soc:
+        index: soc_windows
+        sourcetype: XmlWinEventLog
+      linux_auth_test:
+        index: agtsmith_test
+        sourcetype: auth.log
+      web_access_test:
+        index: agtsmith_test
+        sourcetype: access_combined
+      windows_auth_test:
+        index: agtsmith_test
+        sourcetype: XmlWinEventLog
+      aws_cloudtrail:
+        index: aws_prod
+        sourcetype: aws:cloudtrail
+      o365_management:
+        index: o365_prod
+        sourcetype: o365:management:activity

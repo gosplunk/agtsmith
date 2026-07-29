@@ -149,6 +149,13 @@ def generate(
         event_set = sets_raw.get(name)
         if not isinstance(event_set, dict):
             continue
+        domain = str(event_set.get("domain", "")).strip()
+        try:
+            resolve_domain_target(layout_name, domain)
+        except KeyError:
+            continue
+        except Exception:
+            continue
         planned.extend(
             _build_events_for_set(
                 event_set,
