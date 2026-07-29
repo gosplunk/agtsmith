@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 from botsv3_catalog import extract_explicit_botsv3_sourcetype
 from question_intelligence import infer_question_dimensions, infer_time_window, score_template_for_question
-from query_templates import DEFAULT_TEMPLATE, TEMPLATES, QueryTemplate
+from query_templates import DEFAULT_TEMPLATE, TEMPLATES, QueryTemplate, apply_cardinality_transform, question_requests_cardinality
 from runtime_config import get_ollama_host, get_runtime_secret, get_splunk_mcp_url
 
 OLLAMA_HOST = get_ollama_host()
@@ -373,6 +373,8 @@ def template_to_query_args(
         query = _apply_dataset_scope(query, question)
         query = _apply_host_scope(query, question)
         query = _apply_user_scope(query, question)
+        if question_requests_cardinality(question):
+            query = apply_cardinality_transform(query)
         earliest_time, latest_time = infer_time_window(
             question,
             default_earliest=template.earliest_time,

@@ -6943,6 +6943,13 @@ APP_HTML = """<!doctype html>
     @media (max-width: 900px) { .confidence-grid,.primary-action-note-grid,.evidence-note-grid { grid-template-columns:1fr; } }
     @media (max-width: 900px) { .timeline-decision-hero-head { display:grid; grid-template-columns:1fr; } }
     @media (max-width: 980px) { .rail-tooltip{display:none;} }
+    @media (max-width: 980px) {
+      .rail-item-flyout.open .rail-flyout {
+        opacity:1;
+        visibility:visible;
+        transform:translateX(0);
+      }
+    }
     @media (max-width: 700px) { .control-grid { grid-template-columns:1fr; } }
     @media (max-width: 560px) { .row, .row-ops { grid-template-columns: 1fr; } .wrap{padding:0 12px 24px;} }
   </style>
@@ -12765,6 +12772,38 @@ DOCS_SHELL_HTML = """<!doctype html>
         if(event.target === backdrop) {{
           window.sessionStorage.setItem(skipKey, '1');
           close();
+        }}
+      }});
+    }})();
+    (() => {{
+      const flyouts = document.querySelectorAll('.rail-item-flyout');
+      if(!flyouts.length) {{
+        return;
+      }}
+      const closeAll = (except) => {{
+        flyouts.forEach((node) => {{
+          if(node !== except) {{
+            node.classList.remove('open');
+          }}
+        }});
+      }};
+      flyouts.forEach((node) => {{
+        const trigger = node.querySelector('.rail-trigger');
+        if(!trigger) {{
+          return;
+        }}
+        trigger.addEventListener('click', (event) => {{
+          if(window.matchMedia('(max-width: 980px)').matches) {{
+            event.preventDefault();
+            const willOpen = !node.classList.contains('open');
+            closeAll(node);
+            node.classList.toggle('open', willOpen);
+          }}
+        }});
+      }});
+      document.addEventListener('click', (event) => {{
+        if(!event.target.closest('.rail-item-flyout')) {{
+          closeAll(null);
         }}
       }});
     }})();

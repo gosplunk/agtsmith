@@ -87,7 +87,7 @@ def infer_question_dimensions(question: str) -> dict[str, Any]:
         activities.append("session_activity")
     if any(tok in q for tok in ("linux audit", "auditd", "linux_audit", "audit operations")):
         activities.append("audit_activity")
-    if any(tok in q for tok in ("client ip", "top ips", "source ip", "web access", "access log")):
+    if any(tok in q for tok in ("client ip", "top ips", "source ip", "web access", "access log", "hits", "hit count", "page views", "requests")):
         activities.append("web_access")
     if "404" in q:
         activities.append("web_404")
@@ -113,9 +113,21 @@ def infer_question_dimensions(question: str) -> dict[str, Any]:
         activities.append("metadata")
 
     shapes: list[str] = []
+    if any(
+        phrase in q
+        for phrase in (
+            "how many",
+            "how much",
+            "total number",
+            "total count",
+            "count of",
+            "number of",
+        )
+    ):
+        shapes.append("cardinality")
     if any(tok in q for tok in ("first time", "first seen", "newly observed", "first observed", "new ")):
         shapes.append("first_seen")
-    if any(tok in q for tok in ("top", "most", "highest")):
+    if "cardinality" not in shapes and any(tok in q for tok in ("top", "most", "highest")):
         shapes.append("top_n")
     if any(tok in q for tok in ("timeline", "spike", "trend", "over time")):
         shapes.append("time_series")
@@ -315,6 +327,23 @@ def score_template_for_question(template: Any, question: str) -> tuple[int, list
         if intent in {"inventory", "metadata_inventory", "top_indexes"}:
             score -= 15
             reasons.append("cloudtrail_event_service_penalty:avoid_metadata_inventory")
+    if "cardinality" in shapes:
+        if "top_n" in tags and "top_n" in shapes:
+            score -= 18
+            reasons.append("cardinality_penalty:avoid_top_n_templates")
+        if "first_seen" in intent:
+            score -= 16
+            reasons.append("cardinality_penalty:avoid_first_seen_templates")
+        if "summary" in tags or intent.endswith("_activity"):
+            score += 8
+            reasons.append("cardinality_bonus:summary_shape")
+        if "apache" in q and "web_access" in activities:
+            if intent == "apache_access_top_ips":
+                score += 22
+                reasons.append("cardinality_apache_hits_bonus")
+            if intent == "stream_http_activity":
+                score -= 18
+                reasons.append("cardinality_apache_penalty:prefer_access_top_ips")
 
     return score, reasons
 
@@ -325,6 +354,8 @@ def build_question_profile_text(question: str) -> str:
     lines.append(f"- platforms={', '.join(dims.get('platforms', [])) or 'none'}")
     lines.append(f"- activities={', '.join(dims.get('activities', [])) or 'none'}")
     lines.append(f"- shapes={', '.join(dims.get('shapes', [])) or 'none'}")
+    if "cardinality" in dims.get("shapes", []):
+        lines.append("- cardinality_hint=return scalar total via '| stats count' (avoid table or count-by breakdowns)")
     if dims.get("entities"):
         lines.append(f"- entities={', '.join(dims.get('entities', []))}")
     return "\n".join(lines)

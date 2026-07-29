@@ -49,6 +49,37 @@ class QuestionRoutingTests(unittest.TestCase):
         args = template_to_query_args(template, question, apply_environment=False)
         self.assertIn("index=windows", str(args.get("query", "")))
 
+    def test_cardinality_windows_failed_logons_returns_scalar_count(self) -> None:
+        question = "How many failed logons did I have on windows in the last 7 days"
+        template = map_question_to_template(question)
+        self.assertEqual(template.intent, "windows_auth_failures")
+        args = template_to_query_args(template, question, apply_environment=False)
+        query = str(args.get("query", ""))
+        self.assertIn("| stats count", query)
+        self.assertNotIn("stats count by", query.lower())
+        self.assertNotIn("| table ", query.lower())
+        self.assertEqual(args.get("earliest_time"), "-7d")
+
+    def test_cardinality_linux_failed_logons_returns_scalar_count(self) -> None:
+        question = "How many failed logons did I have on linux in the last 7 days"
+        template = map_question_to_template(question)
+        self.assertEqual(template.intent, "linux_auth_failures")
+        args = template_to_query_args(template, question, apply_environment=False)
+        query = str(args.get("query", ""))
+        self.assertIn("| stats count", query)
+        self.assertNotIn("stats count by", query.lower())
+        self.assertIn("Failed password", query)
+
+    def test_cardinality_apache_hits_returns_scalar_count(self) -> None:
+        question = "How many hits did I have on my apache website in the last 3 days"
+        template = map_question_to_template(question)
+        self.assertEqual(template.intent, "apache_access_top_ips")
+        args = template_to_query_args(template, question, apply_environment=False)
+        query = str(args.get("query", ""))
+        self.assertIn("| stats count", query)
+        self.assertNotIn("stats count by", query.lower())
+        self.assertEqual(args.get("earliest_time"), "-3d")
+
     def test_cross_platform_successful_login_uses_success_intent(self) -> None:
         question = "Show successful login activity in the last 24 hours"
         template = map_question_to_template(question)

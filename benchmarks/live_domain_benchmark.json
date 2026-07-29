@@ -318,6 +318,55 @@
       "forbidden_patterns": ["index=\\*"],
       "allow_zero_rows": true,
       "min_rows": 0
+    },
+    {
+      "id": "cardinality_windows_failed_logons_7d",
+      "theme": "windows_auth",
+      "question": "How many failed logons did I have on windows in the last 7 days",
+      "intent": "windows_auth_failures",
+      "profile_domain_hints": {
+        "platform": "windows",
+        "use_cases": ["windows_auth_failures"],
+        "preferred_sourcetypes": ["xmlwineventlog", "WinEventLog", "xmlwineventlog:security"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["4625", "stats count"],
+      "forbidden_patterns": ["stats count by", "\\| table "],
+      "allow_zero_rows": true,
+      "min_rows": 0,
+      "skip_if_no_windows_domain": true
+    },
+    {
+      "id": "cardinality_linux_failed_logons_7d",
+      "theme": "auth",
+      "question": "How many failed logons did I have on linux in the last 7 days",
+      "intent": "linux_auth_failures",
+      "profile_domain_hints": {
+        "platform": "linux",
+        "use_cases": ["linux_auth_failures"],
+        "preferred_sourcetypes": ["auth.log", "linux_secure"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["Failed password", "stats count"],
+      "forbidden_patterns": ["stats count by", "4625", "\\| table "],
+      "allow_zero_rows": true,
+      "min_rows": 0
+    },
+    {
+      "id": "cardinality_apache_hits_3d",
+      "theme": "web",
+      "question": "How many hits did I have on my apache website in the last 3 days",
+      "intent": "apache_access_top_ips",
+      "profile_domain_hints": {
+        "platform": "web",
+        "use_cases": ["apache_access_top_ips"],
+        "preferred_sourcetypes": ["access_combined", "apache:access"]
+      },
+      "expected_shape": "stats",
+      "required_terms": ["access_combined", "stats count"],
+      "forbidden_patterns": ["stats count by", "\\| table "],
+      "allow_zero_rows": true,
+      "min_rows": 0
     }
   ]
 }

@@ -1705,6 +1705,12 @@ def apply_environment_query_constraints(
     windows_intent = str(intent or "").strip().startswith("windows_")
     if windows_index_clause and (windows_capable or windows_intent):
         rendered = re.sub(
+            r"\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=botsv3)?(?:\s+OR\s+index=soc_windows)?(?:\s+OR\s+index=winnetmon)?\)",
+            windows_index_clause,
+            rendered,
+            flags=re.IGNORECASE,
+        )
+        rendered = re.sub(
             r"\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=winnetmon)?\)",
             windows_index_clause,
             rendered,
@@ -1714,6 +1720,12 @@ def apply_environment_query_constraints(
         rendered = re.sub(r"\bindex=windows\b", windows_index_clause, rendered, flags=re.IGNORECASE)
         rendered = re.sub(r"\bindex=winnetmon\b", windows_index_clause, rendered, flags=re.IGNORECASE)
     elif windows_intent and windows_index:
+        rendered = re.sub(
+            r"\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=botsv3)?(?:\s+OR\s+index=soc_windows)?(?:\s+OR\s+index=winnetmon)?\)",
+            f"index={windows_index}",
+            rendered,
+            flags=re.IGNORECASE,
+        )
         rendered = re.sub(
             r"\(index=windows(?:\s+OR\s+index=windows_sysmon)?(?:\s+OR\s+index=winnetmon)?\)",
             f"index={windows_index}",
@@ -1789,11 +1801,34 @@ def apply_environment_query_constraints(
 
     if active_index and not any(idx in rendered for idx in (f"index={active_index}",)):
         q_indexes = extract_indexes_from_query(rendered)
-        generic_only = q_indexes and all(idx in {"linux", "windows", "windows_sysmon", "winnetmon", "main"} for idx in q_indexes)
+        generic_only = q_indexes and all(
+            idx in {"linux", "windows", "windows_sysmon", "winnetmon", "main", "botsv3", "soc_windows"}
+            for idx in q_indexes
+        )
         if generic_only:
-            rendered = re.sub(r"\bindex=(linux|windows|windows_sysmon|winnetmon|main)\b", f"index={active_index}", rendered, flags=re.IGNORECASE)
+            rendered = re.sub(
+                r"\bindex=(linux|windows|windows_sysmon|winnetmon|main|botsv3|soc_windows)\b",
+                f"index={active_index}",
+                rendered,
+                flags=re.IGNORECASE,
+            )
 
     rendered = re.sub(r"\(index=([A-Za-z0-9_:-]+)\s+OR\s+index=\1\)", r"index=\1", rendered, flags=re.IGNORECASE)
+
+    def _collapse_uniform_index_or(match: re.Match[str]) -> str:
+        indexes = re.findall(r"index=([^\s)]+)", match.group(0), flags=re.IGNORECASE)
+        normalized = {idx.lower() for idx in indexes}
+        if len(normalized) == 1 and indexes:
+            return f"index={indexes[0]}"
+        return match.group(0)
+
+    rendered = re.sub(
+        r"\(\s*(?:index=[^\s)]+\s*(?:OR\s*)?)+\s*\)",
+        _collapse_uniform_index_or,
+        rendered,
+        count=1,
+        flags=re.IGNORECASE,
+    )
 
     rendered = re.sub(r"\s{2,}", " ", rendered).strip()
     return rendered

@@ -6,6 +6,7 @@ This module keeps intent-routing metadata separate from pipeline execution code.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -655,3 +656,31 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
 
 
 DEFAULT_TEMPLATE = TEMPLATES[-2]
+
+
+def question_requests_cardinality(question: str) -> bool:
+    q = (question or "").strip().lower()
+    return any(
+        phrase in q
+        for phrase in (
+            "how many",
+            "how much",
+            "total number",
+            "total count",
+            "count of",
+            "number of",
+        )
+    )
+
+
+def apply_cardinality_transform(query: str) -> str:
+    """Collapse breakdown/table queries to a scalar total count."""
+    rendered = str(query or "").strip()
+    if not rendered:
+        return rendered
+    rendered = re.sub(r"\|\s*stats\s+count\s+by\s+[^|]+", "| stats count", rendered, flags=re.IGNORECASE)
+    rendered = re.sub(r"\|\s*timechart\s+[^|]+", "| stats count", rendered, flags=re.IGNORECASE)
+    rendered = re.sub(r"\|\s*table\s+[^|]+", "| stats count", rendered, flags=re.IGNORECASE)
+    rendered = re.sub(r"\|\s*sort\s+-?\s*count(?:\s*\|\s*head\s+\d+)?", "", rendered, flags=re.IGNORECASE)
+    rendered = re.sub(r"\|\s*head\s+\d+\s*$", "", rendered, flags=re.IGNORECASE)
+    return re.sub(r"\s{2,}", " ", rendered).strip()

@@ -780,6 +780,57 @@
       ],
       "min_branches": 1,
       "allow_zero_rows": true
+    },
+    {
+      "id": "cardinality_windows_failed_logons_7d",
+      "intent": "windows_auth_failures",
+      "variant": "existing_lab",
+      "question": "How many failed logons did I have on windows in the last 7 days",
+      "required_substrings": [
+        "4625",
+        "| stats count",
+        "index=botsv3"
+      ],
+      "forbidden_patterns": [
+        "stats count by",
+        "\\| table "
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "cardinality_linux_failed_logons_7d",
+      "intent": "linux_auth_failures",
+      "variant": "existing_lab",
+      "question": "How many failed logons did I have on linux in the last 7 days",
+      "required_substrings": [
+        "Failed password",
+        "| stats count",
+        "index=linux"
+      ],
+      "forbidden_patterns": [
+        "stats count by",
+        "4625",
+        "\\| table "
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
+    },
+    {
+      "id": "cardinality_apache_hits_3d",
+      "intent": "apache_access_top_ips",
+      "variant": "existing_lab",
+      "question": "How many hits did I have on my apache website in the last 3 days",
+      "required_substrings": [
+        "access_combined",
+        "| stats count"
+      ],
+      "forbidden_patterns": [
+        "stats count by",
+        "\\| table "
+      ],
+      "min_branches": 1,
+      "allow_zero_rows": true
     }
   ]
 }
