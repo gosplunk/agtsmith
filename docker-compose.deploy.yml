@@ -22,6 +22,7 @@ services:
       - agtsmith-case-db
     network_mode: host
     environment:
+      PYTHONPATH: /app:/app/scripts
       AGTSMITH_CASE_DB_HOST: 127.0.0.1
       AGTSMITH_CASE_DB_PORT: "5432"
       AGTSMITH_CASE_DB_NAME: "${AGTSMITH_CASE_DB_NAME:-agtsmith}"

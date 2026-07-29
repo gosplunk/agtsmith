@@ -447,7 +447,7 @@ spl-multi-layout-matrix:
 
 lab-data-matrix-bootstrap:
 	@echo "[lab-data-matrix-bootstrap] bootstrap each lab layout and run offline matrix"
-	@for layout in existing_lab multi_index_ideal minimal_ci; do \
+	@for layout in existing_lab multi_index_ideal minimal_ci cloud_only; do \
 		echo "[lab-data-matrix-bootstrap] layout=$$layout"; \
 		$(MAKE) --no-print-directory lab-data-provision LAB_DATA_LAYOUT=$$layout || exit 1; \
 		$(MAKE) --no-print-directory lab-data-generate LAB_DATA_LAYOUT=$$layout || exit 1; \
@@ -456,6 +456,27 @@ lab-data-matrix-bootstrap:
 	@$(MAKE) --no-print-directory env-profile-refresh
 	@$(MAKE) --no-print-directory spl-multi-layout-matrix
 	@echo "[lab-data-matrix-bootstrap] complete"
+
+lab-data-hec-sync:
+	@echo "[lab-data-hec-sync] update HEC allowed indexes for layout=$(LAB_DATA_LAYOUT)"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/lab_data/setup_hec.py --layout "$(LAB_DATA_LAYOUT)"
+	@echo "[lab-data-hec-sync] complete"
+
+lab-data-expanded-bootstrap: lab-data-refresh-mcp-token
+	@echo "[lab-data-expanded-bootstrap] provision expanded heterogeneous lab indexes and onboard all domains"
+	@$(MAKE) --no-print-directory lab-data-provision LAB_DATA_LAYOUT=expanded_lab
+	@$(MAKE) --no-print-directory lab-data-hec-sync LAB_DATA_LAYOUT=expanded_lab
+	@$(MAKE) --no-print-directory lab-data-generate LAB_DATA_LAYOUT=expanded_lab LAB_DATA_HOURS=24 LAB_DATA_COUNT=80
+	@$(MAKE) --no-print-directory lab-data-verify LAB_DATA_LAYOUT=expanded_lab
+	@$(MAKE) --no-print-directory env-profile-refresh
+	@echo "[lab-data-expanded-bootstrap] complete"
+
+spl-expanded-live-benchmark: lab-data-expanded-bootstrap
+	@echo "[spl-expanded-live-benchmark] live MCP domain benchmark against expanded lab profile"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_live_domain_benchmark.py \
+		--out-root $(LIVE_DOMAIN_BENCHMARK_OUT) --cases-from-json
+	@$(MAKE) --no-print-directory spl-multi-layout-matrix
+	@echo "[spl-expanded-live-benchmark] complete"
 
 check-gold-oracles-live:
 	@echo "[check-gold-oracles-live] validating gold SPL oracles against live environment profile when present"
