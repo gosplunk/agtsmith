@@ -10,7 +10,7 @@ newgrp docker   # or log out/in
 docker ps
 ```
 
-## 2. Local config + MCP token
+## 2. Host-runtime/local-lab config (optional for Docker)
 
 ```bash
 export SPLUNK_USER=dev SPLUNK_PASS='<sandbox-password>'
@@ -28,6 +28,8 @@ make docker-deploy-manual
 ```
 
 Open http://127.0.0.1:8787 — complete first-run setup if prompted, then paste values from `config/ui.env` in Configuration.
+The deployment container uses a private named config volume; `config/ui.env` is
+not bind-mounted into Docker.
 
 ## 4. Ollama
 

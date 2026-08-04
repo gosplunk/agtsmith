@@ -1,0 +1,216 @@
+version: 1
+generator_version: "1.0"
+assignment:
+  seed: 20260803
+  train_percent: 70
+  dev_percent: 15
+  holdout_percent: 15
+mutations:
+  - base
+  - paraphrase
+  - time_shift
+  - scope_removal
+  - field_synonym
+  - negative_platform
+time_windows:
+  base:
+    earliest: -7d
+    latest: now
+  shifted:
+    earliest: -7d
+    latest: now
+negative_platforms:
+  linux: windows
+  windows: linux
+  cloud: endpoint
+  dns: cloud
+  web: cloud
+  generic: cloud
+role_aliases:
+  entity:
+    - src_ip
+    - clientip
+    - src
+    - sourceIPAddress
+    - ipAddress
+    - IpAddress
+    - ClientIP
+    - Source_Network_Address
+    - client_ip
+  user:
+    - username
+    - user
+    - UserId
+    - TargetUserName
+    - userPrincipalName
+    - principal
+    - actor.alternateId
+  host:
+    - host
+    - dest
+    - dest_ip
+    - Computer
+  operation:
+    - operation
+    - eventName
+    - action
+    - verb
+    - method
+    - http_method
+  state:
+    - result
+    - result_state
+    - status
+    - status_code
+    - errorCode
+    - action
+  resource:
+    - resource
+    - resourceName
+    - object
+    - uri_path
+    - url
+  query:
+    - query
+    - query_name
+    - queryName
+    - domain
+    - rrname
+  answer:
+    - answer
+    - answers
+    - answer_data
+    - rdata
+  resolver:
+    - resolver
+    - resolver_ip
+    - dest_ip
+    - dest
+  port:
+    - dest_port
+    - dstport
+    - port
+field_synonyms:
+  entity: source
+  user: account
+  host: system
+  operation: activity
+  state: outcome
+  resource: target
+  query: requested domain
+  answer: response value
+  resolver: DNS server
+  port: service port
+families:
+  top_n_cardinality:
+    builder: top_n_cardinality
+    required_role_count: 2
+    eligible_roles: [entity, user, host, operation, resource, query, port]
+    threshold: 3
+    top_n: 10
+    question: >-
+      In index {index} sourcetype {sourcetype}, show the top {top_n} {dimension_label}
+      values with at least {threshold} events and include distinct {secondary_label} cardinality
+      over the last 24 hours.
+    paraphrase: >-
+      Rank the busiest {dimension_label} values in {index}/{sourcetype}; keep only those
+      reaching {threshold} records and report how many unique {secondary_label} values each saw.
+    scope_free: >-
+      Show the top {top_n} {dimension_label} values with at least {threshold} events and
+      include distinct {secondary_label} cardinality over the last 24 hours.
+
+  multivalue_intersection:
+    builder: multivalue_intersection
+    required_role_count: 3
+    eligible_roles: [entity, user, host, operation, resource, query, answer, resolver, port]
+    threshold: 2
+    question: >-
+      For index {index} sourcetype {sourcetype}, group by {dimension_label}, collect the
+      observed {first_value_label} and {second_value_label} values, and count events where
+      both are present during the last 24 hours.
+    paraphrase: >-
+      Within {index}/{sourcetype}, identify {dimension_label} values that connect
+      {first_value_label} with {second_value_label}, retaining both value sets and their overlap count.
+    scope_free: >-
+      Group by {dimension_label}, collect the observed {first_value_label} and
+      {second_value_label} values, and count events where both are present during the last 24 hours.
+
+  time_bin_anomaly:
+    builder: time_bin_anomaly
+    required_roles: [state]
+    dimension_roles: [entity, user, host, operation, resource, query, resolver]
+    threshold_percent: 20
+    span: 15m
+    question: >-
+      In index {index} sourcetype {sourcetype}, find 15-minute buckets by {dimension_label}
+      where {state_label}={state_value} exceeds {threshold_percent}% of total bucket volume.
+    paraphrase: >-
+      Detect {dimension_label} time slices in {index}/{sourcetype} whose {state_label}
+      value {state_value} makes up more than {threshold_percent}% of the bucket baseline.
+    scope_free: >-
+      Find 15-minute buckets by {dimension_label} where {state_label}={state_value}
+      exceeds {threshold_percent}% of total bucket volume.
+
+  part_to_whole:
+    builder: part_to_whole
+    required_roles: [state]
+    dimension_roles: [entity, user, host, operation, resource, query, resolver]
+    threshold_percent: 10
+    question: >-
+      For index {index} sourcetype {sourcetype}, calculate by {dimension_label} the percentage
+      of events with {state_label}={state_value}, and rank the highest percentages.
+    paraphrase: >-
+      In {index}/{sourcetype}, compare {state_value} outcomes with all outcomes for each
+      {dimension_label} and return the largest shares first.
+    scope_free: >-
+      Calculate by {dimension_label} the percentage of events with
+      {state_label}={state_value}, and rank the highest percentages.
+
+  cross_event_correlation:
+    builder: cross_event_correlation
+    eligible_shared_roles: [entity, user, host, resource, query]
+    max_pairs: 10
+    question: >-
+      Correlate index {left_index} sourcetype {left_sourcetype} with index {right_index}
+      sourcetype {right_sourcetype} by shared {dimension_label}; report event volume and
+      distinct contributing sourcetypes over the last 24 hours.
+    paraphrase: >-
+      Join the activity represented by {left_index}/{left_sourcetype} and
+      {right_index}/{right_sourcetype} through {dimension_label}, then count records
+      and source varieties for each shared value.
+    scope_free: >-
+      Correlate the relevant {left_kind} and {right_kind} event streams by shared
+      {dimension_label}; report event volume and distinct contributing sourcetypes
+      over the last 24 hours.
+
+  cloud_api_result_comparison:
+    builder: cloud_api_result_comparison
+    domain_kinds: [cloud]
+    required_roles: [operation, state]
+    success_values: [success, succeeded, allowed, ok, "0"]
+    question: >-
+      In cloud API index {index} sourcetype {sourcetype}, compare successful and unsuccessful
+      results by {operation_label}, calculate the unsuccessful percentage, and rank the highest.
+    paraphrase: >-
+      For {index}/{sourcetype} cloud activity, summarize each {operation_label}'s good versus
+      non-good outcomes and order operations by failure share.
+    scope_free: >-
+      Compare successful and unsuccessful cloud API {state_label} values by
+      {operation_label}, calculate the unsuccessful percentage, and rank the highest.
+
+  dns_diversity_mapping:
+    builder: dns_diversity_mapping
+    domain_kinds: [dns]
+    required_roles: [query, answer]
+    mapping_roles: [resolver, entity, host]
+    diversity_threshold: 2
+    question: >-
+      In DNS index {index} sourcetype {sourcetype}, map {mapping_label} to {query_label},
+      count distinct {answer_label} values, and retain mappings with at least
+      {diversity_threshold} answers.
+    paraphrase: >-
+      Using {index}/{sourcetype}, show which {mapping_label} and {query_label} pairs resolve
+      to diverse {answer_label} sets, requiring {diversity_threshold} or more unique responses.
+    scope_free: >-
+      Map {mapping_label} to {query_label}, count distinct {answer_label} values,
+      and retain mappings with at least {diversity_threshold} answers.

@@ -8,6 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -27,9 +28,74 @@ from environment_profile import (
 )
 from intent_field_contracts import validate_platform_sourcetype_coherence
 from query_templates import TEMPLATES
+from build_environment_profile import (
+    _build_sourcetype_field_inventory,
+    _field_summary_query,
+)
 
 
 class EnvironmentProfileTests(unittest.TestCase):
+    def test_field_inventory_excludes_legacy_malformed_generator_events(self) -> None:
+        query = _field_summary_query(
+            ["botsv3"],
+            "XmlWinEventLog",
+            200,
+        )
+        self.assertIn(
+            "(NOT lab_data_source=agtsmith_generator OR "
+            "lab_data_version=fidelity_v2)",
+            query,
+        )
+        self.assertIn('sourcetype="XmlWinEventLog"', query)
+
+    def test_selected_field_inventory_refreshes_multiple_sourcetypes(self) -> None:
+        rows = [
+            {
+                "index": "botsv3",
+                "sourcetypes": ["XmlWinEventLog", "stream:dns"],
+            },
+            {
+                "index": "aws_prod",
+                "sourcetypes": ["aws:cloudtrail"],
+            },
+        ]
+        query_result = {
+            "structured": {
+                "results": [
+                    {
+                        "field": "host",
+                        "count": "10",
+                        "distinct_count": "2",
+                        "values": ["host-a", "host-b"],
+                    }
+                ]
+            }
+        }
+        with mock.patch(
+            "build_environment_profile.run_splunk_query_args",
+            return_value=query_result,
+        ) as run_query:
+            inventory, meta = _build_sourcetype_field_inventory(
+                rows=rows,
+                earliest_time="-24h",
+                latest_time="now",
+                existing_profile={},
+                refresh_mode="one",
+                requested_sourcetype=(
+                    "XmlWinEventLog,aws:cloudtrail,not-present"
+                ),
+                sample_size=25,
+                field_row_limit=20,
+            )
+        self.assertEqual(
+            set(inventory),
+            {"XmlWinEventLog", "aws:cloudtrail"},
+        )
+        self.assertEqual(meta["effective_refresh_mode"], "selected")
+        self.assertEqual(meta["unknown_requested_sourcetypes"], ["not-present"])
+        self.assertEqual(meta["target_count"], 2)
+        self.assertEqual(run_query.call_count, 2)
+
     def test_extract_index_and_sourcetype_tokens(self) -> None:
         q = 'search index=linux sourcetype="access_combined" OR sourcetype=auth.log | stats count'
         self.assertEqual(extract_indexes_from_query(q), ["linux"])
@@ -919,6 +985,26 @@ class IndexAliasTests(unittest.TestCase):
         aliases = infer_index_aliases_from_profile(profile)
         self.assertEqual(aliases.get("windows"), "soc_windows")
         self.assertEqual(aliases.get("soc_windows"), "soc_windows")
+
+    def test_inferred_alias_does_not_shadow_concrete_main_index(self) -> None:
+        profile = {
+            "indexes": [
+                {"index": "main", "sourcetypes": ["netstat"]},
+                {"index": "aws_prod", "sourcetypes": ["aws:cloudtrail"]},
+            ],
+            "sourcetype_to_indexes": {
+                "netstat": ["main"],
+                "aws:cloudtrail": ["aws_prod"],
+            },
+        }
+        aliases = infer_index_aliases_from_profile(profile)
+        self.assertNotIn("main", aliases)
+        normalized = normalize_query_index_aliases(
+            'search index="main" sourcetype="netstat" | stats count',
+            profile,
+        )
+        self.assertIn('index="main"', normalized)
+        self.assertNotIn("index=aws_prod sourcetype=netstat", normalized)
 
     def test_save_and_load_index_alias_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as td:

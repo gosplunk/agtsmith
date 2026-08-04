@@ -20,6 +20,25 @@ INLINE_CONTROL_PATTERNS = (
     (re.compile(r"\brow_limit\s*=", flags=re.IGNORECASE), "row_limit"),
 )
 
+HOST_CONSTRAINT_PATTERN = re.compile(r"\bhost\s+IN\s*\(([^)]*)\)", flags=re.IGNORECASE)
+HOST_CONSTRAINT_STOPWORDS = frozenset(
+    {
+        "a",
+        "all",
+        "an",
+        "any",
+        "being",
+        "host",
+        "is",
+        "most",
+        "that",
+        "the",
+        "was",
+        "were",
+        "which",
+    }
+)
+
 
 def _extract_indexes(query: str) -> list[str]:
     matches = re.findall(r"index\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s|()]+))", query, flags=re.IGNORECASE)
@@ -48,11 +67,32 @@ def _question_allows_internal_indexes(question: str) -> bool:
         "internal auth",
         "audittrail",
         "splunk platform",
+        "platform health",
         "scheduler",
-        "audittrail",
         "splunkd",
+        "forwarder",
+        "deployment client",
+        "license usage",
+        "license quota",
+        "heartbeat",
     )
     return any(term in q for term in allow_terms)
+
+
+def _validate_host_constraints(query: str, question: str) -> tuple[bool, str]:
+    question_lower = str(question or "").lower()
+    for match in HOST_CONSTRAINT_PATTERN.finditer(str(query or "")):
+        values = [
+            item.strip().strip("\"'").lower()
+            for item in match.group(1).split(",")
+            if item.strip().strip("\"'")
+        ]
+        for value in values:
+            if value in HOST_CONSTRAINT_STOPWORDS:
+                return False, f"fabricated_host_constraint:{value}"
+            if value != "*" and value not in question_lower:
+                return False, f"host_constraint_not_explicit:{value}"
+    return True, "host_constraints_ok"
 
 
 def validate_query_args(
@@ -78,6 +118,15 @@ def validate_query_args(
     for pattern, label in INLINE_CONTROL_PATTERNS:
         if pattern.search(query):
             return False, f"query_contains_inline_control:{label}"
+    host_constraints_ok, host_constraints_reason = _validate_host_constraints(query, question)
+    if not host_constraints_ok:
+        return False, host_constraints_reason
+    if question:
+        from question_intelligence import validate_query_dataset_locks
+
+        dataset_locks_ok, dataset_locks_reason = validate_query_dataset_locks(question, query)
+        if not dataset_locks_ok:
+            return False, dataset_locks_reason
 
     if not earliest or not latest:
         return False, "missing_time_bounds"

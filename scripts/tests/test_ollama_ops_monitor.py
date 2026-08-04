@@ -11,9 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ollama_ops_monitor import (  # noqa: E402
     build_local_log_command,
+    collect_analyst_ops_summary,
     ollama_log_config_status,
     query_nvidia_smi,
     resolve_log_source_mode,
+    resolve_ollama_connection_state,
 )
 
 
@@ -49,6 +51,45 @@ class TestOllamaOpsMonitor(unittest.TestCase):
         self.assertTrue(payload["available"])
         self.assertEqual(payload["gpus"][0]["name"], "NVIDIA RTX 1000 Ada")
         self.assertEqual(payload["gpus"][0]["memory_total_mib"], 6141.0)
+
+    def test_resolve_ollama_connection_state_prefers_api_ok(self) -> None:
+        connected, state = resolve_ollama_connection_state({"connected": True, "models_loaded": []})
+        self.assertTrue(connected)
+        self.assertEqual(state, "connected")
+
+    def test_resolve_ollama_connection_state_marks_gpu_usage_degraded(self) -> None:
+        connected, state = resolve_ollama_connection_state({"connected": False, "models_loaded": []}, gpu_vram_used_gb=4.5)
+        self.assertTrue(connected)
+        self.assertEqual(state, "degraded")
+
+    def test_collect_analyst_ops_summary_reports_degraded_when_probe_fails(self) -> None:
+        snapshot = {
+            "ts": "2026-07-30T12:00:00Z",
+            "ollama": {"connected": False, "host": "http://127.0.0.1:11434", "models_loaded": []},
+            "gpu": {"gpus": [{"memory_used_mib": 4608, "memory_total_mib": 8192}]},
+        }
+        with patch("ollama_ops_monitor.collect_ops_snapshot", return_value=snapshot):
+            payload = collect_analyst_ops_summary("http://127.0.0.1:11434")
+        self.assertTrue(payload["connected"])
+        self.assertEqual(payload["connection_state"], "degraded")
+        self.assertEqual(payload["models_loaded"], 0)
+        self.assertEqual(payload["gpu_vram_used_gb"], 4.5)
+
+    def test_collect_analyst_ops_summary_reports_degraded_when_models_loaded_without_version(self) -> None:
+        snapshot = {
+            "ts": "2026-07-30T12:00:00Z",
+            "ollama": {
+                "connected": False,
+                "host": "http://127.0.0.1:11434",
+                "models_loaded": [{"name": "llama3"}],
+            },
+            "gpu": {"gpus": []},
+        }
+        with patch("ollama_ops_monitor.collect_ops_snapshot", return_value=snapshot):
+            payload = collect_analyst_ops_summary("http://127.0.0.1:11434")
+        self.assertTrue(payload["connected"])
+        self.assertEqual(payload["connection_state"], "degraded")
+        self.assertEqual(payload["models_loaded"], 1)
 
 
 if __name__ == "__main__":

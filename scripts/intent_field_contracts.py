@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from apache_intent import APACHE_INTENTS, query_has_requested_apache_dimensions
+
 
 def _query_text(query_args: dict[str, Any]) -> str:
     if not isinstance(query_args, dict):
@@ -14,8 +16,21 @@ def _query_text(query_args: dict[str, Any]) -> str:
     return str(query_args.get("query", "")).strip().lower()
 
 
+def _normalize_simple_field_quotes(value: str) -> str:
+    return re.sub(
+        r"""\b(index|sourcetype|info|eventcode|eventid)=["']([a-z0-9_.:/-]+)["']""",
+        r"\1=\2",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+
+
 def _group_hit(query: str, tokens: tuple[str, ...]) -> bool:
-    return any(tok in query for tok in tokens)
+    normalized_query = _normalize_simple_field_quotes(query)
+    return any(
+        tok in query or _normalize_simple_field_quotes(tok) in normalized_query
+        for tok in tokens
+    )
 
 
 _AUTH_COHERENCE_INTENTS = frozenset(
@@ -130,7 +145,58 @@ def validate_intent_platform_scope(
     return True, "scope_ok"
 
 
-def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[bool, str]:
+def _native_strategy_satisfies_intent(field_strategy: dict[str, Any] | None) -> bool:
+    strategy = field_strategy if isinstance(field_strategy, dict) else {}
+    if strategy.get("raw_parse_required"):
+        return False
+    roles = strategy.get("roles", {}) if isinstance(strategy.get("roles"), dict) else {}
+    return bool(roles) and all(
+        isinstance(data, dict) and bool(data.get("trusted_fields"))
+        for data in roles.values()
+    )
+
+
+def validate_analytical_plan_contract(
+    question: str,
+    analytical_plan: Any,
+) -> tuple[bool, list[str]]:
+    """Validate a typed plan without requiring a phrase-matched named intent."""
+    from question_intelligence import extract_explicit_dataset_locks
+    from spl_query_schema import parse_analytical_plan, validate_analytical_plan
+
+    plan = parse_analytical_plan(analytical_plan)
+    if plan is None:
+        return False, ["analytical_plan_missing_or_malformed"]
+    valid, errors = validate_analytical_plan(plan)
+    contract_errors = list(errors)
+
+    locks = extract_explicit_dataset_locks(question)
+    plan_indexes = {branch.index.lower() for branch in plan.datasets}
+    plan_sourcetypes = {
+        branch.sourcetype.lower() for branch in plan.datasets if branch.sourcetype
+    }
+    locked_indexes = {item.lower() for item in locks["indexes"]}
+    locked_sourcetypes = {item.lower() for item in locks["sourcetypes"]}
+    if locked_indexes and plan_indexes != locked_indexes:
+        contract_errors.append(
+            "explicit_index_lock_violation:"
+            f"expected={','.join(sorted(locked_indexes))}:actual={','.join(sorted(plan_indexes))}"
+        )
+    if locked_sourcetypes and plan_sourcetypes != locked_sourcetypes:
+        contract_errors.append(
+            "explicit_sourcetype_lock_violation:"
+            f"expected={','.join(sorted(locked_sourcetypes))}:actual={','.join(sorted(plan_sourcetypes))}"
+        )
+    return valid and not contract_errors, list(dict.fromkeys(contract_errors))
+
+
+def validate_query_for_intent(
+    intent: str,
+    query_args: dict[str, Any],
+    *,
+    field_strategy: dict[str, Any] | None = None,
+    question: str = "",
+) -> tuple[bool, str]:
     """Return True only when required intent-specific field/shape signals are present."""
     query = _query_text(query_args)
     intent_l = (intent or "").strip().lower()
@@ -157,7 +223,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
             ("stats ", "timechart "),
         ),
         "windows_auth_failures": (
-            ("index=windows", "index=windows_sysmon"),
+            ("index=",),
             ("sourcetype=xmlwineventlog",),
             ("eventcode=4625", "eventid=4625", "an account failed to log on"),
             ("table ", "stats ", "timechart "),
@@ -268,16 +334,47 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
             ("clientip", "src_ip"),
             ("stats ",),
         ),
+        "apache_suspicious_activity": (
+            ("index=",),
+            ("sourcetype=access_combined", "sourcetype=apache:access"),
+            ("clientip", "src_ip"),
+            ("status",),
+            ("method", "http_method"),
+            ("uri_path", "uri", "url"),
+            ("useragent", "user_agent", "http_user_agent"),
+            ("suspicious_reason",),
+            ("where ",),
+            ("stats ",),
+        ),
         "apache_404_spike": (
             ("index=",),
             ("sourcetype=access_combined", "sourcetype=apache:access"),
             ("status=404",),
             ("timechart ", "bin "),
         ),
+        "apache_404_scanning": (
+            ("index=",),
+            ("sourcetype=access_combined", "sourcetype=apache:access"),
+            ("status=404",),
+            ("clientip", "src_ip"),
+            ("uri_path", "uri", "requested_paths"),
+            ("distinct_paths", "dc(uri_path)", "dc(uri)"),
+            ("stats ",),
+        ),
         "apache_suspicious_user_agents": (
             ("index=",),
             ("sourcetype=access_combined", "sourcetype=apache:access"),
             ("useragent", "http_user_agent"),
+            ("where ", "search useragent", "search http_user_agent"),
+            ("bot", "crawl", "spider", "scanner", "sqlmap", "nikto", "curl", "wget", "isnull(useragent)"),
+            ("stats ",),
+        ),
+        "apache_sensitive_path_probing": (
+            ("index=",),
+            ("sourcetype=access_combined", "sourcetype=apache:access"),
+            ("uri_path", "uri", "url"),
+            (".env", ".git", "wp-admin", "phpmyadmin", "server-status", "sensitive_path"),
+            ("where ", "search uri", "search uri_path"),
             ("stats ",),
         ),
         "aws_cloudtrail_activity": (
@@ -299,7 +396,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
         "stream_http_activity": (
             ("index=main", "index=botsv3"),
             ("sourcetype=stream:http",),
-            ("spath ",),
+            ("spath ", "http_method"),
             ("http_method",),
             ("status",),
             ("site",),
@@ -309,7 +406,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
         "osquery_process_activity": (
             ("index=main", "index=botsv3"),
             ("sourcetype=osquery:results",),
-            ("spath ",),
+            ("spath ", "hostidentifier"),
             ("hostidentifier",),
             ("path",),
             ("cmdline",),
@@ -328,7 +425,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
         "aad_signin_activity": (
             ("index=",),
             ("sourcetype=ms:aad:signin",),
-            ("spath ",),
+            ("spath ", "userprincipalname"),
             ("userprincipalname",),
             ("ipaddress",),
             ("appdisplayname",),
@@ -338,7 +435,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
         "stream_dns_activity": (
             ("index=",),
             ("sourcetype=stream:dns",),
-            ("spath ",),
+            ("spath ", "query_name"),
             ("query",),
             ("reply_code",),
             ("src_ip",),
@@ -348,7 +445,7 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
         "o365_management_activity": (
             ("index=",),
             ("sourcetype=ms:o365:management", "sourcetype=o365:management:activity"),
-            ("spath ",),
+            ("spath ", "userid"),
             ("userid",),
             ("operation",),
             ("workload",),
@@ -384,10 +481,20 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
     groups = required_groups.get(intent_l)
     if not groups:
         return True, "intent_contract_not_defined_skip"
+    if intent_l == "apache_access_top_ips":
+        stats_tail = query.rsplit("| stats", 1)[-1] if "| stats" in query else ""
+        if re.search(r"^\s+count(?:\s+as\s+\w+)?\s*$", stats_tail):
+            groups = groups[:2] + groups[3:]
 
     for idx, group in enumerate(groups, start=1):
         if not _group_hit(query, group):
             return False, f"intent_contract_missing_group_{idx}"
+
+    if _native_strategy_satisfies_intent(field_strategy):
+        if re.search(r"\|\s*rex\b", query):
+            return False, "intent_contract_redundant_rex_with_trusted_native_fields"
+        if re.search(r"\|\s*spath\b", query):
+            return False, "intent_contract_redundant_spath_with_trusted_native_fields"
 
     if intent_l == "linux_auth_failures":
         if "match(" in query and "?<" in query:
@@ -398,9 +505,12 @@ def validate_query_for_intent(intent: str, query_args: dict[str, Any]) -> tuple[
             return False, "intent_contract_linux_auth_missing_field_native_stats"
 
     # Extra guard: apache intent should not drift to known wrong index aliases.
-    if intent_l in {"apache_access_top_ips", "apache_404_spike", "apache_suspicious_user_agents"}:
+    if intent_l in APACHE_INTENTS:
         if any(bad in query for bad in ("index=apache", "index=apache_access_logs", "index=linux_perf")):
             return False, "intent_contract_apache_wrong_index_alias"
+        dimensions_ok, dimensions_reason = query_has_requested_apache_dimensions(question, query)
+        if not dimensions_ok:
+            return False, dimensions_reason
 
     if intent_l in _AUTH_COHERENCE_INTENTS:
         coherent, coherence_reason = validate_platform_sourcetype_coherence(query, intent_l)

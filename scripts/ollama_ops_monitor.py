@@ -240,11 +240,15 @@ def probe_ollama_host(ollama_host: str, timeout: float = 5.0) -> dict[str, Any]:
                         }
                     )
         result["models_loaded"] = loaded
-        result["connected"] = version_resp.status_code == 200
-        if not result["connected"]:
-            result["detail"] = f"version_http_{version_resp.status_code}"
-        else:
+        api_ok = version_resp.status_code == 200
+        partial_ok = bool(loaded) or tags_resp.status_code == 200 or ps_resp.status_code == 200
+        result["connected"] = api_ok or partial_ok
+        if api_ok:
             result["detail"] = "ok"
+        elif partial_ok:
+            result["detail"] = f"version_http_{version_resp.status_code}_partial"
+        else:
+            result["detail"] = f"version_http_{version_resp.status_code}"
         return result
     except Exception as exc:
         result["detail"] = f"{type(exc).__name__}:{exc}"
@@ -257,4 +261,51 @@ def collect_ops_snapshot(ollama_host: str) -> dict[str, Any]:
         "ollama": probe_ollama_host(ollama_host),
         "gpu": query_nvidia_smi(),
         "log_source": ollama_log_config_status(),
+    }
+
+
+def resolve_ollama_connection_state(
+    ollama: dict[str, Any],
+    *,
+    gpu_vram_used_gb: float | None = None,
+) -> tuple[bool, str]:
+    """Infer UI connection state when the HTTP probe and host GPU signals disagree."""
+    if bool(ollama.get("connected")):
+        return True, "connected"
+    loaded = ollama.get("models_loaded") if isinstance(ollama.get("models_loaded"), list) else []
+    if loaded:
+        return True, "degraded"
+    if gpu_vram_used_gb is not None and float(gpu_vram_used_gb) >= 0.5:
+        return True, "degraded"
+    return False, "offline"
+
+
+def collect_analyst_ops_summary(ollama_host: str) -> dict[str, Any]:
+    """Minimal analyst-safe runtime snapshot without logs or full model payloads."""
+    snapshot = collect_ops_snapshot(ollama_host)
+    ollama = snapshot.get("ollama") if isinstance(snapshot.get("ollama"), dict) else {}
+    gpu_block = snapshot.get("gpu") if isinstance(snapshot.get("gpu"), dict) else {}
+    gpus = gpu_block.get("gpus") if isinstance(gpu_block.get("gpus"), list) else []
+    first_gpu = gpus[0] if gpus and isinstance(gpus[0], dict) else {}
+    used_gb: float | None = None
+    total_gb: float | None = None
+    if first_gpu:
+        used_mib = first_gpu.get("memory_used_mib")
+        total_mib = first_gpu.get("memory_total_mib")
+        if used_mib is not None:
+            used_gb = round(float(used_mib) / 1024, 1)
+        if total_mib is not None:
+            total_gb = round(float(total_mib) / 1024, 1)
+    loaded = ollama.get("models_loaded") if isinstance(ollama.get("models_loaded"), list) else []
+    host = str(ollama.get("host", "")).strip()
+    display_host = host.replace("http://", "").replace("https://", "")
+    connected, connection_state = resolve_ollama_connection_state(ollama, gpu_vram_used_gb=used_gb)
+    return {
+        "connected": connected,
+        "connection_state": connection_state,
+        "host": display_host,
+        "models_loaded": len(loaded),
+        "gpu_vram_used_gb": used_gb,
+        "gpu_vram_total_gb": total_gb,
+        "updated_at": str(snapshot.get("ts", "")),
     }

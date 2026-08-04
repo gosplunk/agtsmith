@@ -19,7 +19,7 @@ def _parse_ts(ts: str) -> datetime | None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check environment profile freshness")
     parser.add_argument("--path", default="artifacts/environment/environment_profile_latest.json")
-    parser.add_argument("--max-age-minutes", type=int, default=1440)
+    parser.add_argument("--max-age-minutes", type=int, default=60)
     args = parser.parse_args()
 
     p = Path(args.path)

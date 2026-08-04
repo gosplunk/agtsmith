@@ -21,6 +21,7 @@ from environment_profile import (
     load_environment_profile,
     resolve_authoritative_domains_for_question,
 )
+from holdout_firewall import filter_holdout_records
 from local_learning import approved_learning_records
 from question_intelligence import build_question_profile_text, infer_question_dimensions
 from spl_offline_docs_rag import build_offline_docs_context, offline_docs_index_available
@@ -42,6 +43,22 @@ RAG_SOURCES: tuple[str, ...] = (
     "docs/reference/spl_research_notes.md",
 )
 SKILLPACK_PATH = Path("artifacts/knowledge/spl_skillpack_latest.json")
+
+OPERATIONAL_INVENTORY_INTENTS = frozenset(
+    {
+        "top_indexes",
+        "metadata_inventory",
+        "index_sourcetype_volume",
+        "host_activity_summary",
+        "index_staleness",
+        "splunk_internal_health",
+        "splunk_license_usage",
+        "forwarder_connectivity",
+        "web_traffic_summary",
+        "network_flow_summary",
+        "app_error_spike",
+    }
+)
 
 FORBIDDEN_SNIPPET_TERMS = (
     "| collect",
@@ -268,7 +285,7 @@ def _build_authoring_guidance(question: str, *, max_chars: int = 1200) -> str:
 def _build_local_learning_context(question: str, *, max_chars: int = 700) -> str:
     q = (question or "").lower()
     tokens = {t for t in re.findall(r"[a-z0-9_]{3,}", q)}
-    rows = approved_learning_records()
+    rows, _rejected = filter_holdout_records(approved_learning_records())
     if not rows:
         return ""
     scored: list[tuple[int, dict]] = []
@@ -486,22 +503,29 @@ def build_spl_rag_context(
     profile_path: str | Path = PROFILE_PATH_DEFAULT,
 ) -> str:
     hints = _question_hints(question, intent=intent)
+    intent_l = str(intent or "").strip().lower()
+    operational = intent_l in OPERATIONAL_INVENTORY_INTENTS or any(
+        term in (question or "").lower()
+        for term in ("index", "indexes", "sourcetype", "metadata", "forwarder", "license", "internal health")
+    )
+    source_budget = 0 if operational else max(1, max_sources)
     ranked: list[tuple[int, str, str]] = []
-    for src in RAG_SOURCES:
-        text = _read_text(src)
-        if not text:
-            continue
-        lowered = text.lower()
-        score = sum(1 for h in hints if h in lowered)
-        spl_blocks = _extract_spl_blocks(text)
-        block = spl_blocks[0] if spl_blocks else ""
-        lines = _best_lines(text, hints)
-        snippet = (block + "\n" + lines).strip() if block else lines
-        if snippet:
-            ranked.append((score, src, snippet))
+    if source_budget:
+        for src in RAG_SOURCES:
+            text = _read_text(src)
+            if not text:
+                continue
+            lowered = text.lower()
+            score = sum(1 for h in hints if h in lowered)
+            spl_blocks = _extract_spl_blocks(text)
+            block = spl_blocks[0] if spl_blocks else ""
+            lines = _best_lines(text, hints)
+            snippet = (block + "\n" + lines).strip() if block else lines
+            if snippet:
+                ranked.append((score, src, snippet))
 
     ranked.sort(key=lambda x: x[0], reverse=True)
-    chosen = ranked[:max(1, max_sources)]
+    chosen = ranked[: max(1, source_budget or 0)]
     parts: list[str] = []
     for _score, src, snippet in chosen:
         parts.append(f"[SOURCE:{src}]\n{snippet}")
@@ -512,7 +536,8 @@ def build_spl_rag_context(
         "- Query must start with 'search '.\n"
         "- earliest_time and latest_time are required.\n"
         "- row_limit must be <= 200.\n"
-        "- In this MCP environment, avoid tstats with 'by'. Use datamodel ... flat | stats ... by ... instead.\n"
+        "- In this MCP environment, avoid tstats with 'by'. Prefer 'search index=* NOT index=_* | stats count by index' for index inventory.\n"
+        "- Use datamodel ... flat | stats ... by ... when tstats-by is required for accelerated data models.\n"
         "- Use discovered index/sourcetype combos from ENVIRONMENT_PROFILE when available.\n"
         "- Prefer CIM-aligned tags/eventtypes when present in CIM_TAG_PROFILE for the asked use case.\n"
         "- Unless the question explicitly asks for Splunk internal context, exclude internal indexes by default (use NOT index=_*).\n"
@@ -530,6 +555,16 @@ def build_spl_rag_context(
         profile_path=profile_path,
         max_chars=max(240, int(max_chars * 0.2)),
     )
+    domain_oracle_ctx = ""
+    try:
+        from spl_domain_knowledge import format_domain_knowledge_context, resolve_domain_knowledge
+
+        domain_oracle_ctx = format_domain_knowledge_context(
+            resolve_domain_knowledge(question, intent=intent),
+            max_chars=max(280, int(max_chars * 0.22)),
+        )
+    except Exception:
+        domain_oracle_ctx = ""
     meta_ctx = _profile_meta_header(profile_path)
     authoring_ctx = _build_authoring_guidance(question, max_chars=max(320, int(max_chars * 0.35)))
     local_learning_ctx = _build_local_learning_context(question, max_chars=max(260, int(max_chars * 0.25)))
@@ -539,10 +574,31 @@ def build_spl_rag_context(
         offline_docs_ctx = build_offline_docs_context(
             question,
             intent=intent,
-            max_topics=3,
-            max_chars=max(360, int(max_chars * 0.45)),
+            max_topics=2 if operational else 3,
+            max_chars=max(420, int(max_chars * (0.55 if operational else 0.45))),
         )
     event_code_ctx = build_event_code_rag_context(question, intent=intent, max_chars=max(320, int(max_chars * 0.35)))
+    cards_ctx = ""
+    try:
+        from sourcetype_cards import cards_for_question, format_cards_context
+
+        cards_ctx = format_cards_context(
+            cards_for_question(question, intent=intent, max_cards=3),
+            max_chars=max(320, int(max_chars * 0.3)),
+        )
+    except Exception:
+        cards_ctx = ""
+    embedding_ctx = ""
+    try:
+        from spl_embedding_rag import build_embedding_context
+
+        embedding_ctx = build_embedding_context(
+            question,
+            intent=intent,
+            max_chars=max(320, int(max_chars * 0.35)),
+        )
+    except Exception:
+        embedding_ctx = ""
     question_profile = build_question_profile_text(question)
     reserve = len(constraints) + 2
     if env_ctx:
@@ -553,6 +609,8 @@ def build_spl_rag_context(
         reserve += len(skill_ctx) + 2
     if domain_ctx:
         reserve += len(domain_ctx) + 2
+    if domain_oracle_ctx:
+        reserve += len(domain_oracle_ctx) + 2
     if event_code_ctx:
         reserve += len(event_code_ctx) + 2
     if meta_ctx:
@@ -565,6 +623,10 @@ def build_spl_rag_context(
         reserve += len(offline_docs_ctx) + 2
     if question_profile:
         reserve += len(question_profile) + 2
+    if cards_ctx:
+        reserve += len(cards_ctx) + 2
+    if embedding_ctx:
+        reserve += len(embedding_ctx) + 2
     budget = max(200, max_chars - reserve)
     merged_sources = "\n\n".join(parts)
     if len(merged_sources) > budget:
@@ -573,12 +635,15 @@ def build_spl_rag_context(
         meta_ctx.strip(),
         question_profile.strip(),
         domain_ctx.strip(),
+        domain_oracle_ctx.strip(),
+        cards_ctx.strip(),
+        embedding_ctx.strip(),
         event_code_ctx.strip(),
-        merged_sources.strip(),
         offline_docs_ctx.strip(),
         env_ctx.strip(),
         tag_ctx.strip(),
         skill_ctx.strip(),
+        merged_sources.strip(),
         authoring_ctx.strip(),
         local_learning_ctx.strip(),
         constraints.strip(),

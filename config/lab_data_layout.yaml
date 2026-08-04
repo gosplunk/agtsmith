@@ -49,7 +49,7 @@ layouts:
         sourcetype: apache:error
       windows_auth:
         index: soc_windows
-        sourcetype: XmlWinEventLog:Security
+        sourcetype: XmlWinEventLog
       windows_sysmon:
         index: soc_windows
         sourcetype: XmlWinEventLog
@@ -134,7 +134,7 @@ layouts:
         sourcetype: apache:error
       windows_auth_soc:
         index: soc_windows
-        sourcetype: XmlWinEventLog:Security
+        sourcetype: XmlWinEventLog
       windows_sysmon_soc:
         index: soc_windows
         sourcetype: XmlWinEventLog

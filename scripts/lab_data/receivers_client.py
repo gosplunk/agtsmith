@@ -58,13 +58,16 @@ class ReceiversClient:
         if isinstance(event, dict):
             body = dict(event)
             if fields:
-                body.update(fields)
+                for key, value in fields.items():
+                    body.setdefault(key, value)
             payload = json.dumps(body)
         else:
             payload = str(event)
             if fields:
-                for key, value in fields.items():
-                    payload += f" {key}={value}"
+                raise RuntimeError(
+                    "receivers_string_fields_unsupported:"
+                    "use HEC to attach lab metadata without changing raw events"
+                )
 
         params = {
             "index": index,

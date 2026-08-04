@@ -525,22 +525,28 @@
   },
   {
     "id": "apache_top_ips",
-    "family": "apache_access_top_ips",
-    "question": "Investigate weird logon attempts on my apache web server.",
-    "expected_intent": "apache_access_top_ips",
+    "family": "apache_suspicious_activity",
+    "question": "Investigate weird logon attempts on my apache web server over the last 7 days.",
+    "expected_intent": "apache_suspicious_activity",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
-      "index=linux",
+      "index=soc_linux",
+      "index=botsv3",
       "access_combined",
+      "suspicious_reason",
+      "where isnotnull(suspicious_reason)",
       "clientip",
       "status",
       "method",
+      "uri_path",
+      "useragent",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -550,31 +556,40 @@
       "clientip",
       "status",
       "method",
-      "count"
+      "uri_path",
+      "useragent",
+      "suspicious_reason",
+      "request_count"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "-24h",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
     "id": "apache_top_ips_variant",
-    "family": "apache_access_top_ips",
-    "question": "Investigate suspicious web access activity in access_combined over the last 24 hours. Show top client IPs, status codes, methods, and likely scanning behavior.",
-    "expected_intent": "apache_access_top_ips",
+    "family": "apache_suspicious_activity",
+    "question": "Investigate suspicious web access activity in access_combined over the last 7 days. Show top client IPs, status codes, methods, and likely scanning behavior.",
+    "expected_intent": "apache_suspicious_activity",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
-      "index=linux",
+      "index=soc_linux",
+      "index=botsv3",
       "access_combined",
+      "suspicious_reason",
+      "where isnotnull(suspicious_reason)",
       "clientip",
       "status",
       "method",
+      "uri_path",
+      "useragent",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -585,26 +600,32 @@
       "clientip",
       "status",
       "method",
-      "count"
+      "uri_path",
+      "useragent",
+      "suspicious_reason",
+      "request_count"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "-24h",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
     "id": "apache_top_ips_simple",
     "family": "apache_access_top_ips",
-    "question": "Show top client IPs in apache access logs over the last 24 hours.",
+    "question": "Show top client IPs in apache access logs over the last 7 days.",
     "expected_intent": "apache_access_top_ips",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "clientip",
       "stats"
     ],
@@ -617,23 +638,25 @@
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "@d",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
     "id": "apache_404_spike",
     "family": "apache_404_spike",
-    "question": "Show 404 spike behavior in apache access logs over the last 24 hours.",
+    "question": "Show 404 spike behavior in apache access logs over the last 7 days.",
     "expected_intent": "apache_404_spike",
     "expected_shape": "timechart",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
-      "index=linux",
+      "index=soc_linux",
+      "index=botsv3",
       "access_combined",
       "status=404",
       "timechart"
@@ -644,22 +667,25 @@
     "required_result_fields": [],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "-24h",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
     "id": "apache_404_today_variant",
     "family": "apache_404_spike",
-    "question": "Show 404 spikes on my web server today.",
+    "question": "Show 404 spikes on my web server over the last 7 days.",
     "expected_intent": "apache_404_spike",
     "expected_shape": "timechart",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "status=404",
       "timechart"
     ],
@@ -670,26 +696,30 @@
     "required_result_fields": [],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "@d",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
     "id": "apache_suspicious_user_agents",
     "family": "apache_suspicious_user_agents",
-    "question": "Show suspicious user agents in apache access_combined logs in the last 24 hours.",
+    "question": "Show suspicious user agents in apache access_combined logs over the last 7 days.",
     "expected_intent": "apache_suspicious_user_agents",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
-      "index=linux",
+      "index=soc_linux",
+      "index=botsv3",
       "access_combined",
       "useragent",
       "clientip",
+      "requested_paths",
+      "where",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -698,28 +728,36 @@
     "required_result_fields": [
       "useragent",
       "clientip",
-      "count"
+      "request_count",
+      "status_codes",
+      "methods",
+      "requested_paths"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "-24h",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
     "id": "apache_suspicious_user_agents_variant",
     "family": "apache_suspicious_user_agents",
-    "question": "Show suspicious bots in apache access logs over the last 24 hours.",
+    "question": "Show suspicious bots in apache access logs over the last 7 days.",
     "expected_intent": "apache_suspicious_user_agents",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "useragent",
       "clientip",
+      "requested_paths",
+      "where",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -729,11 +767,14 @@
     "required_result_fields": [
       "useragent",
       "clientip",
-      "count"
+      "request_count",
+      "status_codes",
+      "methods",
+      "requested_paths"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "-24h",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
@@ -879,7 +920,7 @@
     "family": "linux_session_activity",
     "question": "Show linux session activity in the last 30 days, including session opened and closed evidence.",
     "expected_intent": "linux_session_activity",
-    "expected_shape": "stats",
+    "expected_shape": "table",
     "preferred_indexes": [
       "index=linux"
     ],
@@ -892,7 +933,7 @@
       "index=linux",
       "session_state",
       "session_user",
-      "stats"
+      "| table"
     ],
     "forbidden_query_terms": [
       "index=*"
@@ -900,7 +941,7 @@
     "required_result_fields": [
       "host",
       "session_state",
-      "session_user"
+      "actor"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
@@ -943,18 +984,23 @@
   {
     "id": "apache_bots_variant",
     "family": "apache_suspicious_user_agents",
-    "question": "Show crawler and bot traffic in apache access logs.",
+    "question": "Show crawler and bot traffic in apache access logs over the last 7 days.",
     "expected_intent": "apache_suspicious_user_agents",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "useragent",
       "clientip",
+      "requested_paths",
+      "where",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -964,28 +1010,39 @@
     "required_result_fields": [
       "useragent",
       "clientip",
-      "count"
+      "request_count",
+      "status_codes",
+      "methods",
+      "requested_paths"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "-24h",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
     "id": "apache_scanners_variant",
-    "family": "apache_suspicious_user_agents",
-    "question": "Show weird web scanners in access_combined over the last 24 hours.",
-    "expected_intent": "apache_suspicious_user_agents",
+    "family": "apache_suspicious_activity",
+    "question": "Show weird web scanners in access_combined over the last 7 days.",
+    "expected_intent": "apache_suspicious_activity",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
+      "suspicious_reason",
+      "where isnotnull(suspicious_reason)",
       "useragent",
       "clientip",
+      "status",
+      "method",
+      "uri_path",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -995,11 +1052,15 @@
     "required_result_fields": [
       "useragent",
       "clientip",
-      "count"
+      "status",
+      "method",
+      "uri_path",
+      "suspicious_reason",
+      "request_count"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "-24h",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
@@ -1090,12 +1151,15 @@
     "expected_intent": "apache_404_spike",
     "expected_shape": "timechart",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "status=404",
       "timechart"
     ],
@@ -1259,18 +1323,23 @@
   {
     "id": "apache_web_crawlers_yesterday",
     "family": "apache_suspicious_user_agents",
-    "question": "Show suspicious web crawlers yesterday.",
+    "question": "Show suspicious web crawlers over the last 7 days.",
     "expected_intent": "apache_suspicious_user_agents",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "useragent",
       "clientip",
+      "requested_paths",
+      "where",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -1280,12 +1349,15 @@
     "required_result_fields": [
       "useragent",
       "clientip",
-      "count"
+      "request_count",
+      "status_codes",
+      "methods",
+      "requested_paths"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "-1d@d",
-    "expected_latest_time": "@d"
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
   },
   {
     "id": "internal_auth_failures_today",
@@ -1403,24 +1475,37 @@
   },
   {
     "id": "apache_404_scanners_today",
-    "family": "apache_404_spike",
+    "family": "apache_404_scanning",
     "question": "Show apache 404 scanners today.",
-    "expected_intent": "apache_404_spike",
-    "expected_shape": "timechart",
+    "expected_intent": "apache_404_scanning",
+    "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "status=404",
-      "timechart"
+      "distinct_paths",
+      "requested_paths",
+      "where request_count>=3",
+      "stats"
     ],
     "forbidden_query_terms": [
       "auth.log"
     ],
-    "required_result_fields": [],
+    "required_result_fields": [
+      "clientip",
+      "request_count",
+      "distinct_paths",
+      "requested_paths",
+      "methods",
+      "user_agents"
+    ],
     "allow_zero_rows": true,
     "min_rows": 0,
     "expected_earliest_time": "@d",
@@ -1428,19 +1513,27 @@
   },
   {
     "id": "apache_scanners_today",
-    "family": "apache_suspicious_user_agents",
-    "question": "Show suspicious scanners in apache today.",
-    "expected_intent": "apache_suspicious_user_agents",
+    "family": "apache_suspicious_activity",
+    "question": "Show suspicious scanners in apache over the last 7 days.",
+    "expected_intent": "apache_suspicious_activity",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
+      "suspicious_reason",
+      "where isnotnull(suspicious_reason)",
       "useragent",
       "clientip",
+      "status",
+      "method",
+      "uri_path",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -1450,11 +1543,15 @@
     "required_result_fields": [
       "useragent",
       "clientip",
-      "count"
+      "status",
+      "method",
+      "uri_path",
+      "suspicious_reason",
+      "request_count"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "@d",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
@@ -1493,18 +1590,23 @@
   {
     "id": "apache_scanning_bots_today",
     "family": "apache_suspicious_user_agents",
-    "question": "Show scanning bots in my web logs today.",
+    "question": "Show scanning bots in my web logs over the last 7 days.",
     "expected_intent": "apache_suspicious_user_agents",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "useragent",
       "clientip",
+      "requested_paths",
+      "where",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -1514,29 +1616,37 @@
     "required_result_fields": [
       "useragent",
       "clientip",
-      "count"
+      "request_count",
+      "status_codes",
+      "methods",
+      "requested_paths"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "@d",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {
     "id": "apache_top_404_source_ips_yesterday",
-    "family": "apache_access_top_ips",
-    "question": "Show top 404 source IPs on apache yesterday.",
-    "expected_intent": "apache_access_top_ips",
+    "family": "apache_404_scanning",
+    "question": "Show top 404 source IPs on apache over the last 7 days.",
+    "expected_intent": "apache_404_scanning",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "clientip",
-      "status",
-      "method",
+      "status=404",
+      "distinct_paths",
+      "requested_paths",
+      "where request_count>=3",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -1544,14 +1654,16 @@
     ],
     "required_result_fields": [
       "clientip",
-      "status",
-      "method",
-      "count"
+      "request_count",
+      "distinct_paths",
+      "requested_paths",
+      "methods",
+      "user_agents"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "-1d@d",
-    "expected_latest_time": "@d"
+    "expected_earliest_time": "-7d",
+    "expected_latest_time": "now"
   },
   {
     "id": "windows_failed_login_usernames_week",
@@ -1667,18 +1779,23 @@
   {
     "id": "apache_web_crawler_evidence_today",
     "family": "apache_suspicious_user_agents",
-    "question": "Show apache web crawler evidence today.",
+    "question": "Show apache web crawler evidence over the last 7 days.",
     "expected_intent": "apache_suspicious_user_agents",
     "expected_shape": "stats",
     "preferred_indexes": [
-      "index=linux"
+      "index=soc_linux",
+      "index=botsv3"
     ],
     "preferred_sourcetypes": [
       "sourcetype=access_combined"
     ],
     "required_query_terms": [
+      "index=soc_linux",
+      "index=botsv3",
       "useragent",
       "clientip",
+      "requested_paths",
+      "where",
       "stats"
     ],
     "forbidden_query_terms": [
@@ -1688,11 +1805,14 @@
     "required_result_fields": [
       "useragent",
       "clientip",
-      "count"
+      "request_count",
+      "status_codes",
+      "methods",
+      "requested_paths"
     ],
     "allow_zero_rows": false,
     "min_rows": 1,
-    "expected_earliest_time": "@d",
+    "expected_earliest_time": "-7d",
     "expected_latest_time": "now"
   },
   {

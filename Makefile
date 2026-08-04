@@ -1,4 +1,6 @@
-.PHONY: help check status snapshot all langgraph-status langgraph-policy-status langgraph-policy-snapshot langgraph-policy-trend langgraph-policy-freshness langgraph-policy-trend-freshness langgraph-policy-trend-anomaly langgraph-docs-check langgraph-artifacts-check langgraph-tool-routing-check langgraph-session-check langgraph-thresholds langgraph-ops langgraph-ops-strict langgraph-run langgraph-demo langgraph-policy-demo langgraph-tool-demo langgraph-metadata-demo langgraph-chain-demo langgraph-session-demo langgraph-demo-ready langgraph-all langgraph-all-quick langgraph-gold-build langgraph-eval-prompts langgraph-topology-eval langgraph-topology-optimize agentic-check agentic-run agentic-demo agentic-session-demo agentic-status agentic-case-report agentic-demo-ready multi-model-run multi-model-check multi-model-demo multi-model-status multi-model-demo-ready model-show model-smoke model-spl-eval model-planner-eval model-planner-eval-hf model-planner-vram-smoke model-rag-ab model-spl-quality-deep spl-hardening-benchmark live-domain-benchmark live-domain-benchmark-offline spl-hardening-benchmark-botsv3 spl-hardening-benchmark-botsv3-inventory check-gold-oracles investigation-e2e spl-autonomy-check spl-autonomy-nightly env-profile-build env-profile-check env-profile-refresh env-profile-tests env-profile-schedule-install env-profile-schedule-show sourcetype-research spl-skillpack-refresh dev ui-dev docker-build docker-up docker-down docker-logs docker-deploy-build docker-deploy-up docker-deploy-down docker-deploy-logs docker-deploy-manual ollama-log-tests tdir-core-tests kvstore-case-tests docs-index report-freshness refresh-reports ops prune-summary prune-snapshot prune-trend prune-freshness prune-dry-run prune-apply prune-ops splunk-app-package splunk-app-install-local splunk-app-symlink-dev screenshots screenshots-diff configure-check configure-screenshots configure-screenshots-diff configure-e2e configure-tag-show configure-tag-record local-lab-preflight setup-local-ui-env
+.PHONY: help check status snapshot all langgraph-status langgraph-policy-status langgraph-policy-snapshot langgraph-policy-trend langgraph-policy-freshness langgraph-policy-trend-freshness langgraph-policy-trend-anomaly langgraph-docs-check langgraph-artifacts-check langgraph-tool-routing-check langgraph-session-check langgraph-thresholds langgraph-ops langgraph-ops-strict langgraph-run langgraph-demo langgraph-policy-demo langgraph-tool-demo langgraph-metadata-demo langgraph-chain-demo langgraph-session-demo langgraph-demo-ready langgraph-all langgraph-all-quick langgraph-gold-build langgraph-eval-prompts langgraph-topology-eval langgraph-topology-optimize agentic-check agentic-run agentic-demo agentic-session-demo agentic-status agentic-case-report agentic-demo-ready multi-model-run multi-model-check multi-model-demo multi-model-status multi-model-demo-ready model-show model-smoke model-spl-eval model-planner-eval model-planner-eval-hf model-planner-vram-smoke model-rag-ab model-spl-quality-deep spl-hardening-benchmark live-domain-benchmark live-domain-benchmark-offline spl-hardening-benchmark-botsv3 spl-hardening-benchmark-botsv3-inventory check-gold-oracles investigation-e2e spl-autonomy-check spl-autonomy-nightly env-profile-build env-profile-check env-profile-refresh env-profile-tests env-profile-schedule-install env-profile-schedule-show sourcetype-research spl-skillpack-refresh dev ui-dev docker-build docker-up docker-down docker-logs docker-deploy-build docker-deploy-up docker-deploy-down docker-deploy-logs docker-deploy-manual deployment-auth-tests ollama-log-tests tdir-core-tests kvstore-case-tests docs-index report-freshness refresh-reports ops prune-summary prune-snapshot prune-trend prune-freshness prune-dry-run prune-apply prune-ops splunk-app-package splunk-app-install-local splunk-app-symlink-dev screenshots screenshots-diff configure-check configure-screenshots configure-screenshots-diff configure-e2e configure-tag-show configure-tag-record local-lab-preflight setup-local-ui-env
+.PHONY: lab-data-ui lab-data-extractions
+.PHONY: spl-plan-parity spl-scenario-generate spl-live-scenario-generate spl-reference-preflight spl-train-scenario-eval spl-dev-scenario-eval spl-live-equivalence spl-rollout-offline-gate spl-rollout-regressions spl-rollout-live-gate spl-rollout-report spl-holdout-release-gate spl-rollout-release-gate
 
 QUESTION ?= Show failed login activity in the last 24 hours
 WRITE_ARTIFACT ?= 1
@@ -17,6 +19,21 @@ CONFIGURE_UI_TAG ?= configure-ui-dev
 CONFIGURE_UI_BASELINE ?= configure-ui-p0
 CASES ?= benchmarks/spl_cases.json
 OUT ?= artifacts/benchmark
+UNKNOWN_ENV_MODEL ?= granite4:3b
+ROLLOUT_MODE ?= observe
+SPL_SCENARIO_PROFILE ?= benchmarks/fixtures/scenario_environment_profile.json
+SPL_LIVE_SCENARIO_PROFILE ?= artifacts/environment/environment_profile_latest.json
+SPL_LIVE_SCENARIO_DIR ?= artifacts/benchmark/spl_rollout/live_scenarios
+SPL_SCENARIO_MAX_CASES ?= 0
+SPL_MIN_EVIDENCE_CASES ?= 12
+SPL_MIN_EVIDENCE_PLATFORMS ?= 3
+SPL_MIN_EVIDENCE_PER_PLATFORM ?= 2
+SPL_LIVE_MCP_TIMEOUT_SEC ?= 30
+SPL_LIVE_OLLAMA_TIMEOUT_SEC ?= 45
+SPL_LIVE_CASE_TIMEOUT_SEC ?= 120
+SPL_LIVE_RUN_TIMEOUT_SEC ?= 900
+SPL_LIVE_CONCURRENCY ?= 2
+SPL_LIVE_PREFLIGHT_CONCURRENCY ?= 1
 
 help:
 	@echo "Available targets:"
@@ -73,23 +90,40 @@ help:
 	@echo "  make model-rag-ab [MODEL='...'] [RUNS=1] # A/B benchmark: vanilla vs RAG-augmented SPL writing"
 	@echo "  make model-spl-quality-deep # deep live-dataset SPL quality pass (Windows/Linux/Apache)"
 	@echo "  make spl-hardening-benchmark # MCP-backed benchmark suite against the current environment"
+	@echo "  make unknown-env-benchmark # cold-profile / unknown-environment SPL benchmark"
 	@echo "  make live-domain-benchmark # profile-driven gold vs agtsmith SPL benchmark (live lab MCP)"
 	@echo "  make spl-hardening-benchmark-botsv3 # separate BOTSv3 all-time benchmark suite"
 	@echo "  make spl-hardening-benchmark-botsv3-inventory # planner-backed overview benchmark across the full BOTSv3 sourcetype inventory"
 	@echo "  make check-gold-oracles # offline gold SPL oracle validation (no MCP)"
 	@echo "  make investigation-e2e # Playwright Investigation UI E2E (live lab)"
 	@echo "  make spl-improvement-loop [SPL_IMPROVEMENT_REPORT=...] # classify benchmark failures into learning candidates"
+	@echo "  make holdout-baseline-replay # verify protected eval21 baseline without generation or MCP"
+	@echo "  make holdout-eval-live # explicitly run protected eval21 release holdout"
+	@echo "  make spl-plan-parity # record typed-plan/template parity manifest"
+	@echo "  make spl-scenario-generate # reproducibly generate metadata-derived scenario splits"
+	@echo "  make spl-train-scenario-eval # evaluate every generated training composition"
+	@echo "  make spl-dev-scenario-eval # evaluate every generated development composition"
+	@echo "  make spl-live-equivalence ROLLOUT_MODE=observe|prefer|enforce # live dev MCP equivalence"
+	@echo "  make spl-rollout-release-gate # full regressions, sequential live modes, protected holdout"
+	@echo "  make spl-rollout-report # aggregate manifests without protected case details"
 	@echo "  make spl-offline-docs-index # build SPL RAG index from Splunk Offline Docs search-index.json"
 	@echo "  make spl-benchmark-compare CURRENT=... # compare run JSON against baseline manifest"
 	@echo "  make spl-multi-layout-matrix # offline gold oracle matrix across profile fixtures"
 	@echo "  make lab-data-matrix-bootstrap # provision+verify all lab layouts then run matrix"
 	@echo "  make spl-autonomy-nightly # env refresh + autonomy loop with --promote"
+	@echo "  make spl-autonomy-loop [LONG_HORIZON=1] [MAX_ITERATIONS=10] # closed-loop or long-horizon autonomy"
+	@echo "  make spl-phase-gate PHASE=0|1|2|3|4|5 # progressive SPL autonomy phase gate"
+	@echo "  make spl-phase-report # cumulative SPL phase progress table"
+	@echo "  make sourcetype-cards-build # build sourcetype oracle cards from environment profile"
+	@echo "  make spl-embedding-index-build # build hybrid embedding RAG index (Ollama nomic-embed-text)"
 	@echo "  make env-profile-build [FOCUS_HOST=<linux-host>] # rebuild append-only environment profile from Splunk MCP (+ optional host focus)"
 	@echo "  make env-profile-check # fail if environment profile is missing/stale"
 	@echo "  make env-profile-refresh # build + freshness-check environment profile (full first-time field enrichment, then incremental maintenance)"
-	@echo "  make lab-data-refresh-mcp-token # mint MCP token (user mcp) into config/ui.env"
+	@echo "  make lab-data-refresh-mcp-token # ensure MCP token in config/ui.env (reuse when valid; pass FORCE_ROTATE=1 to rotate)"
 	@echo "  make lab-data-provision [LAB_DATA_LAYOUT=existing_lab] # create Splunk indexes for layout profile"
+	@echo "  make lab-data-extractions # install search-time XML/JSON field extractions"
 	@echo "  make lab-data-generate [LAB_DATA_LAYOUT=...] [LAB_DATA_HOURS=6] [LAB_DATA_COUNT=50] # inject fresh HEC events"
+	@echo "  make lab-data-ui [LAB_DATA_UI_PORT=8790] # open the local visual data generator"
 	@echo "  make lab-data-verify # MCP verify -24h row counts per benchmark domain"
 	@echo "  make lab-data-bootstrap # provision + generate + verify + env-profile-refresh"
 	@echo "  make lab-data-install # one-shot: HEC + creds + bootstrap (requires sudo -u splunk once)"
@@ -149,6 +183,25 @@ check:
 	@.venv/bin/python scripts/check_query_policy.py
 	@echo "[check] environment profile helper tests"
 	@$(MAKE) --no-print-directory env-profile-tests
+	@echo "[check] lab data studio"
+	@PYTHONPATH=.:scripts .venv/bin/python -m unittest \
+		scripts.tests.test_lab_data_web \
+		scripts.tests.test_lab_data_generate \
+		scripts.tests.test_lab_data_fidelity_extractions \
+		scripts.tests.test_hec_client
+	@echo "[check] operational SPL accuracy (offline)"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_operational_spl_accuracy.py --offline --out-dir artifacts/benchmark/operational_spl_accuracy_offline
+	@PYTHONPATH=.:scripts .venv/bin/python -m unittest scripts.tests.test_index_activity_profile scripts.tests.test_operational_spl_accuracy scripts.tests.test_index_question_routing scripts.tests.test_apache_intent
+	@echo "[check] SPL autonomy phase modules"
+	@PYTHONPATH=.:scripts .venv/bin/python -m unittest \
+		scripts.tests.test_sourcetype_cards \
+		scripts.tests.test_spl_query_schema \
+		scripts.tests.test_spl_field_binding \
+		scripts.tests.test_spl_structure_validate \
+		scripts.tests.test_spl_domain_knowledge \
+		scripts.tests.test_run_spl_phase_gate \
+		scripts.tests.test_spl_autonomy_fix_dispatch \
+		scripts.tests.test_spl_query_normalize
 	@echo "[check] gold SPL oracle validation"
 	@$(MAKE) --no-print-directory check-gold-oracles
 	@echo "[check] core tdir enrichment tests"
@@ -157,6 +210,8 @@ check:
 	@$(MAKE) --no-print-directory kvstore-case-tests
 	@echo "[check] configure page tests"
 	@$(MAKE) --no-print-directory configure-check
+	@echo "[check] deployment auth contract"
+	@$(MAKE) --no-print-directory deployment-auth-tests
 	@echo "[check] complete"
 
 status:
@@ -385,9 +440,14 @@ model-smoke:
 	@echo "[model-smoke] complete"
 
 model-spl-eval:
-	@echo "[model-spl-eval] deterministic benchmark for query-writer SPL model"
-	@.venv/bin/python scripts/evaluate_spl_writer_models.py
+	@echo "[model-spl-eval] full spl_cases.json writer benchmark (few-shot prompts)"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/evaluate_spl_writer_models.py --cases benchmarks/spl_cases.json --models "$${OLLAMA_MODEL_QUERY_WRITER:-granite4:3b}"
 	@echo "[model-spl-eval] complete"
+
+model-spl-eval-quick:
+	@echo "[model-spl-eval-quick] 5-prompt smoke for query-writer SPL model"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/evaluate_spl_writer_models.py --cases quick
+	@echo "[model-spl-eval-quick] complete"
 
 model-planner-eval:
 	@echo "[model-planner-eval] isolated planner_node benchmark (see artifacts/model_eval/planner_bakeoff/)"
@@ -422,6 +482,12 @@ spl-hardening-benchmark:
 	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_spl_hardening_benchmark.py --cases $(CASES) --out-dir $(OUT)
 	@echo "[spl-hardening-benchmark] complete"
 
+unknown-env-benchmark:
+	@echo "[unknown-env-benchmark] cold-profile / unknown-environment SPL benchmark"
+	@AGTSMITH_WRITER_MODE=constrained AGTSMITH_TEMPLATE_OVERRIDE=fallback \
+		PYTHONPATH=.:scripts .venv/bin/python scripts/run_unknown_env_benchmark.py --model "$(UNKNOWN_ENV_MODEL)"
+	@echo "[unknown-env-benchmark] complete"
+
 LIVE_DOMAIN_BENCHMARK_OUT ?= artifacts/spl_autonomy/live_benchmark
 
 live-domain-benchmark:
@@ -447,6 +513,7 @@ spl-multi-layout-matrix:
 
 lab-data-matrix-bootstrap:
 	@echo "[lab-data-matrix-bootstrap] bootstrap each lab layout and run offline matrix"
+	@$(MAKE) --no-print-directory lab-data-extractions
 	@for layout in existing_lab multi_index_ideal minimal_ci cloud_only; do \
 		echo "[lab-data-matrix-bootstrap] layout=$$layout"; \
 		$(MAKE) --no-print-directory lab-data-provision LAB_DATA_LAYOUT=$$layout || exit 1; \
@@ -466,6 +533,7 @@ lab-data-expanded-bootstrap: lab-data-refresh-mcp-token
 	@echo "[lab-data-expanded-bootstrap] provision expanded heterogeneous lab indexes and onboard all domains"
 	@$(MAKE) --no-print-directory lab-data-provision LAB_DATA_LAYOUT=expanded_lab
 	@$(MAKE) --no-print-directory lab-data-hec-sync LAB_DATA_LAYOUT=expanded_lab
+	@$(MAKE) --no-print-directory lab-data-extractions
 	@$(MAKE) --no-print-directory lab-data-generate LAB_DATA_LAYOUT=expanded_lab LAB_DATA_HOURS=24 LAB_DATA_COUNT=80
 	@$(MAKE) --no-print-directory lab-data-verify LAB_DATA_LAYOUT=expanded_lab
 	@$(MAKE) --no-print-directory env-profile-refresh
@@ -502,6 +570,125 @@ spl-improvement-loop:
 	@PYTHONPATH=.:scripts .venv/bin/python scripts/spl_improvement_loop.py --report $(SPL_IMPROVEMENT_REPORT)
 	@echo "[spl-improvement-loop] complete"
 
+holdout-baseline-replay:
+	@echo "[holdout-baseline-replay] verifying frozen eval21 baseline"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_holdout_eval.py
+	@echo "[holdout-baseline-replay] complete"
+
+holdout-eval-live:
+	@echo "[holdout-eval-live] running protected release holdout; never feed this report to improvement targets"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_holdout_eval.py --live --min-equivalence 0.75 --out artifacts/benchmark/holdout_eval/latest.json
+	@echo "[holdout-eval-live] complete"
+
+spl-plan-parity:
+	@echo "[spl-plan-parity] validating template representation and read-only policy"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_spl_plan_parity.py
+	@echo "[spl-plan-parity] complete"
+
+spl-scenario-generate:
+	@echo "[spl-scenario-generate] profile=$(SPL_SCENARIO_PROFILE)"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/generate_profile_scenarios.py \
+		--profile "$(SPL_SCENARIO_PROFILE)" \
+		--out-dir benchmarks/scenario_splits/generated
+	@echo "[spl-scenario-generate] complete"
+
+spl-live-scenario-generate:
+	@echo "[spl-live-scenario-generate] current_profile=$(SPL_LIVE_SCENARIO_PROFILE)"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/generate_profile_scenarios.py \
+		--profile "$(SPL_LIVE_SCENARIO_PROFILE)" \
+		--out-dir "$(SPL_LIVE_SCENARIO_DIR)"
+	@echo "[spl-live-scenario-generate] complete"
+
+spl-reference-preflight: spl-live-scenario-generate
+	@echo "[spl-reference-preflight] deterministic references only"
+	@AGTSMITH_ENVIRONMENT_PROFILE_PATH="$(SPL_LIVE_SCENARIO_PROFILE)" \
+		PYTHONPATH=.:scripts .venv/bin/python scripts/run_generated_scenario_eval.py \
+		--split dev --execution live --mode observe \
+		--scenario-dir "$(SPL_LIVE_SCENARIO_DIR)" \
+		--max-cases "$(SPL_SCENARIO_MAX_CASES)" \
+		--reference-preflight-only \
+		--min-evidence-cases "$(SPL_MIN_EVIDENCE_CASES)" \
+		--min-evidence-platforms "$(SPL_MIN_EVIDENCE_PLATFORMS)" \
+		--min-evidence-per-platform "$(SPL_MIN_EVIDENCE_PER_PLATFORM)" \
+		--mcp-request-timeout-sec "$(SPL_LIVE_MCP_TIMEOUT_SEC)" \
+		--ollama-request-timeout-sec "$(SPL_LIVE_OLLAMA_TIMEOUT_SEC)" \
+		--case-timeout-sec "$(SPL_LIVE_CASE_TIMEOUT_SEC)" \
+		--run-timeout-sec "$(SPL_LIVE_RUN_TIMEOUT_SEC)" \
+		--live-concurrency "$(SPL_LIVE_CONCURRENCY)" \
+		--reference-preflight-concurrency "$(SPL_LIVE_PREFLIGHT_CONCURRENCY)"
+	@echo "[spl-reference-preflight] complete"
+
+spl-train-scenario-eval:
+	@echo "[spl-train-scenario-eval] full static training composition gate"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_generated_scenario_eval.py \
+		--split train --execution static --mode observe
+	@echo "[spl-train-scenario-eval] complete"
+
+spl-dev-scenario-eval:
+	@echo "[spl-dev-scenario-eval] full static development composition gate"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_generated_scenario_eval.py \
+		--split dev --execution static --mode observe
+	@echo "[spl-dev-scenario-eval] complete"
+
+spl-live-equivalence: spl-live-scenario-generate
+	@echo "[spl-live-equivalence] mode=$(ROLLOUT_MODE) max_cases=$(SPL_SCENARIO_MAX_CASES)"
+	@AGTSMITH_ENVIRONMENT_PROFILE_PATH="$(SPL_LIVE_SCENARIO_PROFILE)" \
+		PYTHONPATH=.:scripts .venv/bin/python scripts/run_generated_scenario_eval.py \
+		--split dev --execution live --mode "$(ROLLOUT_MODE)" \
+		--scenario-dir "$(SPL_LIVE_SCENARIO_DIR)" \
+		--max-cases "$(SPL_SCENARIO_MAX_CASES)" \
+		--min-evidence-cases "$(SPL_MIN_EVIDENCE_CASES)" \
+		--min-evidence-platforms "$(SPL_MIN_EVIDENCE_PLATFORMS)" \
+		--min-evidence-per-platform "$(SPL_MIN_EVIDENCE_PER_PLATFORM)" \
+		--mcp-request-timeout-sec "$(SPL_LIVE_MCP_TIMEOUT_SEC)" \
+		--ollama-request-timeout-sec "$(SPL_LIVE_OLLAMA_TIMEOUT_SEC)" \
+		--case-timeout-sec "$(SPL_LIVE_CASE_TIMEOUT_SEC)" \
+		--run-timeout-sec "$(SPL_LIVE_RUN_TIMEOUT_SEC)" \
+		--live-concurrency "$(SPL_LIVE_CONCURRENCY)" \
+		--reference-preflight-concurrency "$(SPL_LIVE_PREFLIGHT_CONCURRENCY)"
+	@echo "[spl-live-equivalence] complete"
+
+spl-rollout-offline-gate: spl-plan-parity spl-train-scenario-eval spl-dev-scenario-eval
+	@echo "[spl-rollout-offline-gate] complete"
+
+spl-rollout-regressions: check check-gold-oracles spl-multi-layout-matrix
+	@$(MAKE) --no-print-directory unknown-env-benchmark
+	@$(MAKE) --no-print-directory operational-spl-accuracy-multimodel
+	@PYTHONPATH=.:scripts .venv/bin/python -m unittest -v \
+		scripts.tests.test_apache_intent \
+		scripts.tests.test_explicit_sourcetype_routing
+	@echo "[spl-rollout-regressions] complete"
+
+spl-rollout-live-gate:
+	@set -e; for mode in observe prefer enforce; do \
+		echo "[spl-rollout-live-gate] validating $$mode"; \
+		$(MAKE) --no-print-directory spl-live-equivalence ROLLOUT_MODE=$$mode SPL_SCENARIO_MAX_CASES=$(SPL_SCENARIO_MAX_CASES); \
+	done
+	@echo "[spl-rollout-live-gate] complete"
+
+spl-holdout-release-gate:
+	@$(MAKE) --no-print-directory holdout-eval-live
+	@$(MAKE) --no-print-directory spl-rollout-report
+	@echo "[spl-holdout-release-gate] complete"
+
+spl-rollout-report:
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/build_spl_rollout_report.py
+	@echo "[spl-rollout-report] complete"
+
+spl-rollout-release-gate: spl-rollout-regressions spl-rollout-offline-gate spl-rollout-live-gate spl-holdout-release-gate
+	@echo "[spl-rollout-release-gate] complete"
+
+spl-improvement-cycle:
+	@echo "[spl-improvement-cycle] failure classify + skillpack/cards/embed refresh + re-benchmark"
+	@set -a && [ -f config/ui.env ] && . config/ui.env; set +a; \
+		AGTSMITH_TEMPLATE_OVERRIDE=fallback AGTSMITH_WRITER_MODE=$${AGTSMITH_WRITER_MODE:-constrained} \
+		PYTHONPATH=.:scripts .venv/bin/python scripts/run_spl_improvement_cycle.py \
+		--report $(SPL_IMPROVEMENT_REPORT) \
+		--target-score $${SPL_TARGET_SCORE:-85} \
+		--max-cycles $${SPL_MAX_CYCLES:-5} \
+		$(if $(filter 1,$(SPL_PHASE_QUICK)),--quick,)
+	@echo "[spl-improvement-cycle] complete"
+
 SPL_OFFLINE_DOCS_SOURCE ?= /home/joehaga/ai_projects/Splunk4Offlinedocs/artifacts/staging/splunk_offline_docs/appserver/static/docs/manifest/search-index.json
 SPL_OFFLINE_DOCS_RAG_OUT ?= artifacts/knowledge/spl_offline_docs_rag_index.json
 
@@ -509,6 +696,22 @@ spl-offline-docs-index:
 	@echo "[spl-offline-docs-index] building SPL-focused RAG index from offline docs"
 	@PYTHONPATH=.:scripts .venv/bin/python scripts/build_spl_offline_docs_rag_index.py --source $(SPL_OFFLINE_DOCS_SOURCE) --out $(SPL_OFFLINE_DOCS_RAG_OUT)
 	@echo "[spl-offline-docs-index] complete"
+
+spl-offline-docs-index-if-stale:
+	@echo "[spl-offline-docs-index-if-stale] rebuilding offline docs RAG index when source is newer"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/build_spl_offline_docs_rag_index.py --source $(SPL_OFFLINE_DOCS_SOURCE) --out $(SPL_OFFLINE_DOCS_RAG_OUT) --if-stale
+	@echo "[spl-offline-docs-index-if-stale] complete"
+
+operational-spl-accuracy:
+	@echo "[operational-spl-accuracy] running operational SPL accuracy harness"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_operational_spl_accuracy.py --out-dir artifacts/benchmark/operational_spl_accuracy
+	@echo "[operational-spl-accuracy] complete"
+
+operational-spl-accuracy-multimodel:
+	@echo "[operational-spl-accuracy-multimodel] template + live multi-model operational accuracy"
+	@AGTSMITH_TEMPLATE_OVERRIDE=fallback AGTSMITH_WRITER_MODE=constrained \
+		PYTHONPATH=.:scripts .venv/bin/python scripts/run_operational_spl_accuracy.py --multi-model --out-dir artifacts/benchmark/operational_spl_accuracy
+	@echo "[operational-spl-accuracy-multimodel] complete"
 
 spl-benchmark-compare:
 	@echo "[spl-benchmark-compare] compare current benchmark to baseline"
@@ -544,6 +747,60 @@ spl-autonomy-nightly: lab-data-refresh-mcp-token env-profile-refresh
 		--promote
 	@echo "[spl-autonomy-nightly] complete"
 
+PHASE ?= 0
+SPL_PHASE_QUICK ?= 0
+SPL_PHASE_USE_EXISTING ?= 0
+LONG_HORIZON ?= 0
+MAX_ITERATIONS ?= 10
+
+spl-phase-gate:
+	@echo "[spl-phase-gate] phase=$(PHASE) quick=$(SPL_PHASE_QUICK) use_existing=$(SPL_PHASE_USE_EXISTING)"
+	@AGTSMITH_TEMPLATE_OVERRIDE=fallback AGTSMITH_WRITER_MODE=$${AGTSMITH_WRITER_MODE:-constrained} \
+		PYTHONPATH=.:scripts .venv/bin/python scripts/run_spl_phase_gate.py --phase=$(PHASE) \
+		$(if $(filter 1,$(SPL_PHASE_QUICK)),--quick,) \
+		$(if $(filter 1,$(SPL_PHASE_USE_EXISTING)),--use-existing,)
+	@echo "[spl-phase-gate] complete"
+
+spl-phase-report:
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_spl_phase_gate.py --report --phase=0
+	@echo "[spl-phase-report] complete"
+
+spl-phases-live:
+	@echo "[spl-phases-live] executing live phase gates 0-6 (real benchmarks, no artifact reuse)"
+	@set -e; for phase in 0 1 2 3 4 5 6; do \
+		echo "=== LIVE PHASE $$phase ==="; \
+		$(MAKE) --no-print-directory spl-phase-gate PHASE=$$phase SPL_PHASE_USE_EXISTING=0; \
+	done
+	@$(MAKE) --no-print-directory spl-phase-report
+	@echo "[spl-phases-live] complete"
+
+sourcetype-cards-build:
+	@echo "[sourcetype-cards-build] projecting sourcetype oracle cards from environment profile"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/build_sourcetype_cards.py
+	@echo "[sourcetype-cards-build] complete"
+
+spl-embedding-index-build:
+	@echo "[spl-embedding-index-build] building hybrid SPL embedding index"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/build_spl_embedding_index.py --skip-embed
+	@echo "[spl-embedding-index-build] complete"
+
+spl-domain-patterns-build:
+	@echo "[spl-domain-patterns-build] building SPL domain pattern oracle from templates and benchmarks"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/build_spl_domain_patterns.py
+	@echo "[spl-domain-patterns-build] complete"
+
+spl-autonomy-loop:
+	@echo "[spl-autonomy-loop] long_horizon=$(LONG_HORIZON) max_iterations=$(MAX_ITERATIONS)"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/spl_autonomy_loop.py \
+		--out-dir $(SPL_AUTONOMY_OUT) \
+		--cases $(SPL_AUTONOMY_CASES) \
+		--max-iterations $(MAX_ITERATIONS) \
+		--skip-preflight --skip-e2e \
+		$(if $(filter 1,$(LONG_HORIZON)),--long-horizon,) \
+		$(if $(filter 1,$(SPL_PHASE_QUICK)),--quick,) \
+		$(if $(filter 1,$(SPL_PHASE_USE_EXISTING)),--use-existing-artifacts,)
+	@echo "[spl-autonomy-loop] complete"
+
 spl-hardening-benchmark-botsv3:
 	@echo "[spl-hardening-benchmark-botsv3] running BOTSv3 all-time benchmark"
 	@PYTHONPATH=.:scripts .venv/bin/python scripts/run_spl_hardening_benchmark.py --cases benchmarks/spl_cases_botsv3.json --out-dir artifacts/benchmark/botsv3
@@ -570,6 +827,8 @@ env-profile-check:
 LAB_DATA_LAYOUT ?= existing_lab
 LAB_DATA_HOURS ?= 6
 LAB_DATA_COUNT ?= 50
+LAB_DATA_UI_PORT ?= 8790
+LAB_DATA_UI_NO_BROWSER ?= 0
 LAB_DATA_RUN = .venv/bin/python scripts/lab_data/run_lab_data.py --
 
 lab-data-provision:
@@ -578,15 +837,26 @@ lab-data-provision:
 	@echo "[lab-data-provision] complete"
 
 lab-data-refresh-mcp-token:
-	@echo "[lab-data-refresh-mcp-token] mint MCP token for user mcp -> config/ui.env"
-	@PYTHONPATH=.:scripts .venv/bin/python scripts/lab_data/refresh_mcp_token.py
+	@echo "[lab-data-refresh-mcp-token] ensure MCP token for user mcp -> config/ui.env"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/lab_data/refresh_mcp_token.py $(if $(FORCE_ROTATE),--force-rotate,)
 	@echo "[lab-data-refresh-mcp-token] complete"
+
+lab-data-extractions:
+	@echo "[lab-data-extractions] installing source-native XML/JSON search-time fields"
+	@$(LAB_DATA_RUN) .venv/bin/python scripts/lab_data/setup_fidelity_extractions.py
+	@echo "[lab-data-extractions] complete"
 
 lab-data-generate:
 	@echo "[lab-data-generate] injecting events layout=$(LAB_DATA_LAYOUT) hours=$(LAB_DATA_HOURS) count=$(LAB_DATA_COUNT)"
 	@$(LAB_DATA_RUN) .venv/bin/python scripts/lab_data_generate.py \
 		--layout "$(LAB_DATA_LAYOUT)" --hours "$(LAB_DATA_HOURS)" --count "$(LAB_DATA_COUNT)"
 	@echo "[lab-data-generate] complete"
+
+lab-data-ui:
+	@echo "[lab-data-ui] opening local Splunk Lab Data Studio on port $(LAB_DATA_UI_PORT)"
+	@$(LAB_DATA_RUN) .venv/bin/python scripts/lab_data_web.py \
+		--host 127.0.0.1 --port "$(LAB_DATA_UI_PORT)" \
+		$(if $(filter 1,$(LAB_DATA_UI_NO_BROWSER)),--no-browser,)
 
 lab-data-verify:
 	@echo "[lab-data-verify] MCP row check for generated lab data"
@@ -598,7 +868,7 @@ lab-data-cleanup:
 	@$(LAB_DATA_RUN) .venv/bin/python scripts/lab_data_cleanup.py --layout "$(LAB_DATA_LAYOUT)"
 	@echo "[lab-data-cleanup] complete"
 
-lab-data-bootstrap: lab-data-refresh-mcp-token lab-data-provision lab-data-generate lab-data-verify env-profile-refresh
+lab-data-bootstrap: lab-data-refresh-mcp-token lab-data-provision lab-data-extractions lab-data-generate lab-data-verify env-profile-refresh
 	@echo "[lab-data-bootstrap] complete"
 
 lab-data-install:
@@ -612,17 +882,17 @@ spl-skillpack-refresh:
 	$$PYTHON_BIN scripts/build_spl_skillpack.py
 	@echo "[spl-skillpack-refresh] complete"
 
-env-profile-refresh: env-profile-build env-profile-check spl-skillpack-refresh
+env-profile-refresh: env-profile-build env-profile-check sourcetype-cards-build spl-embedding-index-build spl-domain-patterns-build spl-offline-docs-index-if-stale spl-skillpack-refresh
 	@echo "[env-profile-refresh] complete"
 
 env-profile-tests:
 	@echo "[env-profile-tests] running parser/validation unit tests"
-	@PYTHONPATH=.:scripts .venv/bin/python -m unittest scripts.tests.test_environment_profile scripts.tests.test_spl_query_repair scripts.tests.test_intent_field_contracts scripts.tests.test_langgraph_coherence_wiring scripts.tests.test_lab_data_config scripts.tests.test_setup_hec
+	@PYTHONPATH=.:scripts .venv/bin/python -m unittest scripts.tests.test_environment_profile scripts.tests.test_index_activity_profile scripts.tests.test_spl_query_repair scripts.tests.test_intent_field_contracts scripts.tests.test_langgraph_coherence_wiring scripts.tests.test_lab_data_config scripts.tests.test_setup_hec scripts.tests.test_question_routing scripts.tests.test_spl_writer_prompt scripts.tests.test_spl_hardening_scorer scripts.tests.test_live_domain_benchmark scripts.tests.test_spl_field_strategy scripts.tests.test_field_discovery_wiring scripts.tests.test_post_execution_diagnostics
 	@echo "[env-profile-tests] complete"
 
 env-profile-schedule-install:
-	@echo "[env-profile-schedule-install] installing cron scheduler"
-	@bash scripts/install_env_profile_scheduler.sh "$${DAY_OF_WEEK:-0}" "$${HOUR:-4}" "$${MINUTE:-0}"
+	@echo "[env-profile-schedule-install] installing cron scheduler (INTERVAL_MIN=$${INTERVAL_MIN:-45})"
+	@INTERVAL_MIN=$${INTERVAL_MIN:-45} bash scripts/install_env_profile_scheduler.sh
 	@echo "[env-profile-schedule-install] complete"
 
 env-profile-schedule-show:
@@ -687,16 +957,27 @@ docker-deploy-up:
 		sleep 1; \
 	fi
 	@docker compose -f docker-compose.deploy.yml up -d
-	@echo "[docker-deploy-up] complete (UI creds: docker volume, not host config/ui.env)"
+	@echo "[docker-deploy-up] complete (private named config volume; enter runtime credentials in the UI)"
+	@echo "[docker-deploy-up] fresh volume: complete first-run setup at /setup/first-run"
+	@echo "[docker-deploy-up] restart persistence: docker compose down preserves the config volume"
+	@echo "[docker-deploy-up] reset auth: remove the Compose-managed agtsmith_deploy_config volume, then rerun"
 
 docker-deploy-hotpatch:
 	@echo "[docker-deploy-hotpatch] syncing repo UI code into agtsmith-ui-deploy (preserves /app/config volume creds)"
-	@docker cp scripts/web_ui_server.py agtsmith-ui-deploy:/app/scripts/web_ui_server.py
-	@docker cp scripts/runtime_config.py agtsmith-ui-deploy:/app/scripts/runtime_config.py
-	@docker cp scripts/ollama_ops_monitor.py agtsmith-ui-deploy:/app/scripts/ollama_ops_monitor.py
-	@docker cp scripts/ollama_log_stream.py agtsmith-ui-deploy:/app/scripts/ollama_log_stream.py
+	@docker cp scripts/. agtsmith-ui-deploy:/app/scripts/
 	@docker cp ollama_client.py agtsmith-ui-deploy:/app/ollama_client.py
 	@docker cp VERSION agtsmith-ui-deploy:/app/VERSION
+	@if [ -f artifacts/environment/sourcetype_cards.json ]; then \
+		docker exec agtsmith-ui-deploy mkdir -p /app/artifacts/environment; \
+		docker cp artifacts/environment/sourcetype_cards.json agtsmith-ui-deploy:/app/artifacts/environment/sourcetype_cards.json; \
+	fi
+	@if [ -f artifacts/environment/sourcetype_cards.meta.json ]; then \
+		docker cp artifacts/environment/sourcetype_cards.meta.json agtsmith-ui-deploy:/app/artifacts/environment/sourcetype_cards.meta.json; \
+	fi
+	@if [ -f artifacts/knowledge/spl_domain_patterns.json ]; then \
+		docker exec agtsmith-ui-deploy mkdir -p /app/artifacts/knowledge; \
+		docker cp artifacts/knowledge/spl_domain_patterns.json agtsmith-ui-deploy:/app/artifacts/knowledge/spl_domain_patterns.json; \
+	fi
 	@docker restart agtsmith-ui-deploy
 	@echo "[docker-deploy-hotpatch] complete"
 
@@ -707,6 +988,11 @@ docker-deploy-down:
 
 docker-deploy-logs:
 	@docker compose -f docker-compose.deploy.yml logs --tail=200 -f
+
+deployment-auth-tests:
+	@echo "[deployment-auth-tests] verifying fresh-install auth contract"
+	@PYTHONPATH=.:scripts .venv/bin/python -m unittest scripts.tests.test_deployment_auth_contract
+	@echo "[deployment-auth-tests] complete"
 
 docker-deploy-manual:
 	@bash ./scripts/docker-deploy-manual.sh
@@ -731,7 +1017,7 @@ kvstore-case-tests:
 
 multi-model-run:
 	@echo "[multi-model-run] question=$(QUESTION)"
-	@.venv/bin/python scripts/langgraph_multi_model_soc.py --write-artifact "$(QUESTION)"
+	@PYTHONPATH=.:scripts .venv/bin/python scripts/langgraph_multi_model_soc.py --write-artifact "$(QUESTION)"
 	@echo "[multi-model-run] complete"
 
 multi-model-check:

@@ -38,6 +38,13 @@ def _row_count(structured: dict[str, Any]) -> int:
                 pass
     results = structured.get("results")
     if isinstance(results, list):
+        if len(results) == 1 and isinstance(results[0], dict):
+            for key in ("count", "event_count", "total"):
+                if key in results[0]:
+                    try:
+                        return int(results[0][key])
+                    except (TypeError, ValueError):
+                        pass
         return len(results)
     return 0
 

@@ -1,29 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)"
+UI_ENV="${ROOT}/config/ui.env"
+PYTHON_BIN="${ROOT}/.venv/bin/python"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="python3"
+fi
+
 : "${SPLUNK_USER:?Set SPLUNK_USER}"
 : "${SPLUNK_PASS:?Set SPLUNK_PASS}"
 
-# Splunk MCP Server 1.x requires encrypted tokens from the app REST handler,
-# not standard /services/authorization/tokens static JWTs.
 TOKEN_USER="${MCP_TOKEN_USER:-mcp}"
-MCP_TOKEN_URL="https://127.0.0.1:8089/servicesNS/nobody/Splunk_MCP_Server/mcp_token?output_mode=json"
+FORCE_ROTATE=0
+for arg in "$@"; do
+  if [[ "${arg}" == "--force-rotate" ]]; then
+    FORCE_ROTATE=1
+  fi
+done
 
-curl -sk -u "${SPLUNK_USER}:${SPLUNK_PASS}" \
-  -X POST "${MCP_TOKEN_URL}" \
-  -d "username=${TOKEN_USER}" \
-  -d "action=rotate" >/dev/null
+ARGS=(--token-user "${TOKEN_USER}")
+if [[ "${FORCE_ROTATE}" == "1" ]]; then
+  ARGS+=(--force-rotate)
+fi
 
-fetch_resp=$(curl -sk -u "${SPLUNK_USER}:${SPLUNK_PASS}" \
-  "${MCP_TOKEN_URL}&username=${TOKEN_USER}")
+if [[ -f "${UI_ENV}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${UI_ENV}" 2>/dev/null || true
+  set +a
+fi
 
-token=$(python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))" <<<"${fetch_resp}" 2>/dev/null || true)
+export SPLUNK_USER SPLUNK_PASS
+OUT="$(
+  PYTHONPATH="${ROOT}:${ROOT}/scripts" "${PYTHON_BIN}" "${ROOT}/scripts/lab_data/refresh_mcp_token.py" \
+    --ui-env "${UI_ENV}" \
+    "${ARGS[@]}"
+)"
+echo "${OUT}" >&2
 
-if [[ -z "${token:-}" ]]; then
-  echo "Failed to mint encrypted MCP token for user ${TOKEN_USER}." >&2
-  echo "Response: ${fetch_resp}" >&2
+TOKEN="$(grep '^SPLUNK_LAB_BEARER_TOKEN=' "${UI_ENV}" | cut -d= -f2-)"
+
+if [[ -z "${TOKEN}" ]]; then
+  echo "Failed to ensure encrypted MCP token for user ${TOKEN_USER}." >&2
   exit 1
 fi
 
 echo "MCP bearer token (store in config/ui.env only — do not commit):"
-echo "SPLUNK_LAB_BEARER_TOKEN=${token}"
+echo "SPLUNK_LAB_BEARER_TOKEN=${TOKEN}"

@@ -1,0 +1,229 @@
+[
+  {
+    "id": "unknown_apache_access_cold",
+    "question": "Investigate suspicious web access in access_combined over the last 24 hours. Show top client IPs and status codes.",
+    "expected_intent": "apache_access_top_ips",
+    "sourcetype": "access_combined",
+    "strip_sourcetype_inventory": true,
+    "required_terms": ["access_combined", "stats", "clientip", "status"],
+    "required_roles": ["src_ip", "status"]
+  },
+  {
+    "id": "unknown_linux_auth_cold",
+    "question": "Show failed SSH login activity on linux in the last 24 hours with top usernames and source IPs.",
+    "expected_intent": "linux_auth_failures",
+    "sourcetype": "auth.log",
+    "strip_sourcetype_inventory": true,
+    "required_terms": ["index=linux", "auth", "stats", "user"],
+    "required_roles": ["user", "src_ip"]
+  },
+  {
+    "id": "unknown_cloudtrail_cold",
+    "question": "Show AWS CloudTrail activity in the last 24 hours including event names and users.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "sourcetype": "aws:cloudtrail",
+    "strip_sourcetype_inventory": true,
+    "required_terms": ["cloudtrail", "stats", "event"],
+    "required_roles": ["action", "src_ip"]
+  },
+  {
+    "id": "unknown_audit_cold",
+    "question": "Show _audit auth failures today.",
+    "expected_intent": "internal_auth_failures",
+    "sourcetype": "audittrail",
+    "strip_sourcetype_inventory": true,
+    "required_terms": ["index=_audit", "stats"],
+    "required_roles": ["user", "src_ip"]
+  },
+  {
+    "id": "unknown_index_count",
+    "question": "how many indexes do I have in this splunk environment?",
+    "expected_intent": "top_indexes",
+    "sourcetype": "",
+    "strip_sourcetype_inventory": false,
+    "required_terms": ["dc(index)", "index"],
+    "required_roles": []
+  },
+  {
+    "id": "unknown_busiest_indexes",
+    "question": "Which indexes had the most events in the last 24 hours?",
+    "expected_intent": "top_indexes",
+    "sourcetype": "",
+    "strip_sourcetype_inventory": false,
+    "required_terms": ["stats", "count by index"],
+    "required_roles": []
+  },
+  {
+    "id": "fields_first_native_apache",
+    "benchmark_mode": "field_strategy_oracle",
+    "question": "Show top Apache client IPs, status codes, methods, and user agents.",
+    "expected_intent": "apache_access_top_ips",
+    "sourcetype": "access_combined",
+    "index_expr": "index=linux",
+    "canonical_query": "search index=linux sourcetype=access_combined | rex field=_raw \"^(?<clientip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \\\"(?<method>[A-Z]+) (?<uri_path>\\S+) [^\\\"]+\\\" (?<status>\\d{3}) \\S+ \\\"[^\\\"]*\\\" \\\"(?<useragent>[^\\\"]*)\\\"\" | stats count by clientip status method useragent | sort - count",
+    "role_mappings": {
+      "src_ip": ["clientip"],
+      "status": ["status"],
+      "method": ["method"],
+      "user_agent": ["useragent"]
+    },
+    "live_fields_by_index": {
+      "linux": ["clientip", "status", "method", "useragent", "_raw"]
+    },
+    "expected_trusted_fields": ["clientip", "status", "method", "useragent"],
+    "required_patterns": ["\\|\\s*stats count by clientip status method useragent"],
+    "forbidden_patterns": ["\\|\\s*rex\\b", "\\|\\s*spath\\b"],
+    "required_action_prefixes": ["removed_redundant_rex"]
+  },
+  {
+    "id": "fields_first_raw_only_apache",
+    "benchmark_mode": "field_strategy_oracle",
+    "question": "Show top Apache client IPs from raw access logs.",
+    "expected_intent": "apache_access_top_ips",
+    "sourcetype": "access_combined",
+    "index_expr": "index=raw_web",
+    "canonical_query": "search index=raw_web sourcetype=access_combined | rex field=_raw \"^(?<clientip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \\\"(?<method>[A-Z]+) (?<uri_path>\\S+) [^\\\"]+\\\" (?<status>\\d{3})\" | stats count by clientip status method | sort - count",
+    "role_mappings": {
+      "src_ip": ["clientip"],
+      "status": ["status"],
+      "method": ["method"]
+    },
+    "live_fields_by_index": {
+      "raw_web": ["host", "_raw"]
+    },
+    "expected_trusted_fields": [],
+    "required_patterns": ["\\|\\s*rex\\b"],
+    "forbidden_patterns": ["\\|\\s*spath\\b"],
+    "required_action_prefixes": ["preserved_rex_fallback"]
+  },
+  {
+    "id": "fields_first_json_spath_fallback",
+    "benchmark_mode": "field_strategy_oracle",
+    "question": "Show CloudTrail API activity from raw JSON.",
+    "expected_intent": "aws_cloudtrail_activity",
+    "sourcetype": "aws:cloudtrail",
+    "index_expr": "index=cloud",
+    "canonical_query": "search index=cloud sourcetype=aws:cloudtrail | rex field=_raw \"\\\"eventName\\\":\\\"(?<eventName>[^\\\"]+)\\\"\" | stats count by eventName",
+    "role_mappings": {
+      "action": ["eventName"]
+    },
+    "live_fields_by_index": {
+      "cloud": ["host", "_raw"]
+    },
+    "expected_trusted_fields": [],
+    "required_patterns": ["\\|\\s*spath input=_raw\\b"],
+    "forbidden_patterns": ["\\|\\s*rex\\b"],
+    "required_action_prefixes": ["replaced_rex_with_spath"]
+  },
+  {
+    "id": "fields_first_cross_index_false_positive",
+    "benchmark_mode": "field_strategy_oracle",
+    "question": "Show Apache activity across current and archive indexes.",
+    "expected_intent": "apache_access_top_ips",
+    "sourcetype": "access_combined",
+    "index_expr": "(index=linux OR index=archive)",
+    "canonical_query": "search (index=linux OR index=archive) sourcetype=access_combined | rex field=_raw \"^(?<clientip>\\S+).* \\\"(?<method>[A-Z]+) \\S+ [^\\\"]+\\\" (?<status>\\d{3})\" | stats count by clientip status method",
+    "role_mappings": {
+      "src_ip": ["clientip"],
+      "status": ["status"],
+      "method": ["method"]
+    },
+    "live_fields_by_index": {
+      "linux": ["clientip", "status", "method", "_raw"],
+      "archive": ["host", "_raw"]
+    },
+    "expected_trusted_fields": [],
+    "required_patterns": ["\\|\\s*rex\\b"],
+    "forbidden_patterns": ["\\|\\s*spath\\b"],
+    "required_action_prefixes": ["preserved_rex_fallback"]
+  },
+  {
+    "id": "fields_first_stale_profile_evidence",
+    "benchmark_mode": "field_strategy_oracle",
+    "question": "Show Apache activity when profile evidence is stale.",
+    "expected_intent": "apache_access_top_ips",
+    "sourcetype": "access_combined",
+    "index_expr": "index=stale_web",
+    "canonical_query": "search index=stale_web sourcetype=access_combined | rex field=_raw \"^(?<clientip>\\S+).* \\\"(?<method>[A-Z]+) \\S+ [^\\\"]+\\\" (?<status>\\d{3})\" | stats count by clientip status method",
+    "role_mappings": {
+      "src_ip": ["clientip"],
+      "status": ["status"],
+      "method": ["method"]
+    },
+    "profile_domains": [
+      {
+        "index": "stale_web",
+        "sourcetype": "access_combined",
+        "age_seconds": 172800,
+        "fields": [
+          {"field": "clientip", "count": 25, "sample_values": ["192.0.2.10"]},
+          {"field": "status", "count": 25, "sample_values": ["200"]},
+          {"field": "method", "count": 25, "sample_values": ["GET"]}
+        ]
+      }
+    ],
+    "live_fields_by_index": {
+      "stale_web": ["host", "_raw"]
+    },
+    "expected_trusted_fields": [],
+    "required_patterns": ["\\|\\s*rex\\b"],
+    "forbidden_patterns": ["\\|\\s*spath\\b"],
+    "required_action_prefixes": ["preserved_rex_fallback"]
+  },
+  {
+    "id": "fields_first_sparse_profile_evidence",
+    "benchmark_mode": "field_strategy_oracle",
+    "question": "Show Apache activity when profile samples are sparse.",
+    "expected_intent": "apache_access_top_ips",
+    "sourcetype": "access_combined",
+    "index_expr": "index=sparse_web",
+    "canonical_query": "search index=sparse_web sourcetype=access_combined | rex field=_raw \"^(?<clientip>\\S+).* \\\"(?<method>[A-Z]+) \\S+ [^\\\"]+\\\" (?<status>\\d{3})\" | stats count by clientip status method",
+    "role_mappings": {
+      "src_ip": ["clientip"],
+      "status": ["status"],
+      "method": ["method"]
+    },
+    "profile_domains": [
+      {
+        "index": "sparse_web",
+        "sourcetype": "access_combined",
+        "age_seconds": 30,
+        "fields": [
+          {"field": "clientip", "count": 25, "sample_values": []},
+          {"field": "status", "count": 0, "sample_values": []},
+          {"field": "method", "count": 1, "sample_values": []}
+        ]
+      }
+    ],
+    "live_fields_by_index": {
+      "sparse_web": ["host", "_raw"]
+    },
+    "expected_trusted_fields": [],
+    "required_patterns": ["\\|\\s*rex\\b"],
+    "forbidden_patterns": ["\\|\\s*spath\\b"],
+    "required_action_prefixes": ["preserved_rex_fallback"]
+  },
+  {
+    "id": "fields_first_vpc_rex_preservation",
+    "benchmark_mode": "field_strategy_oracle",
+    "question": "Show accepted and rejected VPC flows.",
+    "expected_intent": "aws_vpc_flow_activity",
+    "sourcetype": "aws:cloudwatchlogs:vpcflow",
+    "index_expr": "index=main",
+    "canonical_query": "search index=main sourcetype=aws:cloudwatchlogs:vpcflow | rex field=_raw \"^\\S+\\s+\\S+\\s+\\S+\\s+(?<src_ip>\\S+)\\s+(?<dest_ip>\\S+)\\s+\\S+\\s+(?<dest_port>\\S+)\\s+(?<protocol_num>\\S+)\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+(?<action>\\S+)\\s+\\S+$\" | stats count by action src_ip dest_ip dest_port protocol_num",
+    "role_mappings": {
+      "src_ip": ["src_ip"],
+      "dest_ip": ["dest_ip"],
+      "dest_port": ["dest_port"],
+      "protocol": ["protocol_num"],
+      "action": ["action"]
+    },
+    "live_fields_by_index": {
+      "main": ["src_ip", "dest_ip", "dest_port", "protocol_num", "action", "_raw"]
+    },
+    "expected_trusted_fields": ["src_ip", "dest_ip", "dest_port", "protocol_num", "action"],
+    "required_patterns": ["\\|\\s*rex\\b"],
+    "forbidden_patterns": ["\\|\\s*spath\\b"],
+    "required_action_prefixes": ["preserved_raw_required_extraction"]
+  }
+]

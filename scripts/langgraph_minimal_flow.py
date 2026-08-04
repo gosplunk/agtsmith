@@ -31,6 +31,7 @@ from minimal_question_to_answer import (
     summarize_with_ollama,
 )
 from query_policy import validate_query_args
+from question_intelligence import infer_time_window
 
 
 class SocState(TypedDict, total=False):
@@ -195,6 +196,7 @@ def select_splunk_tool_node(state: SocState) -> SocState:
 
 def _plan_metadata_args(question: str) -> dict:
     question_lower = question.lower()
+    earliest_time, latest_time = infer_time_window(question)
     metadata_type = "sourcetypes"
     if "host" in question_lower or "hosts" in question_lower:
         metadata_type = "hosts"
@@ -203,8 +205,8 @@ def _plan_metadata_args(question: str) -> dict:
     return {
         "type": metadata_type,
         "index": "*",
-        "earliest_time": "-24h",
-        "latest_time": "now",
+        "earliest_time": earliest_time,
+        "latest_time": latest_time,
         "row_limit": 20,
     }
 
@@ -238,12 +240,49 @@ def determine_splunk_tool(question: str, intent: str) -> tuple[str, str, dict, s
         "instance info",
         "platform info",
     )
-    if "list indexes" in question_lower or "show indexes" in question_lower or "what indexes" in question_lower:
+    index_inventory_only_terms = (
+        "list indexes",
+        "show indexes",
+        "what indexes",
+        "indexes i can access",
+        "which indexes can i",
+        "which indexes do i",
+        "how many indexes",
+        "number of indexes",
+        "count of indexes",
+    )
+    index_data_signal_terms = (
+        "have data",
+        "has data",
+        "with data",
+        "contain data",
+        "events in",
+        "event volume",
+        "most events",
+    )
+    time_window_signal_terms = (
+        "last hour",
+        "last day",
+        "last week",
+        "last 24",
+        "last 7",
+        "last 30",
+        "last 60",
+        "last 90",
+        "today",
+        "yesterday",
+    )
+    if any(term in question_lower for term in index_inventory_only_terms):
         selected_tool = "splunk_get_indexes"
         reason = "question_requests_index_inventory"
     elif intent_lower == "top_indexes" and "most events" not in question_lower and "top" not in question_lower:
-        selected_tool = "splunk_get_indexes"
-        reason = "intent_top_indexes_with_inventory_wording"
+        has_data_signal = any(term in question_lower for term in index_data_signal_terms)
+        has_time_window = any(term in question_lower for term in time_window_signal_terms)
+        if has_data_signal or has_time_window:
+            reason = "intent_top_indexes_time_bounded_data_query"
+        else:
+            selected_tool = "splunk_get_indexes"
+            reason = "intent_top_indexes_with_inventory_wording"
     elif any(term in question_lower for term in info_signal_terms):
         selected_tool = "splunk_get_info"
         reason = "question_requests_splunk_instance_info"
@@ -266,11 +305,12 @@ def plan_tool_chain_node(state: SocState) -> SocState:
     chain_mode = state.get("tool_chain_mode", "")
     log = list(state.get("decision_log", []))
     if chain_mode == "indexes_to_metadata_sourcetypes":
+        earliest_time, latest_time = infer_time_window(str(state.get("question", "")))
         second_args = {
             "type": "sourcetypes",
             "index": "__TOP_INDEX_FROM_PRIMARY__",
-            "earliest_time": "-24h",
-            "latest_time": "now",
+            "earliest_time": earliest_time,
+            "latest_time": latest_time,
             "row_limit": 20,
         }
         log.append(

@@ -1,0 +1,144 @@
+[
+  {
+    "id": "exact_reported_prompt",
+    "question": "Investigate suspicious activity in access_combined over the last 7 days. Show client IPs, status codes, methods, requested paths, and user agents.",
+    "expected_intent": "apache_suspicious_activity",
+    "expected_earliest": "-7d",
+    "required_result_fields": ["clientip", "status", "method", "uri_path", "useragent", "suspicious_reason"],
+    "required_query_terms": ["where isnotnull(suspicious_reason)", "stats"]
+  },
+  {
+    "id": "suspicious_web_paraphrase",
+    "question": "Find malicious-looking web requests in Apache access logs today and break them down by source IP, response code, path, and browser agent.",
+    "expected_intent": "apache_suspicious_activity",
+    "expected_earliest": "@d",
+    "required_result_fields": ["clientip", "status", "uri_path", "useragent", "suspicious_reason"]
+  },
+  {
+    "id": "weird_access_full_context",
+    "question": "What weird access_combined activity occurred yesterday? Keep IP, method, URI, status and user-agent context.",
+    "expected_intent": "apache_suspicious_activity",
+    "expected_earliest": "-1d@d",
+    "required_result_fields": ["clientip", "method", "uri_path", "status", "useragent"]
+  },
+  {
+    "id": "top_ips_only",
+    "question": "Show the top client IPs in Apache access logs over the past 24 hours.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_earliest": "-24h",
+    "required_result_fields": ["clientip"]
+  },
+  {
+    "id": "top_all_dimensions",
+    "question": "Summarize access_combined by client IP, status code, HTTP method, request path, and user agent this week.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_earliest": "@w0",
+    "required_result_fields": ["clientip", "status", "method", "uri_path", "useragent"]
+  },
+  {
+    "id": "status_method_summary",
+    "question": "For Apache web access, list the busiest status codes and methods in the last day.",
+    "expected_intent": "apache_access_top_ips",
+    "expected_earliest": "-1d",
+    "required_result_fields": ["status", "method"]
+  },
+  {
+    "id": "simple_total_requests",
+    "question": "How many total requests are in access_combined today?",
+    "expected_intent": "apache_access_top_ips",
+    "expected_earliest": "@d",
+    "required_result_fields": ["request_count"],
+    "forbidden_query_terms": [" by clientip"]
+  },
+  {
+    "id": "distinct_clients",
+    "question": "How many unique client IPs hit the Apache web server in the last 7 days?",
+    "expected_intent": "apache_access_top_ips",
+    "expected_earliest": "-7d",
+    "required_result_fields": ["client_ip_count"],
+    "required_query_terms": ["dc(clientip)"]
+  },
+  {
+    "id": "benign_summary_negative",
+    "question": "Show all traffic in access_combined, not suspicious activity, by client IP and requested path.",
+    "expected_intent": "apache_access_top_ips",
+    "required_result_fields": ["clientip", "uri_path"],
+    "forbidden_query_terms": ["where isnotnull(suspicious_reason)"]
+  },
+  {
+    "id": "404_spike",
+    "question": "Chart the Apache 404 spike over time today.",
+    "expected_intent": "apache_404_spike",
+    "expected_earliest": "@d",
+    "required_query_terms": ["status=404", "timechart"]
+  },
+  {
+    "id": "404_scanners",
+    "question": "Find access_combined clients scanning many 404 paths in the last 24 hours.",
+    "expected_intent": "apache_404_scanning",
+    "expected_earliest": "-24h",
+    "required_result_fields": ["clientip", "requested_paths", "distinct_paths"],
+    "required_query_terms": ["status=404", "where request_count>=3"]
+  },
+  {
+    "id": "404_source_ips",
+    "question": "Show top 404 source IPs and paths on Apache yesterday.",
+    "expected_intent": "apache_404_scanning",
+    "expected_earliest": "-1d@d",
+    "required_result_fields": ["clientip", "requested_paths"]
+  },
+  {
+    "id": "suspicious_ua",
+    "question": "Hunt suspicious user agents in access_combined for the past day.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_earliest": "-1d",
+    "required_result_fields": ["useragent", "clientip"],
+    "required_query_terms": ["where", "scanner"]
+  },
+  {
+    "id": "bot_traffic",
+    "question": "Show crawler and bot traffic in Apache access logs today.",
+    "expected_intent": "apache_suspicious_user_agents",
+    "expected_earliest": "@d",
+    "required_result_fields": ["useragent", "clientip"]
+  },
+  {
+    "id": "ua_counts_not_hunt",
+    "question": "Summarize all Apache user agent counts; do not filter for suspicious bots.",
+    "expected_intent": "apache_access_top_ips",
+    "required_result_fields": ["useragent"],
+    "forbidden_query_terms": ["where isnull(useragent)"]
+  },
+  {
+    "id": "env_probe",
+    "question": "Find requests probing /.env and other configuration files in access_combined.",
+    "expected_intent": "apache_sensitive_path_probing",
+    "required_result_fields": ["clientip", "uri_path"],
+    "required_query_terms": [".env", "where match(uri_path"]
+  },
+  {
+    "id": "admin_probe",
+    "question": "Investigate Apache admin endpoint probing over the last 3 days.",
+    "expected_intent": "apache_sensitive_path_probing",
+    "expected_earliest": "-3d",
+    "required_result_fields": ["clientip", "uri_path", "user_agents"]
+  },
+  {
+    "id": "wordpress_probe",
+    "question": "Who requested wp-admin, wp-login, or phpMyAdmin paths in the Apache access log?",
+    "expected_intent": "apache_sensitive_path_probing",
+    "required_result_fields": ["clientip", "uri_path"]
+  },
+  {
+    "id": "stream_http_conflict",
+    "question": "Summarize stream:http methods and destination sites, not Apache access_combined.",
+    "expected_intent": "stream_http_activity",
+    "forbidden_query_terms": ["sourcetype=access_combined"]
+  },
+  {
+    "id": "osquery_path_conflict",
+    "question": "Show osquery process paths and command lines; this is not Apache web traffic.",
+    "expected_intent": "osquery_process_activity",
+    "forbidden_query_terms": ["sourcetype=access_combined"]
+  }
+]

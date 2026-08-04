@@ -1,0 +1,31 @@
+{
+  "timestamp_utc": "2026-01-01T00:00:00+00:00",
+  "source": "fixture",
+  "indexes": ["main", "os", "wineventlog", "botsv3", "web"],
+  "sourcetype_to_indexes": {
+    "linux_secure": ["os"],
+    "auth.log": ["os"],
+    "syslog": ["main"],
+    "access_combined": ["web", "main"],
+    "XmlWinEventLog:Security": ["wineventlog"],
+    "XmlWinEventLog:System": ["wineventlog"],
+    "WinEventLog:Security": ["wineventlog"],
+    "Sysmon": ["wineventlog"],
+    "ps": ["os"],
+    "iis": ["web"]
+  },
+  "sourcetype_field_inventory": {
+    "linux_secure": [
+      {"field": "host", "sample_values": ["linux1"]},
+      {"field": "user", "sample_values": ["root"]}
+    ],
+    "XmlWinEventLog:Security": [
+      {"field": "EventCode", "sample_values": ["4625"]},
+      {"field": "user", "sample_values": ["SYSTEM"]}
+    ],
+    "access_combined": [
+      {"field": "clientip", "sample_values": ["10.0.0.5"]},
+      {"field": "status", "sample_values": ["404"]}
+    ]
+  }
+}

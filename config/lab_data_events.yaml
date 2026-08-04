@@ -1,27 +1,29 @@
-# Synthetic event templates for lab data generator.
-# Each event_set maps to a logical domain in lab_data_layout.yaml.
+# Production-shaped synthetic fixtures for Splunk SPL development.
+# Values are fictional, but raw structure and field names follow source-native schemas.
 
 defaults:
   host: agtsmith-lab-gen
   lab_data_source: agtsmith_generator
+  lab_data_version: fidelity_v2
   count_per_run: 50
   time_jitter_hours: 6
 
 event_sets:
-  linux_failed_ssh:
+  linux_failed_ssh: &linux_failed_ssh
     domain: linux_auth
     benchmark_case: linux_auth_failures_24h
     format: raw
     source: /var/log/auth.log
     templates:
-      - 'Failed password for invalid user {user} from {src_ip} port {port} ssh2'
-      - 'Failed password for {user} from {src_ip} port {port} ssh2'
-      - 'Invalid user {user} from {src_ip}'
+      - '{rfc3164_time} {event_host} sshd[{process_id}]: Failed password for invalid user {user} from {src_ip} port {src_port} ssh2'
+      - '{rfc3164_time} {event_host} sshd[{process_id}]: Failed password for {user} from {src_ip} port {src_port} ssh2'
+      - '{rfc3164_time} {event_host} sshd[{process_id}]: Invalid user {user} from {src_ip} port {src_port}'
     fields:
-      user: ["admin", "root", "testuser", "deploy", "oracle"]
-      src_ip: ["10.0.0.99", "10.0.0.88", "192.168.1.50", "203.0.113.10"]
-      port: ["22", "2222", "2200"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator ("Failed password" OR "Invalid user") earliest=-24h | stats count'
+      event_host: [linux-auth-01, linux-auth-02]
+      user: [admin, root, testuser, deploy, oracle]
+      src_ip: [10.0.0.99, 10.0.0.88, 192.168.1.50, 203.0.113.10]
+      src_port: [49822, 51214, 58431]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 ("Failed password" OR "Invalid user") earliest=-24h | stats count'
     min_expected_rows: 1
 
   linux_sudo:
@@ -30,85 +32,246 @@ event_sets:
     format: raw
     source: /var/log/auth.log
     templates:
-      - 'sudo: pam_unix(sudo:session): session opened for user root by {actor}(uid=1000)'
-      - 'sudo: {actor} : TTY=pts/0 ; PWD=/home/{actor} ; USER=root ; COMMAND=/bin/bash'
+      - '{rfc3164_time} {event_host} sudo[{process_id}]: pam_unix(sudo:auth): authentication failure; logname={actor} uid=1000 euid=0 tty=/dev/pts/0 ruser={actor} rhost= user={actor}'
+      - '{rfc3164_time} {event_host} sudo[{process_id}]: {actor} : 3 incorrect password attempts ; TTY=pts/0 ; PWD=/home/{actor} ; USER=root ; COMMAND=/usr/bin/bash'
+      - '{rfc3164_time} {event_host} sudo[{process_id}]: {actor} : TTY=pts/0 ; PWD=/home/{actor} ; USER=root ; COMMAND=/usr/bin/systemctl status sshd'
     fields:
-      actor: ["alice", "bob", "deploy", "ops"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator sudo earliest=-24h | stats count'
+      event_host: [linux-auth-01, linux-auth-02]
+      actor: [alice, bob, deploy, ops]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 sudo earliest=-24h | stats count'
     min_expected_rows: 1
 
-  apache_access:
+  linux_su_success:
+    domain: linux_auth
+    benchmark_case: linux_su_success_test_user_host_b
+    format: raw
+    source: /var/log/auth.log
+    templates:
+      - '{rfc3164_time} {event_host} su[{process_id}]: pam_unix(su:session): session opened for user agtsmith_test by {actor}(uid=1000)'
+      - '{rfc3164_time} {event_host} su[{process_id}]: (to agtsmith_test) {actor} on pts/1'
+    fields:
+      event_host: [linux-host-b]
+      actor: [alice, deploy]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" host="linux-host-b" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 ("session opened for user agtsmith_test" OR "(to agtsmith_test)") earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  linux_su_failure:
+    domain: linux_auth
+    benchmark_case: linux_failed_su_host_b_7d
+    format: raw
+    source: /var/log/auth.log
+    templates:
+      - '{rfc3164_time} {event_host} su[{process_id}]: pam_unix(su:auth): authentication failure; logname={actor} uid=1000 euid=0 tty=pts/1 ruser={actor} rhost= user=agtsmith_test'
+      - '{rfc3164_time} {event_host} su[{process_id}]: FAILED SU (to agtsmith_test) {actor} on pts/1'
+    fields:
+      event_host: [linux-host-b]
+      actor: [alice, deploy]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" host="linux-host-b" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 ("pam_unix(su:auth): authentication failure" OR "FAILED SU") earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  linux_non_sudoer:
+    domain: linux_auth
+    benchmark_case: linux_non_sudoer_failure_host_b
+    format: raw
+    source: /var/log/auth.log
+    templates:
+      - '{rfc3164_time} {event_host} sudo[{process_id}]: {actor} : user NOT in sudoers ; TTY=pts/1 ; PWD=/home/{actor} ; USER=root ; COMMAND=/usr/bin/id'
+    fields:
+      event_host: [linux-host-b]
+      actor: [agtsmith_test]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" host="linux-host-b" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 "NOT in sudoers" earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  linux_syslog: &linux_syslog
+    domain: linux_syslog
+    benchmark_case: linux_syslog_health_activity
+    format: raw
+    source: /var/log/messages
+    templates:
+      - '<30>1 {rfc3339_time} {event_host} systemd {process_id} - - Started {service}.'
+      - '<29>1 {rfc3339_time} {event_host} kernel {process_id} - - {interface}: link is {link_state}'
+    fields:
+      event_host: [linux-core-01, linux-core-02]
+      service: [OpenSSH server daemon, System Logging Service, Daily Cleanup of Temporary Directories]
+      interface: [eth0, ens160, bond0]
+      link_state: [up, ready]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 earliest=-24h | stats count'
+    min_expected_rows: 1
+
+  linux_syslog_soc:
+    <<: *linux_syslog
+    domain: linux_syslog_soc
+    benchmark_case: linux_syslog_health_activity_soc
+    fields:
+      event_host: [soc-linux-01, soc-linux-02]
+      service: [OpenSSH server daemon, System Logging Service, Audit Logging Service]
+      interface: [eth0, ens192, bond0]
+      link_state: [up, ready]
+
+  apache_access: &apache_access
     domain: web_access
     benchmark_case: apache_access_top_ips_24h
     format: raw
     source: /var/log/apache2/access.log
     templates:
-      - '{clientip} - - [{time}] "GET /index.html HTTP/1.1" 200 1234 "-" "Mozilla/5.0"'
-      - '{clientip} - - [{time}] "GET /api/v1/health HTTP/1.1" 200 512 "-" "curl/7.68.0"'
+      - '{clientip} - - [{apache_time}] "GET /index.html HTTP/1.1" 200 1234 "https://portal.example.test/" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"'
+      - '{clientip} - - [{apache_time}] "GET /api/v1/health HTTP/1.1" 200 512 "-" "curl/8.5.0"'
     fields:
-      clientip: ["10.0.0.5", "10.0.0.12", "203.0.113.44", "198.51.100.8"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+      event_host: [web-01, web-02]
+      clientip: [10.0.0.5, 10.0.0.12, 203.0.113.44, 198.51.100.8]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 earliest=-24h | stats count'
     min_expected_rows: 1
 
   apache_404:
-    domain: web_access
+    <<: *apache_access
     benchmark_case: apache_404_spike_24h
-    format: raw
-    source: /var/log/apache2/access.log
     templates:
-      - '{clientip} - - [{time}] "GET /admin/login.php HTTP/1.1" 404 512 "-" "scanner/1.0"'
-      - '{clientip} - - [{time}] "GET /.env HTTP/1.1" 404 256 "-" "Mozilla/5.0"'
+      - '{clientip} - - [{apache_time}] "GET /admin/login.php HTTP/1.1" 404 512 "-" "Mozilla/5.0 (compatible; security-scanner/2.1)"'
+      - '{clientip} - - [{apache_time}] "GET /.env HTTP/1.1" 404 256 "-" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"'
     fields:
-      clientip: ["10.0.0.77", "198.51.100.99"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator " 404 " earliest=-24h | stats count'
-    min_expected_rows: 1
+      event_host: [web-01, web-02]
+      clientip: [10.0.0.77, 198.51.100.99]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 " 404 " earliest=-24h | stats count'
 
-  win_4625:
+  win_4625: &win_4625
     domain: windows_auth
     benchmark_case: windows_failed_logon_4625_24h
-    format: json
-    source: WinEventLog:Security
+    format: xml
+    source: XmlWinEventLog:Security
     payload:
-      EventCode: "4625"
-      EventID: "4625"
-      LogName: Security
-      SourceName: Microsoft-Windows-Security-Auditing
-      Type: Information
-      Computer: agtsmith-win-lab
-      TaskCategory: "Logon"
-      Message: "An account failed to log on."
-      TargetUserName: "{user}"
-      SubjectUserName: "{user}"
-      IpAddress: "{src_ip}"
-      Source_Network_Address: "{src_ip}"
-      lab_data_source: agtsmith_generator
+      system:
+        provider_name: Microsoft-Windows-Security-Auditing
+        provider_guid: '{54849625-5478-4994-A5BA-3E3B0328C30D}'
+        event_id: '4625'
+        version: '0'
+        level: '0'
+        task: '12544'
+        opcode: '0'
+        keywords: '0x8010000000000000'
+        event_record_id: '{event_record_id}'
+        activity_id: '{activity_id}'
+        process_id: '4'
+        thread_id: '7260'
+        channel: Security
+        computer: '{event_host}.contoso.local'
+        security_user_id: S-1-5-18
+      event_data:
+        SubjectUserSid: S-1-5-18
+        SubjectUserName: '{event_host}$'
+        SubjectDomainName: '{event_host}'
+        SubjectLogonId: '0x3e7'
+        TargetUserSid: S-1-0-0
+        TargetUserName: '{user}'
+        TargetDomainName: CONTOSO
+        Status: '0xC000006D'
+        FailureReason: '%%2313'
+        SubStatus: '0xC000006A'
+        LogonType: '3'
+        LogonProcessName: NtLmSsp
+        AuthenticationPackageName: NTLM
+        WorkstationName: '{workstation}'
+        TransmittedServices: '-'
+        LmPackageName: '-'
+        KeyLength: '0'
+        ProcessId: '0x0'
+        ProcessName: '-'
+        IpAddress: '{src_ip}'
+        IpPort: '{src_port}'
+      rendering:
+        message: 'An account failed to log on. Account Name: {user}. Source Network Address: {src_ip}. Failure Reason: Unknown user name or bad password.'
+        level: Information
+        task: Logon
+        opcode: Info
+    scenario_overrides:
+      - event_data:
+          Status: '0xC000006D'
+          SubStatus: '0xC000006A'
+          FailureReason: '%%2313'
+      - event_data:
+          Status: '0xC000006D'
+          SubStatus: '0xC0000064'
+          FailureReason: '%%2313'
     fields:
-      user: ["alice", "bob", "administrator", "svc_backup"]
-      src_ip: ["10.0.0.55", "192.168.1.100", "203.0.113.20"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4625 OR EventID=4625) earliest=-24h | stats count'
+      event_host: [WIN-DC01, WIN-SRV01]
+      workstation: [WS-042, WS-117, LPT-022]
+      user: [alice, bob, administrator, svc_backup]
+      src_ip: [10.0.0.55, 192.168.1.100, 203.0.113.20]
+      src_port: [49822, 51214, 58431]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 EventID=4625 TargetUserName=* IpAddress=* Status=* SubStatus=* LogonType=* earliest=-24h | stats count'
     min_expected_rows: 1
 
-  win_sysmon_network:
+  win_sysmon_network: &win_sysmon_network
     domain: windows_sysmon
     benchmark_case: windows_sysmon_network_3_24h
-    format: json
+    format: xml
     source: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
     payload:
-      Channel: "Microsoft-Windows-Sysmon/Operational"
-      EventCode: "3"
-      EventID: "3"
-      Image: "C:\\Windows\\System32\\svchost.exe"
-      DestinationIp: "{dest_ip}"
-      DestinationPort: "{dest_port}"
-      SourceIp: "{src_ip}"
-      SourcePort: "{src_port}"
-      lab_data_source: agtsmith_generator
+      system:
+        provider_name: Microsoft-Windows-Sysmon
+        provider_guid: '{5770385F-C22A-43E0-BF4C-06F5698FFBD9}'
+        event_id: '3'
+        version: '5'
+        level: '4'
+        task: '3'
+        opcode: '0'
+        keywords: '0x8000000000000000'
+        event_record_id: '{event_record_id}'
+        process_id: '2720'
+        thread_id: '3956'
+        channel: Microsoft-Windows-Sysmon/Operational
+        computer: '{event_host}.contoso.local'
+        security_user_id: S-1-5-18
+      event_data:
+        RuleName: '-'
+        UtcTime: '{sysmon_time}'
+        ProcessGuid: '{process_guid}'
+        ProcessId: '{process_id}'
+        Image: '{image}'
+        User: '{windows_user}'
+        Protocol: '{protocol}'
+        Initiated: 'true'
+        SourceIsIpv6: 'false'
+        SourceIp: '{src_ip}'
+        SourceHostname: '{event_host}.contoso.local'
+        SourcePort: '{src_port}'
+        SourcePortName: '-'
+        DestinationIsIpv6: 'false'
+        DestinationIp: 10.0.0.20
+        DestinationHostname: api.internal.contoso.local
+        DestinationPort: '443'
+        DestinationPortName: https
+      rendering:
+        message: 'Network connection detected for {image} from {src_ip}:{src_port}.'
+        level: Information
+        task: Network connection detected
+        opcode: Info
+    scenario_overrides:
+      - event_data:
+          Protocol: tcp
+          DestinationIp: 10.0.0.20
+          DestinationHostname: api.internal.contoso.local
+          DestinationPort: '443'
+          DestinationPortName: https
+      - event_data:
+          Protocol: tcp
+          DestinationIp: 192.168.1.50
+          DestinationHostname: files.contoso.local
+          DestinationPort: '80'
+          DestinationPortName: http
+      - event_data:
+          Protocol: udp
+          DestinationIp: 8.8.8.8
+          DestinationHostname: dns.google
+          DestinationPort: '53'
+          DestinationPortName: domain
     fields:
-      dest_ip: ["10.0.0.20", "192.168.1.50", "203.0.113.15"]
-      dest_port: ["443", "80", "53"]
-      src_ip: ["10.0.0.5", "10.0.0.12"]
-      src_port: ["49152", "52341"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator EventCode=3 earliest=-24h | stats count'
+      event_host: [WIN-APP01, WIN-WS01]
+      image: ['C:\Windows\System32\svchost.exe', 'C:\Program Files\PowerShell\7\pwsh.exe']
+      windows_user: ['NT AUTHORITY\NETWORK SERVICE', 'CONTOSO\alice']
+      protocol: [tcp, udp]
+      src_ip: [10.0.0.5, 10.0.0.12]
+      src_port: [49152, 52341, 60122]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 EventID=3 Image=* SourceIp=* DestinationIp=* DestinationPort=* Protocol=* ProcessGuid=* earliest=-24h | stats count'
     min_expected_rows: 1
 
   stream_dns_query:
@@ -117,158 +280,107 @@ event_sets:
     format: json
     source: stream:dns
     payload:
-      query: "{query_name}"
-      reply_code: "{reply_code}"
-      src: "{src_ip}"
-      dest: "{dest_ip}"
-      lab_data_source: agtsmith_generator
+      timestamp: '{iso_time}'
+      protocol_stack: dns
+      transport: udp
+      src_ip: '{src_ip}'
+      src_port: '{src_port}'
+      dest_ip: '{dest_ip}'
+      dest_port: 53
+      transaction_id: '{transaction_id}'
+      query:
+        - '{query_name}'
+      query_type:
+        - A
+      query_class:
+        - IN
+      reply_code: NoError
+      answer:
+        - name: '{query_name}'
+          type: A
+          class: IN
+          ttl: 300
+          data: '{answer_ip}'
+    scenario_overrides:
+      - reply_code: NoError
+      - reply_code: NXDomain
+        answer: []
     fields:
-      query_name: ["example.com", "update.microsoft.com", "cdn.example.net"]
-      reply_code: ["NOERROR", "NXDOMAIN", "NOERROR"]
-      src_ip: ["10.0.0.5", "10.0.0.88", "192.168.1.10"]
-      dest_ip: ["8.8.8.8", "1.1.1.1", "9.9.9.9"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+      event_host: [stream-sensor-01]
+      query_name: [example.com, update.microsoft.com, cdn.example.net]
+      src_ip: [10.0.0.5, 10.0.0.88, 192.168.1.10]
+      src_port: [53001, 53122, 55210]
+      dest_ip: [8.8.8.8, 1.1.1.1, 9.9.9.9]
+      answer_ip: [93.184.216.34, 13.107.246.45, 203.0.113.80]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 earliest=-24h | spath input=_raw path=query{{}} output=query_name | spath input=_raw path=query_type{{}} output=query_type_name | search query_name=* query_type_name=* src_ip=* dest_ip=* reply_code=* | stats count'
     min_expected_rows: 1
 
   linux_failed_ssh_soc:
+    <<: *linux_failed_ssh
     domain: linux_auth_soc
-    benchmark_case: linux_auth_failures_24h
-    format: raw
-    source: /var/log/secure
-    templates:
-      - 'Failed password for invalid user {user} from {src_ip} port {port} ssh2'
-      - 'Failed password for {user} from {src_ip} port {port} ssh2'
     fields:
-      user: ["admin", "root", "testuser", "deploy"]
-      src_ip: ["10.0.0.99", "10.0.0.88", "192.168.1.50"]
-      port: ["22", "2222"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator ("Failed password" OR "Invalid user") earliest=-24h | stats count'
-    min_expected_rows: 1
+      event_host: [soc-linux-01, soc-linux-02]
+      user: [admin, root, testuser, deploy]
+      src_ip: [10.0.0.99, 10.0.0.88, 192.168.1.50]
+      src_port: [49822, 51214]
 
   apache_access_soc:
+    <<: *apache_access
     domain: web_access_soc
-    benchmark_case: apache_access_top_ips_24h
-    format: raw
-    source: /var/log/apache2/access.log
-    templates:
-      - '{clientip} - - [{time}] "GET /index.html HTTP/1.1" 200 1234 "-" "Mozilla/5.0"'
     fields:
-      clientip: ["10.0.0.5", "10.0.0.12", "203.0.113.44"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
-    min_expected_rows: 1
+      event_host: [soc-web-01, soc-web-02]
+      clientip: [10.0.0.5, 10.0.0.12, 203.0.113.44]
 
   apache_error_soc:
     domain: web_error_soc
-    benchmark_case: apache_404_spike_24h
+    benchmark_case: apache_error_activity_24h
     format: raw
     source: /var/log/apache2/error.log
     templates:
-      - '[{time}] [error] [client {clientip}] File does not exist: /var/www/html/admin/login.php'
+      - '[{apache_error_time}] [core:error] [pid {process_id}:tid {parent_process_id}] [client {clientip}:{src_port}] AH00126: Invalid URI in request GET /admin/login.php HTTP/1.1'
+      - '[{apache_error_time}] [authz_core:error] [pid {process_id}:tid {parent_process_id}] [client {clientip}:{src_port}] AH01630: client denied by server configuration: /var/www/html/.env'
     fields:
-      clientip: ["10.0.0.77", "198.51.100.99"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+      event_host: [soc-web-01, soc-web-02]
+      clientip: [10.0.0.77, 198.51.100.99]
+      src_port: [49822, 51214]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 earliest=-24h | stats count'
     min_expected_rows: 1
 
   win_4625_soc:
+    <<: *win_4625
     domain: windows_auth_soc
-    benchmark_case: windows_failed_logon_4625_24h
-    format: json
-    source: WinEventLog:Security
-    payload:
-      EventCode: "4625"
-      EventID: "4625"
-      LogName: Security
-      TargetUserName: "{user}"
-      IpAddress: "{src_ip}"
-      Source_Network_Address: "{src_ip}"
-      lab_data_source: agtsmith_generator
-    fields:
-      user: ["alice", "bob", "administrator"]
-      src_ip: ["10.0.0.55", "192.168.1.100"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4625 OR EventID=4625) earliest=-24h | stats count'
-    min_expected_rows: 1
 
   win_sysmon_soc:
+    <<: *win_sysmon_network
     domain: windows_sysmon_soc
-    benchmark_case: windows_sysmon_network_3_24h
-    format: json
-    source: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
-    payload:
-      Channel: "Microsoft-Windows-Sysmon/Operational"
-      EventCode: "3"
-      EventID: "3"
-      DestinationIp: "{dest_ip}"
-      DestinationPort: "{dest_port}"
-      SourceIp: "{src_ip}"
-      lab_data_source: agtsmith_generator
-    fields:
-      dest_ip: ["10.0.0.20", "192.168.1.50"]
-      dest_port: ["443", "80"]
-      src_ip: ["10.0.0.5"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator EventCode=3 earliest=-24h | stats count'
-    min_expected_rows: 1
 
   linux_failed_ssh_test:
+    <<: *linux_failed_ssh
     domain: linux_auth_test
-    benchmark_case: linux_auth_failures_24h
-    format: raw
-    source: /var/log/auth.log
-    templates:
-      - 'Failed password for {user} from {src_ip} port {port} ssh2'
     fields:
-      user: ["admin", "root", "testuser"]
-      src_ip: ["10.0.0.99", "10.0.0.88"]
-      port: ["22"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator "Failed password" earliest=-24h | stats count'
-    min_expected_rows: 1
+      event_host: [ci-linux-01]
+      user: [admin, root, testuser]
+      src_ip: [10.0.0.99, 10.0.0.88]
+      src_port: [49822, 51214]
 
   win_4625_test:
+    <<: *win_4625
     domain: windows_auth_test
-    benchmark_case: windows_failed_logon_4625_24h
-    format: json
-    source: WinEventLog:Security
-    payload:
-      EventCode: "4625"
-      EventID: "4625"
-      TargetUserName: "{user}"
-      IpAddress: "{src_ip}"
-      lab_data_source: agtsmith_generator
-    fields:
-      user: ["alice", "bob"]
-      src_ip: ["10.0.0.55"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4625 OR EventID=4625) earliest=-24h | stats count'
-    min_expected_rows: 1
 
   linux_failed_ssh_cross:
+    <<: *linux_failed_ssh
     domain: linux_auth_test
     benchmark_case: failed_login_cross_platform_24h
-    format: raw
-    source: /var/log/auth.log
-    templates:
-      - 'Failed password for {user} from {src_ip} port {port} ssh2'
     fields:
-      user: ["admin", "root", "testuser"]
-      src_ip: ["10.0.0.99", "10.0.0.88"]
-      port: ["22"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator "Failed password" earliest=-24h | stats count'
-    min_expected_rows: 1
+      event_host: [ci-linux-cross-01]
+      user: [admin, root, testuser]
+      src_ip: [10.0.0.99, 10.0.0.88]
+      src_port: [49822, 51214]
 
   win_4625_cross:
+    <<: *win_4625
     domain: windows_auth_test
     benchmark_case: failed_login_cross_platform_24h
-    format: json
-    source: WinEventLog:Security
-    payload:
-      EventCode: "4625"
-      EventID: "4625"
-      TargetUserName: "{user}"
-      IpAddress: "{src_ip}"
-      lab_data_source: agtsmith_generator
-    fields:
-      user: ["alice", "bob"]
-      src_ip: ["10.0.0.55"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4625 OR EventID=4625) earliest=-24h | stats count'
-    min_expected_rows: 1
 
   aws_cloudtrail_api:
     domain: aws_cloudtrail
@@ -276,23 +388,78 @@ event_sets:
     format: json
     source: aws:cloudtrail
     payload:
-      eventSource: "{event_source}"
-      eventName: "{event_name}"
-      sourceIPAddress: "{src_ip}"
+      eventVersion: '1.09'
       userIdentity:
         type: IAMUser
-        arn: "arn:aws:iam::123456789012:user/{user}"
-        principalId: "{user}"
-      userAgent: "aws-cli/2.0"
-      errorCode: "{error_code}"
-      lab_data_source: agtsmith_generator
+        principalId: 'AIDAEXAMPLE123456789:{user}'
+        arn: 'arn:aws:iam::123456789012:user/{user}'
+        accountId: '123456789012'
+        accessKeyId: REDACTED-SYNTHETIC-ACCESS-KEY
+        userName: '{user}'
+      eventTime: '{iso_time}'
+      eventSource: iam.amazonaws.com
+      eventName: ListUsers
+      awsRegion: us-east-1
+      sourceIPAddress: '{src_ip}'
+      userAgent: aws-cli/2.17.20 md/awscrt#0.20.11 ua/2.0 os/linux#6.8.0
+      requestParameters: {}
+      responseElements: null
+      requestID: '{request_id}'
+      eventID: '{event_id}'
+      readOnly: true
+      eventType: AwsApiCall
+      managementEvent: true
+      recipientAccountId: '123456789012'
+      eventCategory: Management
+      tlsDetails:
+        tlsVersion: TLSv1.3
+        cipherSuite: TLS_AES_128_GCM_SHA256
+        clientProvidedHostHeader: iam.amazonaws.com
+    scenario_overrides:
+      - eventSource: iam.amazonaws.com
+        eventName: ListUsers
+        readOnly: true
+        requestParameters:
+          maxItems: 100
+        responseElements: null
+        tlsDetails:
+          tlsVersion: TLSv1.3
+          cipherSuite: TLS_AES_128_GCM_SHA256
+          clientProvidedHostHeader: iam.amazonaws.com
+      - eventSource: s3.amazonaws.com
+        eventName: PutObject
+        awsRegion: us-west-2
+        readOnly: false
+        requestParameters:
+          bucketName: synthetic-audit-archive
+          key: reports/summary.json
+        responseElements:
+          x-amz-server-side-encryption: AES256
+        tlsDetails:
+          tlsVersion: TLSv1.3
+          cipherSuite: TLS_AES_128_GCM_SHA256
+          clientProvidedHostHeader: synthetic-audit-archive.s3.us-west-2.amazonaws.com
+      - eventSource: ec2.amazonaws.com
+        eventName: RunInstances
+        readOnly: false
+        requestParameters:
+          instancesSet:
+            items:
+              - imageId: ami-0abcdef1234567890
+                minCount: 1
+                maxCount: 1
+        responseElements: null
+        errorCode: Client.UnauthorizedOperation
+        errorMessage: You are not authorized to perform this operation.
+        tlsDetails:
+          tlsVersion: TLSv1.3
+          cipherSuite: TLS_AES_128_GCM_SHA256
+          clientProvidedHostHeader: ec2.us-east-1.amazonaws.com
     fields:
-      event_source: ["iam.amazonaws.com", "s3.amazonaws.com", "ec2.amazonaws.com"]
-      event_name: ["CreateUser", "DeleteBucket", "RunInstances", "PutObject"]
-      src_ip: ["203.0.113.10", "198.51.100.20", "10.0.0.15"]
-      user: ["deploy", "admin", "svc_backup"]
-      error_code: ["", "AccessDenied", ""]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+      event_host: [aws-cloudtrail]
+      user: [deploy, admin, svc_backup]
+      src_ip: [203.0.113.10, 198.51.100.20, 10.0.0.15]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 eventSource=* eventName=* sourceIPAddress=* userIdentity.arn=* eventTime=* requestID=* eventID=* earliest=-24h | stats count'
     min_expected_rows: 1
 
   o365_management_activity:
@@ -301,138 +468,359 @@ event_sets:
     format: json
     source: o365:management:activity
     payload:
-      Operation: "{operation}"
-      UserId: "{user}"
-      Workload: "{workload}"
-      ResultStatus: "{status}"
-      ClientIP: "{src_ip}"
-      lab_data_source: agtsmith_generator
+      CreationTime: '{iso_time}'
+      Id: '{event_id}'
+      Operation: FileDownloaded
+      OrganizationId: 11111111-2222-3333-4444-555555555555
+      RecordType: 6
+      ResultStatus: Succeeded
+      UserKey: 'i:0h.f|membership|{user}'
+      UserType: 0
+      Version: 1
+      Workload: SharePoint
+      ClientIP: '{src_ip}'
+      ObjectId: 'https://contoso.sharepoint.com/sites/Finance/Shared Documents/Q4.xlsx'
+      UserId: '{user}'
+      CorrelationId: '{correlation_id}'
+      EventSource: Office 365
+    scenario_overrides:
+      - Operation: FileDownloaded
+        RecordType: 6
+        ResultStatus: Succeeded
+        Workload: SharePoint
+        EventSource: SharePoint
+        ObjectId: 'https://contoso.sharepoint.com/sites/Finance/Shared Documents/Q4.xlsx'
+        SiteUrl: https://contoso.sharepoint.com/sites/Finance
+        SourceFileName: Q4.xlsx
+        SourceRelativeUrl: Shared Documents
+      - Operation: Set-Mailbox
+        RecordType: 1
+        ResultStatus: Succeeded
+        Workload: Exchange
+        EventSource: Exchange
+        ObjectId: 'CN=Alice,OU=Users,DC=contoso,DC=onmicrosoft,DC=com'
+        Parameters:
+          - Name: AuditEnabled
+            Value: 'True'
+      - Operation: Add member to group.
+        RecordType: 8
+        ResultStatus: Failed
+        Workload: AzureActiveDirectory
+        EventSource: AzureActiveDirectory
+        ObjectId: Security Operations
+        ErrorNumber: 'Authorization_RequestDenied'
     fields:
-      operation: ["UserLoggedIn", "FileDownloaded", "Add member to group.", "Set-Mailbox"]
-      user: ["alice@example.com", "bob@example.com", "admin@example.com"]
-      workload: ["AzureActiveDirectory", "SharePoint", "Exchange"]
-      status: ["Success", "Success", "Failed"]
-      src_ip: ["203.0.113.44", "10.0.0.12"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator earliest=-24h | stats count'
+      event_host: [o365-management-api]
+      user: [alice@example.com, bob@example.com, admin@example.com]
+      src_ip: [203.0.113.44, 198.51.100.27]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 CreationTime=* Id=* Operation=* Workload=* ResultStatus=* UserId=* ClientIP=* earliest=-24h | stats count'
     min_expected_rows: 1
 
   win_4624:
-    domain: windows_auth_test
+    domain: windows_auth
     benchmark_case: windows_successful_logon_4624_24h
-    format: json
-    source: WinEventLog:Security
+    format: xml
+    source: XmlWinEventLog:Security
     payload:
-      Channel: "Security"
-      EventCode: "4624"
-      EventID: "4624"
-      Message: "An account was successfully logged on."
-      TargetUserName: "{user}"
-      IpAddress: "{src_ip}"
-      Source_Network_Address: "{src_ip}"
-      LogonType: "10"
-      lab_data_source: agtsmith_generator
+      system:
+        provider_name: Microsoft-Windows-Security-Auditing
+        provider_guid: '{54849625-5478-4994-A5BA-3E3B0328C30D}'
+        event_id: '4624'
+        version: '2'
+        level: '0'
+        task: '12544'
+        opcode: '0'
+        keywords: '0x8020000000000000'
+        event_record_id: '{event_record_id}'
+        activity_id: '{activity_id}'
+        process_id: '4'
+        thread_id: '7260'
+        channel: Security
+        computer: '{event_host}.contoso.local'
+        security_user_id: S-1-5-18
+      event_data:
+        SubjectUserSid: S-1-5-18
+        SubjectUserName: '{event_host}$'
+        SubjectDomainName: CONTOSO
+        SubjectLogonId: '0x3e7'
+        TargetUserSid: S-1-5-21-111111111-222222222-333333333-1105
+        TargetUserName: '{user}'
+        TargetDomainName: CONTOSO
+        TargetLogonId: '{target_logon_id}'
+        LogonType: '10'
+        LogonProcessName: User32
+        AuthenticationPackageName: Negotiate
+        WorkstationName: '{workstation}'
+        LogonGuid: '{logon_guid}'
+        TransmittedServices: '-'
+        LmPackageName: '-'
+        KeyLength: '0'
+        ProcessId: '{process_id_hex}'
+        ProcessName: 'C:\Windows\System32\winlogon.exe'
+        IpAddress: '{src_ip}'
+        IpPort: '{src_port}'
+        ImpersonationLevel: '%%1833'
+        RestrictedAdminMode: '-'
+        TargetOutboundUserName: '-'
+        TargetOutboundDomainName: '-'
+        VirtualAccount: '%%1843'
+        TargetLinkedLogonId: '0x0'
+        ElevatedToken: '%%1842'
+      rendering:
+        message: 'An account was successfully logged on. Account Name: {user}. Logon Type: 10. Source Network Address: {src_ip}.'
+        level: Information
+        task: Logon
+        opcode: Info
     fields:
-      user: ["alice", "bob", "administrator"]
-      src_ip: ["10.0.0.55", "192.168.1.100"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4624 OR EventID=4624) earliest=-24h | stats count'
+      event_host: [WIN-DC01, WIN-SRV01]
+      workstation: [WS-042, WS-117]
+      user: [alice, bob, administrator]
+      src_ip: [10.0.0.55, 192.168.1.100]
+      src_port: [49822, 51214]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 EventID=4624 TargetUserName=* IpAddress=* LogonType=* AuthenticationPackageName=* earliest=-24h | stats count'
     min_expected_rows: 1
 
   win_sysmon_process:
     domain: windows_sysmon
     benchmark_case: windows_sysmon_process_1_24h
-    format: json
+    format: xml
     source: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
     payload:
-      Channel: "Microsoft-Windows-Sysmon/Operational"
-      EventCode: "1"
-      EventID: "1"
-      Image: "C:\\Windows\\System32\\{process}.exe"
-      CommandLine: "{process}.exe -arg"
-      User: "NT AUTHORITY\\SYSTEM"
-      ParentImage: "C:\\Windows\\System32\\services.exe"
-      Computer: agtsmith-win-lab
-      lab_data_source: agtsmith_generator
+      system:
+        provider_name: Microsoft-Windows-Sysmon
+        provider_guid: '{5770385F-C22A-43E0-BF4C-06F5698FFBD9}'
+        event_id: '1'
+        version: '5'
+        level: '4'
+        task: '1'
+        opcode: '0'
+        keywords: '0x8000000000000000'
+        event_record_id: '{event_record_id}'
+        process_id: '2720'
+        thread_id: '3956'
+        channel: Microsoft-Windows-Sysmon/Operational
+        computer: '{event_host}.contoso.local'
+        security_user_id: S-1-5-18
+      event_data:
+        RuleName: '-'
+        UtcTime: '{sysmon_time}'
+        ProcessGuid: '{process_guid}'
+        ProcessId: '{process_id}'
+        Image: 'C:\Windows\System32\{process}.exe'
+        FileVersion: 10.0.22621.1
+        Description: Windows system process
+        Product: Microsoft Windows Operating System
+        Company: Microsoft Corporation
+        OriginalFileName: '{process}.exe'
+        CommandLine: '"C:\Windows\System32\{process}.exe" /c whoami'
+        CurrentDirectory: 'C:\Windows\System32\'
+        User: '{windows_user}'
+        LogonGuid: '{logon_guid}'
+        LogonId: '{target_logon_id}'
+        TerminalSessionId: '1'
+        IntegrityLevel: High
+        Hashes: SHA256=2C26B46B68FFC68FF99B453C1D30413413422D706483BFA0F98A5E886266E7AE
+        ParentProcessGuid: '{parent_process_guid}'
+        ParentProcessId: '{parent_process_id}'
+        ParentImage: 'C:\Windows\System32\services.exe'
+        ParentCommandLine: 'C:\Windows\System32\services.exe'
+        ParentUser: NT AUTHORITY\SYSTEM
+      rendering:
+        message: 'Process Create: C:\Windows\System32\{process}.exe by {windows_user}.'
+        level: Information
+        task: Process Create
+        opcode: Info
     fields:
-      process: ["cmd", "powershell", "svchost"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=1 OR EventID=1) earliest=-24h | stats count'
+      event_host: [WIN-APP01, WIN-WS01]
+      process: [cmd, powershell, svchost]
+      windows_user: ['CONTOSO\alice', 'CONTOSO\administrator', 'NT AUTHORITY\SYSTEM']
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 EventID=1 ProcessGuid=* Image=* CommandLine=* User=* ParentProcessGuid=* ParentImage=* Hashes=* earliest=-24h | stats count'
     min_expected_rows: 1
 
   win_sysmon_dns:
     domain: windows_sysmon
     benchmark_case: windows_sysmon_dns_22_24h
-    format: json
+    format: xml
     source: XmlWinEventLog:Microsoft-Windows-Sysmon/Operational
     payload:
-      Channel: "Microsoft-Windows-Sysmon/Operational"
-      EventCode: "22"
-      EventID: "22"
-      Image: "C:\\Windows\\System32\\svchost.exe"
-      QueryName: "{query_name}"
-      QueryResults: "{query_result}"
-      Computer: agtsmith-win-lab
-      lab_data_source: agtsmith_generator
+      system:
+        provider_name: Microsoft-Windows-Sysmon
+        provider_guid: '{5770385F-C22A-43E0-BF4C-06F5698FFBD9}'
+        event_id: '22'
+        version: '5'
+        level: '4'
+        task: '22'
+        opcode: '0'
+        keywords: '0x8000000000000000'
+        event_record_id: '{event_record_id}'
+        process_id: '2720'
+        thread_id: '3956'
+        channel: Microsoft-Windows-Sysmon/Operational
+        computer: '{event_host}.contoso.local'
+        security_user_id: S-1-5-18
+      event_data:
+        RuleName: '-'
+        UtcTime: '{sysmon_time}'
+        ProcessGuid: '{process_guid}'
+        ProcessId: '{process_id}'
+        QueryName: '{query_name}'
+        QueryStatus: '0'
+        QueryResults: 'type: 1 {query_result};'
+        Image: C:\Windows\System32\svchost.exe
+        User: NT AUTHORITY\NETWORK SERVICE
+      rendering:
+        message: 'Dns query: {query_name}, result {query_result}.'
+        level: Information
+        task: Dns query
+        opcode: Info
+    scenario_overrides:
+      - event_data:
+          QueryStatus: '0'
+      - event_data:
+          QueryStatus: '9003'
+          QueryResults: ''
+        rendering:
+          message: 'Dns query failed for {query_name} with status 9003.'
     fields:
-      query_name: ["example.com", "update.microsoft.com", "malicious.test"]
-      query_result: ["10.0.0.1", "NXDOMAIN", "203.0.113.5"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=22 OR EventID=22) earliest=-24h | stats count'
+      event_host: [WIN-APP01, WIN-WS01]
+      query_name: [example.com, update.microsoft.com, malicious.test]
+      query_result: [10.0.0.1, 13.107.246.45, 203.0.113.5]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 EventID=22 ProcessGuid=* QueryName=* QueryStatus=* Image=* earliest=-24h | stats count'
     min_expected_rows: 1
 
   win_4688:
     domain: windows_auth
     benchmark_case: windows_process_audit_4688_24h
-    format: json
-    source: WinEventLog:Security
+    format: xml
+    source: XmlWinEventLog:Security
     payload:
-      EventCode: "4688"
-      EventID: "4688"
-      Message: "A new process has been created."
-      New_Process_Name: "C:\\Windows\\System32\\{process}.exe"
-      Process_Command_Line: "{process}.exe /c whoami"
-      SubjectUserName: "{user}"
-      Creator_Process_Name: "C:\\Windows\\System32\\services.exe"
-      Computer: agtsmith-win-lab
-      lab_data_source: agtsmith_generator
+      system:
+        provider_name: Microsoft-Windows-Security-Auditing
+        provider_guid: '{54849625-5478-4994-A5BA-3E3B0328C30D}'
+        event_id: '4688'
+        version: '2'
+        level: '0'
+        task: '13312'
+        opcode: '0'
+        keywords: '0x8020000000000000'
+        event_record_id: '{event_record_id}'
+        activity_id: '{activity_id}'
+        process_id: '4'
+        thread_id: '7260'
+        channel: Security
+        computer: '{event_host}.contoso.local'
+        security_user_id: S-1-5-18
+      event_data:
+        SubjectUserSid: S-1-5-21-111111111-222222222-333333333-1105
+        SubjectUserName: '{user}'
+        SubjectDomainName: CONTOSO
+        SubjectLogonId: '{subject_logon_id}'
+        NewProcessId: '{process_id_hex}'
+        NewProcessName: 'C:\Windows\System32\{process}.exe'
+        TokenElevationType: '%%1937'
+        ProcessId: '{parent_process_id_hex}'
+        CommandLine: '{process}.exe /c whoami'
+        TargetUserSid: S-1-0-0
+        TargetUserName: '-'
+        TargetDomainName: '-'
+        TargetLogonId: '0x0'
+        ParentProcessName: C:\Windows\System32\services.exe
+        MandatoryLabel: S-1-16-12288
+      rendering:
+        message: 'A new process has been created. New Process Name: C:\Windows\System32\{process}.exe. Creator Process Name: C:\Windows\System32\services.exe.'
+        level: Information
+        task: Process Creation
+        opcode: Info
     fields:
-      process: ["cmd", "powershell", "notepad"]
-      user: ["alice", "SYSTEM", "administrator"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4688 OR EventID=4688) earliest=-24h | stats count'
+      event_host: [WIN-APP01, WIN-WS01]
+      process: [cmd, powershell, notepad]
+      user: [alice, SYSTEM, administrator]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 EventID=4688 NewProcessName=* CommandLine=* ParentProcessName=* SubjectUserName=* earliest=-24h | stats count'
     min_expected_rows: 1
 
   win_5379:
-    domain: windows_auth_test
+    domain: windows_auth
     benchmark_case: windows_credential_access_5379_24h
-    format: json
-    source: WinEventLog:Security
+    format: xml
+    source: XmlWinEventLog:Security
     payload:
-      EventCode: "5379"
-      EventID: "5379"
-      SubjectUserName: "{user}"
-      TargetName: "{target}"
-      CountOfCredentialsReturned: "{count}"
-      ClientProcessId: "1234"
-      Computer: agtsmith-win-lab
-      lab_data_source: agtsmith_generator
+      system:
+        provider_name: Microsoft-Windows-Security-Auditing
+        provider_guid: '{54849625-5478-4994-A5BA-3E3B0328C30D}'
+        event_id: '5379'
+        version: '0'
+        level: '0'
+        task: '13824'
+        opcode: '0'
+        keywords: '0x8020000000000000'
+        event_record_id: '{event_record_id}'
+        activity_id: '{activity_id}'
+        process_id: '4'
+        thread_id: '7260'
+        channel: Security
+        computer: '{event_host}.contoso.local'
+        security_user_id: S-1-5-18
+      event_data:
+        SubjectUserSid: S-1-5-21-111111111-222222222-333333333-1105
+        SubjectUserName: '{user}'
+        SubjectDomainName: CONTOSO
+        SubjectLogonId: '{subject_logon_id}'
+        TargetName: '{target}'
+        Type: '0'
+        CountOfCredentialsReturned: '{credential_count}'
+        ReadOperation: '%%8100'
+        ReturnCode: '0'
+        ProcessCreationTime: '{iso_time}'
+        ClientProcessId: '{client_process_id}'
+        ClientProcessStartKey: '281474976710657'
+      rendering:
+        message: 'Credential Manager credentials were read. Target Name: {target}. Count: {credential_count}.'
+        level: Information
+        task: User Account Management
+        opcode: Info
     fields:
-      user: ["alice", "bob"]
-      target: ["MicrosoftAccount:target=storage", "LegacyGeneric:target=slack"]
-      count: ["1", "2"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=5379 OR EventID=5379) earliest=-24h | stats count'
+      event_host: [WIN-WS01, WIN-WS02]
+      user: [alice, bob]
+      target: ['MicrosoftAccount:target=storage', 'LegacyGeneric:target=slack']
+      credential_count: [1, 2]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 EventID=5379 SubjectUserName=* TargetName=* CountOfCredentialsReturned=* ClientProcessId=* earliest=-24h | stats count'
     min_expected_rows: 1
 
   win_4672:
     domain: windows_auth
     benchmark_case: windows_privilege_assigned_4672_24h
-    format: json
-    source: WinEventLog:Security
+    format: xml
+    source: XmlWinEventLog:Security
     payload:
-      EventCode: "4672"
-      EventID: "4672"
-      Message: "Special privileges assigned to new logon."
-      SubjectUserName: "{user}"
-      PrivilegeList: "SeSecurityPrivilege\tSeTakeOwnershipPrivilege"
-      Computer: agtsmith-win-lab
-      lab_data_source: agtsmith_generator
+      system:
+        provider_name: Microsoft-Windows-Security-Auditing
+        provider_guid: '{54849625-5478-4994-A5BA-3E3B0328C30D}'
+        event_id: '4672'
+        version: '0'
+        level: '0'
+        task: '12548'
+        opcode: '0'
+        keywords: '0x8020000000000000'
+        event_record_id: '{event_record_id}'
+        activity_id: '{activity_id}'
+        process_id: '4'
+        thread_id: '7260'
+        channel: Security
+        computer: '{event_host}.contoso.local'
+        security_user_id: S-1-5-18
+      event_data:
+        SubjectUserSid: S-1-5-21-111111111-222222222-333333333-500
+        SubjectUserName: '{user}'
+        SubjectDomainName: CONTOSO
+        SubjectLogonId: '{subject_logon_id}'
+        PrivilegeList: "SeSecurityPrivilege\tSeTakeOwnershipPrivilege\tSeBackupPrivilege\tSeRestorePrivilege"
+      rendering:
+        message: 'Special privileges assigned to new logon for {user}.'
+        level: Information
+        task: Special Logon
+        opcode: Info
     fields:
-      user: ["administrator", "SYSTEM", "alice"]
-    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator (EventCode=4672 OR EventID=4672) earliest=-24h | stats count'
+      event_host: [WIN-DC01, WIN-SRV01]
+      user: [administrator, SYSTEM, alice]
+    verify_query: 'search index={index} sourcetype="{sourcetype}" lab_data_source=agtsmith_generator lab_data_version=fidelity_v2 EventID=4672 SubjectUserName=* PrivilegeList=* earliest=-24h | stats count'
     min_expected_rows: 1

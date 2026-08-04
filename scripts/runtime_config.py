@@ -12,6 +12,11 @@ DEFAULT_SPLUNK_MCP_URL = "https://127.0.0.1:8089/services/mcp"
 DEFAULT_SPLUNK_BASE_URL = "https://127.0.0.1:8089"
 DEFAULT_EDGE_LLM_ROLE = "edge_router_splitter"
 DEFAULT_EDGE_LLM_TIMEOUT_SEC = "60"
+DEFAULT_SOC_UI_SESSION_TIMEOUT_MIN = "60"
+DEFAULT_SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN = "480"
+DEFAULT_OLLAMA_KEEP_ALIVE = "0"
+DEFAULT_MCP_REQUEST_TIMEOUT_SEC = "90"
+DEFAULT_OLLAMA_REQUEST_TIMEOUT_SEC = "180"
 
 # v1.5.x stack — split planner / writer (2026-07-23 bake-off on RTX 1000 Ada).
 # Bake-off winner (artifact): HF EnlistedGhost Ministral-3B-Reasoning Q5_K_M (59.68 avg).
@@ -24,6 +29,7 @@ DEFAULT_MODEL_US_PEER = "gemma3:4b"
 DEFAULT_MODEL_REASONING = "hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest"
 DEFAULT_MODEL_SECURITY_REVIEWER = DEFAULT_MODEL_REASONING
 DEFAULT_MODEL_EVIDENCE_REVIEWER = DEFAULT_MODEL_REASONING
+DEFAULT_MODEL_ANALYST_REVIEWER = DEFAULT_MODEL_QUERY_PLANNER
 DEFAULT_MODEL_PEER_REVIEWER = DEFAULT_MODEL_US_PEER
 DEFAULT_MODEL_PEER_REVIEWER_2 = DEFAULT_MODEL_US_PEER
 DEFAULT_MODEL_AGENTIC_CONTINUATION_REVIEWER = DEFAULT_MODEL_REASONING
@@ -35,6 +41,7 @@ MODEL_ASSIGNMENT_KEYS = [
     "OLLAMA_MODEL_QUERY_WRITER",
     "OLLAMA_MODEL_QUERY_REPAIR",
     "OLLAMA_MODEL_EVIDENCE_REVIEWER",
+    "OLLAMA_MODEL_ANALYST_REVIEWER",
     "OLLAMA_MODEL_SECURITY_REVIEWER",
     "OLLAMA_MODEL_PEER_REVIEWER",
     "OLLAMA_MODEL_PEER_REVIEWER_2",
@@ -53,6 +60,7 @@ DEFAULT_MODEL_ASSIGNMENTS: dict[str, str] = {
     "OLLAMA_MODEL_QUERY_WRITER": DEFAULT_MODEL_QUERY_WRITER,
     "OLLAMA_MODEL_QUERY_REPAIR": DEFAULT_MODEL_QUERY_REPAIR,
     "OLLAMA_MODEL_EVIDENCE_REVIEWER": DEFAULT_MODEL_EVIDENCE_REVIEWER,
+    "OLLAMA_MODEL_ANALYST_REVIEWER": DEFAULT_MODEL_ANALYST_REVIEWER,
     "OLLAMA_MODEL_SECURITY_REVIEWER": DEFAULT_MODEL_SECURITY_REVIEWER,
     "OLLAMA_MODEL_PEER_REVIEWER": DEFAULT_MODEL_PEER_REVIEWER,
     "OLLAMA_MODEL_PEER_REVIEWER_2": DEFAULT_MODEL_PEER_REVIEWER_2,
@@ -231,6 +239,47 @@ def get_ollama_host() -> str:
     return str(value).strip().rstrip("/")
 
 
+def get_ollama_keep_alive() -> str | int:
+    """Ollama model retention after each request (0 = unload immediately)."""
+    raw = str(_get_config_value("OLLAMA_KEEP_ALIVE", DEFAULT_OLLAMA_KEEP_ALIVE)).strip()
+    if not raw:
+        return 0
+    lowered = raw.lower()
+    if lowered in {"0", "false", "no", "off", "immediate"}:
+        return 0
+    if lowered.isdigit():
+        return int(lowered)
+    return raw
+
+
+def get_mcp_request_timeout_sec() -> float:
+    """Return the total timeout budget for one MCP request including retries."""
+    raw = str(
+        _get_config_value(
+            "AGTSMITH_MCP_REQUEST_TIMEOUT_SEC",
+            DEFAULT_MCP_REQUEST_TIMEOUT_SEC,
+        )
+    ).strip()
+    try:
+        return max(0.1, float(raw))
+    except (TypeError, ValueError):
+        return float(DEFAULT_MCP_REQUEST_TIMEOUT_SEC)
+
+
+def get_ollama_request_timeout_sec() -> float:
+    """Return the timeout budget for one non-streaming Ollama request."""
+    raw = str(
+        _get_config_value(
+            "AGTSMITH_OLLAMA_REQUEST_TIMEOUT_SEC",
+            DEFAULT_OLLAMA_REQUEST_TIMEOUT_SEC,
+        )
+    ).strip()
+    try:
+        return max(0.1, float(raw))
+    except (TypeError, ValueError):
+        return float(DEFAULT_OLLAMA_REQUEST_TIMEOUT_SEC)
+
+
 def get_edge_llm_enabled() -> bool:
     return str(_get_config_value("EDGE_LLM_ENABLED", "0")).strip() == "1"
 
@@ -250,6 +299,20 @@ def get_edge_llm_role() -> str:
 
 def get_edge_llm_timeout_sec() -> str:
     return str(_get_config_value("EDGE_LLM_TIMEOUT_SEC", DEFAULT_EDGE_LLM_TIMEOUT_SEC)).strip() or DEFAULT_EDGE_LLM_TIMEOUT_SEC
+
+
+def get_soc_ui_session_timeout_min() -> str:
+    return (
+        str(_get_config_value("SOC_UI_SESSION_TIMEOUT_MIN", DEFAULT_SOC_UI_SESSION_TIMEOUT_MIN)).strip()
+        or DEFAULT_SOC_UI_SESSION_TIMEOUT_MIN
+    )
+
+
+def get_soc_ui_session_remember_timeout_min() -> str:
+    return (
+        str(_get_config_value("SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN", DEFAULT_SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN)).strip()
+        or DEFAULT_SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN
+    )
 
 
 def get_splunk_mcp_url() -> str:
@@ -295,10 +358,10 @@ def _get_config_value(name: str, default: str = "") -> str:
     file_val = str(values.get(name, "")).strip()
 
     if name in UI_ENV_PREFERRED_KEYS and file_val:
-        # Parent shells often export a truncated SPLUNK_LAB_BEARER_TOKEN (split at first '=').
-        if not env_val or len(file_val) > len(env_val):
-            return file_val
-        return env_val
+        # config/ui.env is the source of truth for secrets. Shell exports (IDE sessions,
+        # `set -a; source config/ui.env` in an old terminal) often carry stale or
+        # truncated MCP tokens that survive reboots and override the good file value.
+        return file_val
 
     if env_val:
         return env_val

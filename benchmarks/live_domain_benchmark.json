@@ -79,17 +79,17 @@
       "id": "linux_privilege_escalation_24h",
       "theme": "linux_priv",
       "question": "Show sudo and privilege escalation activity on Linux hosts in the last 24 hours",
-      "intent": "linux_privilege_escalation",
+      "intent": "linux_privilege_escalation_activity",
       "profile_domain_hints": {
         "platform": "linux",
-        "use_cases": ["linux_privilege_escalation"],
+        "use_cases": ["linux_privilege_escalation_activity"],
         "preferred_sourcetypes": ["auth.log", "linux_secure", "linux_audit"]
       },
-      "expected_shape": "stats",
-      "required_terms": ["sudo", "stats", "actor", "src_ip"],
+      "expected_shape": "table",
+      "required_terms": ["sudo", "table", "actor", "target_user"],
       "forbidden_patterns": ["index=\\*", "index=windows", "index=botsv3"],
-      "allow_zero_rows": true,
-      "min_rows": 0
+      "allow_zero_rows": false,
+      "min_rows": 1
     },
     {
       "id": "windows_failed_logon_4625_24h",

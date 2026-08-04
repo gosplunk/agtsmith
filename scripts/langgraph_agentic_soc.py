@@ -41,6 +41,7 @@ from minimal_question_to_answer import (
     template_to_query_args,
 )
 from query_policy import validate_query_args
+from question_intelligence import infer_time_window
 from tdir_core import build_tdir_case
 from environment_profile import validate_query_against_environment
 from spl_query_repair import attempt_query_repair_once
@@ -621,6 +622,7 @@ def propose_next_action(
     used_tools = {str(s.get("tool", "")) for s in trajectory if isinstance(s, dict)}
     base_template = map_question_to_template(question)
     base_intent = str(base_template.intent)
+    earliest_time, latest_time = infer_time_window(question)
 
     if (not isinstance(rows, list) or not rows) and "splunk_get_indexes" not in used_tools:
         return False, "no_rows_pivot_to_index_inventory", "splunk_get_indexes", {}
@@ -632,8 +634,8 @@ def propose_next_action(
         next_args = {
             "type": "sourcetypes",
             "index": top_index,
-            "earliest_time": "-24h",
-            "latest_time": "now",
+            "earliest_time": earliest_time,
+            "latest_time": latest_time,
             "row_limit": 20,
         }
         ok, reason = _validate_metadata_args(next_args)
@@ -652,8 +654,8 @@ def propose_next_action(
                     idx_esc = _escape_spl_value(index_name)
                     query_args = {
                         "query": f'search index={idx_esc} sourcetype="{st_esc}" | stats count by host | sort - count',
-                        "earliest_time": "-24h",
-                        "latest_time": "now",
+                        "earliest_time": earliest_time,
+                        "latest_time": latest_time,
                         "row_limit": 10,
                     }
                     ok, reason = validate_query_args(query_args, question=question)
@@ -681,8 +683,8 @@ def propose_next_action(
                     if base_intent in {"top_indexes", "internal_sourcetypes"}:
                         query_args = {
                             "query": f'search index=* host="{host_esc}" | stats count by sourcetype | sort - count',
-                            "earliest_time": "-24h",
-                            "latest_time": "now",
+                            "earliest_time": earliest_time,
+                            "latest_time": latest_time,
                             "row_limit": 10,
                         }
                     elif base_intent != "failed_login_activity":
@@ -719,8 +721,8 @@ def propose_next_action(
             next_args = {
                 "type": "hosts",
                 "index": "*",
-                "earliest_time": "-24h",
-                "latest_time": "now",
+                "earliest_time": earliest_time,
+                "latest_time": latest_time,
                 "row_limit": 20,
             }
             ok, reason = _validate_metadata_args(next_args)

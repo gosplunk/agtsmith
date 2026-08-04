@@ -22,6 +22,8 @@ from runtime_config import (
     _get_config_value,
     apply_model_family_assignments,
     expected_ollama_models,
+    get_soc_ui_session_remember_timeout_min,
+    get_soc_ui_session_timeout_min,
     model_stack_summary,
 )
 
@@ -66,8 +68,12 @@ class RuntimeConfigDefaultsTests(unittest.TestCase):
     def test_model_stack_summary_counts_core_families(self) -> None:
         summary = model_stack_summary()
         self.assertGreaterEqual(int(summary["unique_tag_count"]), 3)
-        self.assertEqual(int(summary["role_count"]), 10)
+        self.assertEqual(int(summary["role_count"]), 11)
         self.assertIn(DEFAULT_MODEL_QUERY_PLANNER, summary["core_tags"])
+
+    def test_session_timeout_defaults(self) -> None:
+        self.assertEqual(get_soc_ui_session_timeout_min(), "60")
+        self.assertEqual(get_soc_ui_session_remember_timeout_min(), "480")
 
 
 class RuntimeConfigSecretPreferenceTests(unittest.TestCase):
@@ -81,13 +87,15 @@ class RuntimeConfigSecretPreferenceTests(unittest.TestCase):
                 with mock.patch.dict(os.environ, {"SPLUNK_LAB_BEARER_TOKEN": truncated}, clear=False):
                     self.assertEqual(_get_config_value("SPLUNK_LAB_BEARER_TOKEN"), full_token)
 
-    def test_shell_override_when_longer_than_ui_env(self) -> None:
+    def test_ui_env_always_preferred_for_mcp_token(self) -> None:
+        full_token = "enc:part1=part2=part3=tail"
+        stale_shell_token = "enc:stale=part2=part3=tail"
         with tempfile.TemporaryDirectory() as tmp:
             ui_env = Path(tmp) / "ui.env"
-            ui_env.write_text("SPLUNK_LAB_BEARER_TOKEN=short\n", encoding="utf-8")
+            ui_env.write_text(f"SPLUNK_LAB_BEARER_TOKEN={full_token}\n", encoding="utf-8")
             with mock.patch("runtime_config.UI_ENV_PATH", ui_env):
-                with mock.patch.dict(os.environ, {"SPLUNK_LAB_BEARER_TOKEN": "longer-shell-token"}, clear=False):
-                    self.assertEqual(_get_config_value("SPLUNK_LAB_BEARER_TOKEN"), "longer-shell-token")
+                with mock.patch.dict(os.environ, {"SPLUNK_LAB_BEARER_TOKEN": stale_shell_token}, clear=False):
+                    self.assertEqual(_get_config_value("SPLUNK_LAB_BEARER_TOKEN"), full_token)
 
 
 if __name__ == "__main__":

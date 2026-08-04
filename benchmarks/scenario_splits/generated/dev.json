@@ -1,0 +1,5409 @@
+{
+  "family_counts": {
+    "cloud_api_result_comparison": 6,
+    "cross_event_correlation": 12,
+    "multivalue_intersection": 6,
+    "time_bin_anomaly": 6,
+    "top_n_cardinality": 12
+  },
+  "generator_version": "1.0",
+  "learning_eligible": false,
+  "protected_eval21_generation_input": false,
+  "scenario_count": 42,
+  "scenarios": [
+    {
+      "domain": {
+        "domain_id": "cloud::aws:cloudtrail",
+        "index": "cloud",
+        "kind": "cloud",
+        "platform": "cloud",
+        "sourcetype": "aws:cloudtrail"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "operation",
+          "total_events",
+          "successful_events",
+          "unsuccessful_events",
+          "unsuccessful_pct"
+        ]
+      },
+      "family": "cloud_api_result_comparison",
+      "fingerprints": {
+        "question_sha256": "2694d7ee486ff4c31f5185050f55caba3bc75401dd820014fa6bea1ef9dcd73e",
+        "reference_plan_sha256": "64838b8c375038ff46e2b5bdf20f41e29a0cdade405587787960b3351ed23516",
+        "reference_spl_sha256": "6ee732ffd28eb2707df8a09c414e26e4fd6dda913300fe480ee6434ee856e94c"
+      },
+      "group_id": "composition_facf9d345e81ca48",
+      "id": "scenario_1cccb6f03d1f020e0aa7",
+      "learning_eligible": false,
+      "mutation": "base",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cloud_api_result_comparison",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "eventName",
+          "result"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In cloud API index cloud sourcetype aws:cloudtrail, compare successful and unsuccessful results by eventName, calculate the unsuccessful percentage, and rank the highest.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "operation"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "successful_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "neq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "unsuccessful_events"
+            }
+          ],
+          "output_fields": [
+            "operation",
+            "total_events",
+            "successful_events",
+            "unsuccessful_events",
+            "unsuccessful_pct"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "unsuccessful_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "unsuccessful_pct",
+              "numerator": "unsuccessful_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "eventName"
+            ],
+            "kind": "native",
+            "output": "operation"
+          },
+          {
+            "fields": [
+              "result"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"cloud\" sourcetype=\"aws:cloudtrail\") | eval operation=eventName | eval state=result | stats count as total_events count(eval(state=\"success\")) as successful_events count(eval(state!=\"success\")) as unsuccessful_events by operation | eval unsuccessful_pct=if(total_events=0,0,(unsuccessful_events/total_events)*100) | sort 0 -unsuccessful_pct | fields operation total_events successful_events unsuccessful_events unsuccessful_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "cloud::aws:cloudtrail",
+        "index": "cloud",
+        "kind": "cloud",
+        "platform": "cloud",
+        "sourcetype": "aws:cloudtrail"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "operation",
+          "total_events",
+          "successful_events",
+          "unsuccessful_events",
+          "unsuccessful_pct"
+        ]
+      },
+      "family": "cloud_api_result_comparison",
+      "fingerprints": {
+        "question_sha256": "90b48014f7c80e3302234a5f2a209e1c8c3c6a2378bf49a887d76d19a369cc03",
+        "reference_plan_sha256": "64838b8c375038ff46e2b5bdf20f41e29a0cdade405587787960b3351ed23516",
+        "reference_spl_sha256": "6ee732ffd28eb2707df8a09c414e26e4fd6dda913300fe480ee6434ee856e94c"
+      },
+      "group_id": "composition_facf9d345e81ca48",
+      "id": "scenario_4ca9baa5b80bc91a532c",
+      "learning_eligible": false,
+      "mutation": "field_synonym",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cloud_api_result_comparison",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "eventName",
+          "result"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In cloud API index cloud sourcetype aws:cloudtrail, compare successful and unsuccessful results by activity, calculate the unsuccessful percentage, and rank the highest.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "operation"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "successful_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "neq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "unsuccessful_events"
+            }
+          ],
+          "output_fields": [
+            "operation",
+            "total_events",
+            "successful_events",
+            "unsuccessful_events",
+            "unsuccessful_pct"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "unsuccessful_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "unsuccessful_pct",
+              "numerator": "unsuccessful_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "eventName"
+            ],
+            "kind": "native",
+            "output": "operation"
+          },
+          {
+            "fields": [
+              "result"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"cloud\" sourcetype=\"aws:cloudtrail\") | eval operation=eventName | eval state=result | stats count as total_events count(eval(state=\"success\")) as successful_events count(eval(state!=\"success\")) as unsuccessful_events by operation | eval unsuccessful_pct=if(total_events=0,0,(unsuccessful_events/total_events)*100) | sort 0 -unsuccessful_pct | fields operation total_events successful_events unsuccessful_events unsuccessful_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "cloud::aws:cloudtrail",
+        "index": "cloud",
+        "kind": "cloud",
+        "platform": "cloud",
+        "sourcetype": "aws:cloudtrail"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "endpoint",
+        "required_output_fields": [
+          "operation",
+          "total_events",
+          "successful_events",
+          "unsuccessful_events",
+          "unsuccessful_pct"
+        ]
+      },
+      "family": "cloud_api_result_comparison",
+      "fingerprints": {
+        "question_sha256": "98bc05d4a2e1995ba58cc2a7b13f92638387128aa0cb5d5b4bf3b23a5de59237",
+        "reference_plan_sha256": "64838b8c375038ff46e2b5bdf20f41e29a0cdade405587787960b3351ed23516",
+        "reference_spl_sha256": "6ee732ffd28eb2707df8a09c414e26e4fd6dda913300fe480ee6434ee856e94c"
+      },
+      "group_id": "composition_facf9d345e81ca48",
+      "id": "scenario_4ec23e7ed575b6e78999",
+      "learning_eligible": false,
+      "mutation": "negative_platform",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cloud_api_result_comparison",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "eventName",
+          "result"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Exclude endpoint sources. In cloud API index cloud sourcetype aws:cloudtrail, compare successful and unsuccessful results by eventName, calculate the unsuccessful percentage, and rank the highest.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "operation"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "successful_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "neq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "unsuccessful_events"
+            }
+          ],
+          "output_fields": [
+            "operation",
+            "total_events",
+            "successful_events",
+            "unsuccessful_events",
+            "unsuccessful_pct"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "unsuccessful_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "unsuccessful_pct",
+              "numerator": "unsuccessful_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "eventName"
+            ],
+            "kind": "native",
+            "output": "operation"
+          },
+          {
+            "fields": [
+              "result"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"cloud\" sourcetype=\"aws:cloudtrail\") | eval operation=eventName | eval state=result | stats count as total_events count(eval(state=\"success\")) as successful_events count(eval(state!=\"success\")) as unsuccessful_events by operation | eval unsuccessful_pct=if(total_events=0,0,(unsuccessful_events/total_events)*100) | sort 0 -unsuccessful_pct | fields operation total_events successful_events unsuccessful_events unsuccessful_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "cloud::aws:cloudtrail",
+        "index": "cloud",
+        "kind": "cloud",
+        "platform": "cloud",
+        "sourcetype": "aws:cloudtrail"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "operation",
+          "total_events",
+          "successful_events",
+          "unsuccessful_events",
+          "unsuccessful_pct"
+        ]
+      },
+      "family": "cloud_api_result_comparison",
+      "fingerprints": {
+        "question_sha256": "620159ba0910c5cb62c2d640b0457d3959071743a847e8d6184b84f1b11fbac6",
+        "reference_plan_sha256": "64838b8c375038ff46e2b5bdf20f41e29a0cdade405587787960b3351ed23516",
+        "reference_spl_sha256": "6ee732ffd28eb2707df8a09c414e26e4fd6dda913300fe480ee6434ee856e94c"
+      },
+      "group_id": "composition_facf9d345e81ca48",
+      "id": "scenario_88ef842a84f40140104e",
+      "learning_eligible": false,
+      "mutation": "paraphrase",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cloud_api_result_comparison",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "eventName",
+          "result"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "For cloud/aws:cloudtrail cloud activity, summarize each eventName's good versus non-good outcomes and order operations by failure share.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "operation"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "successful_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "neq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "unsuccessful_events"
+            }
+          ],
+          "output_fields": [
+            "operation",
+            "total_events",
+            "successful_events",
+            "unsuccessful_events",
+            "unsuccessful_pct"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "unsuccessful_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "unsuccessful_pct",
+              "numerator": "unsuccessful_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "eventName"
+            ],
+            "kind": "native",
+            "output": "operation"
+          },
+          {
+            "fields": [
+              "result"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"cloud\" sourcetype=\"aws:cloudtrail\") | eval operation=eventName | eval state=result | stats count as total_events count(eval(state=\"success\")) as successful_events count(eval(state!=\"success\")) as unsuccessful_events by operation | eval unsuccessful_pct=if(total_events=0,0,(unsuccessful_events/total_events)*100) | sort 0 -unsuccessful_pct | fields operation total_events successful_events unsuccessful_events unsuccessful_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "cloud::aws:cloudtrail",
+        "index": "cloud",
+        "kind": "cloud",
+        "platform": "cloud",
+        "sourcetype": "aws:cloudtrail"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "explicit_scope_in_question": false,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "operation",
+          "total_events",
+          "successful_events",
+          "unsuccessful_events",
+          "unsuccessful_pct"
+        ]
+      },
+      "family": "cloud_api_result_comparison",
+      "fingerprints": {
+        "question_sha256": "1a4c3bef53b5ae84c6dd77681f81a24137d4801cf88ac647320eff4c235f965d",
+        "reference_plan_sha256": "64838b8c375038ff46e2b5bdf20f41e29a0cdade405587787960b3351ed23516",
+        "reference_spl_sha256": "6ee732ffd28eb2707df8a09c414e26e4fd6dda913300fe480ee6434ee856e94c"
+      },
+      "group_id": "composition_facf9d345e81ca48",
+      "id": "scenario_63cdccaf9bb0a0dd1ea3",
+      "learning_eligible": false,
+      "mutation": "scope_removal",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cloud_api_result_comparison",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "eventName",
+          "result"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Compare successful and unsuccessful cloud API result values by eventName, calculate the unsuccessful percentage, and rank the highest.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "operation"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "successful_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "neq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "unsuccessful_events"
+            }
+          ],
+          "output_fields": [
+            "operation",
+            "total_events",
+            "successful_events",
+            "unsuccessful_events",
+            "unsuccessful_pct"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "unsuccessful_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "unsuccessful_pct",
+              "numerator": "unsuccessful_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "eventName"
+            ],
+            "kind": "native",
+            "output": "operation"
+          },
+          {
+            "fields": [
+              "result"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"cloud\" sourcetype=\"aws:cloudtrail\") | eval operation=eventName | eval state=result | stats count as total_events count(eval(state=\"success\")) as successful_events count(eval(state!=\"success\")) as unsuccessful_events by operation | eval unsuccessful_pct=if(total_events=0,0,(unsuccessful_events/total_events)*100) | sort 0 -unsuccessful_pct | fields operation total_events successful_events unsuccessful_events unsuccessful_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "cloud::aws:cloudtrail",
+        "index": "cloud",
+        "kind": "cloud",
+        "platform": "cloud",
+        "sourcetype": "aws:cloudtrail"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "operation",
+          "total_events",
+          "successful_events",
+          "unsuccessful_events",
+          "unsuccessful_pct"
+        ]
+      },
+      "family": "cloud_api_result_comparison",
+      "fingerprints": {
+        "question_sha256": "cd7368d671c71dde5e938d9c638db13ec5460a8cef77b7947b196ed5d57282b2",
+        "reference_plan_sha256": "64838b8c375038ff46e2b5bdf20f41e29a0cdade405587787960b3351ed23516",
+        "reference_spl_sha256": "6ee732ffd28eb2707df8a09c414e26e4fd6dda913300fe480ee6434ee856e94c"
+      },
+      "group_id": "composition_facf9d345e81ca48",
+      "id": "scenario_e3ad4ef08ec9d83dc81f",
+      "learning_eligible": false,
+      "mutation": "time_shift",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cloud_api_result_comparison",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "eventName",
+          "result"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In cloud API index cloud sourcetype aws:cloudtrail, compare successful and unsuccessful results by eventName, calculate the unsuccessful percentage, and rank the highest. Use the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "operation"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "successful_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "neq",
+                "value": "success"
+              },
+              "function": "count",
+              "name": "unsuccessful_events"
+            }
+          ],
+          "output_fields": [
+            "operation",
+            "total_events",
+            "successful_events",
+            "unsuccessful_events",
+            "unsuccessful_pct"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "unsuccessful_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "unsuccessful_pct",
+              "numerator": "unsuccessful_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "cloud",
+            "sourcetype": "aws:cloudtrail"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "eventName"
+            ],
+            "kind": "native",
+            "output": "operation"
+          },
+          {
+            "fields": [
+              "result"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"cloud\" sourcetype=\"aws:cloudtrail\") | eval operation=eventName | eval state=result | stats count as total_events count(eval(state=\"success\")) as successful_events count(eval(state!=\"success\")) as unsuccessful_events by operation | eval unsuccessful_pct=if(total_events=0,0,(unsuccessful_events/total_events)*100) | sort 0 -unsuccessful_pct | fields operation total_events successful_events unsuccessful_events unsuccessful_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::proxy:access",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "edaa6f5ff3dfeab8dade98dadfae8e926ec55a80f632a710198a49525ed829fd",
+        "reference_plan_sha256": "3da3a89de4dd6e6bd446d81e0cf722328727b6b07729922419b3c59f9c734a04",
+        "reference_spl_sha256": "32fb6b4002cfdb58248a312ebb5d0a76b217d598689e37d554748d66855779b6"
+      },
+      "group_id": "composition_aaf411f27fbfcef9",
+      "id": "scenario_489dfed8e924cb14912a",
+      "learning_eligible": false,
+      "mutation": "base",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "src_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Correlate index auth sourcetype linux_secure with index web sourcetype proxy:access by shared src / src_ip; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "src_ip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"proxy:access\") | eval entity=coalesce(src,src_ip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::proxy:access",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "d2ad466650bc0014d9447cace3b4eb2c351b2f334b43dbcb29dd09e499770e72",
+        "reference_plan_sha256": "3da3a89de4dd6e6bd446d81e0cf722328727b6b07729922419b3c59f9c734a04",
+        "reference_spl_sha256": "32fb6b4002cfdb58248a312ebb5d0a76b217d598689e37d554748d66855779b6"
+      },
+      "group_id": "composition_aaf411f27fbfcef9",
+      "id": "scenario_0cbb3b2956a72f6b3245",
+      "learning_eligible": false,
+      "mutation": "field_synonym",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "src_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Correlate index auth sourcetype linux_secure with index web sourcetype proxy:access by shared source; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "src_ip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"proxy:access\") | eval entity=coalesce(src,src_ip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::proxy:access",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "cloud",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "e3bb3520f14e57e364b425451c49ac1d20c5b342f037a182523dbeb831d63c67",
+        "reference_plan_sha256": "3da3a89de4dd6e6bd446d81e0cf722328727b6b07729922419b3c59f9c734a04",
+        "reference_spl_sha256": "32fb6b4002cfdb58248a312ebb5d0a76b217d598689e37d554748d66855779b6"
+      },
+      "group_id": "composition_aaf411f27fbfcef9",
+      "id": "scenario_828ae294e34ca1d89134",
+      "learning_eligible": false,
+      "mutation": "negative_platform",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "src_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Exclude cloud sources. Correlate index auth sourcetype linux_secure with index web sourcetype proxy:access by shared src / src_ip; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "src_ip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"proxy:access\") | eval entity=coalesce(src,src_ip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::proxy:access",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "247a4799da68cda55dc25af9c2dc2666448f444d86ab2d35e0fe794b0a34d764",
+        "reference_plan_sha256": "3da3a89de4dd6e6bd446d81e0cf722328727b6b07729922419b3c59f9c734a04",
+        "reference_spl_sha256": "32fb6b4002cfdb58248a312ebb5d0a76b217d598689e37d554748d66855779b6"
+      },
+      "group_id": "composition_aaf411f27fbfcef9",
+      "id": "scenario_51fe4ee606a82ebc5515",
+      "learning_eligible": false,
+      "mutation": "paraphrase",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "src_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Join the activity represented by auth/linux_secure and web/proxy:access through src / src_ip, then count records and source varieties for each shared value.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "src_ip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"proxy:access\") | eval entity=coalesce(src,src_ip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::proxy:access",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": false,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "6acfc8f9a05c8410e73afdf3112017fcb4a8dbfd9b1e4de2e1adc55643a954e5",
+        "reference_plan_sha256": "3da3a89de4dd6e6bd446d81e0cf722328727b6b07729922419b3c59f9c734a04",
+        "reference_spl_sha256": "32fb6b4002cfdb58248a312ebb5d0a76b217d598689e37d554748d66855779b6"
+      },
+      "group_id": "composition_aaf411f27fbfcef9",
+      "id": "scenario_cf02b27209e17a68ae09",
+      "learning_eligible": false,
+      "mutation": "scope_removal",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "src_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Correlate the relevant auth and web event streams by shared src / src_ip; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "src_ip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"proxy:access\") | eval entity=coalesce(src,src_ip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::proxy:access",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "edaa6f5ff3dfeab8dade98dadfae8e926ec55a80f632a710198a49525ed829fd",
+        "reference_plan_sha256": "3da3a89de4dd6e6bd446d81e0cf722328727b6b07729922419b3c59f9c734a04",
+        "reference_spl_sha256": "32fb6b4002cfdb58248a312ebb5d0a76b217d598689e37d554748d66855779b6"
+      },
+      "group_id": "composition_aaf411f27fbfcef9",
+      "id": "scenario_ef46562bbd916efcabde",
+      "learning_eligible": false,
+      "mutation": "time_shift",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "src_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Correlate index auth sourcetype linux_secure with index web sourcetype proxy:access by shared src / src_ip; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "src_ip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"proxy:access\") | eval entity=coalesce(src,src_ip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::access_combined",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "a2bc207653e5130eb27aa20667681f4e8379563ae6dae34c9460996e66a8c91a",
+        "reference_plan_sha256": "9089e3c01447d64f6df1cc3f5855646369e08b0cd867840d16fb5ad9e8010825",
+        "reference_spl_sha256": "0ade851634a15632109c7ad33b8e4772e0ab024b4f5ea9a0bc2d6127dc838f6a"
+      },
+      "group_id": "composition_be0a3d500983c9ce",
+      "id": "scenario_56615097aa1cc8e0d25b",
+      "learning_eligible": false,
+      "mutation": "base",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "clientip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Correlate index auth sourcetype linux_secure with index web sourcetype access_combined by shared src / clientip; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "clientip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"access_combined\") | eval entity=coalesce(src,clientip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::access_combined",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "4f288ed4ea7fc88d743c124f73c6388835d6a83b6921e38f08da9fb07c02f284",
+        "reference_plan_sha256": "9089e3c01447d64f6df1cc3f5855646369e08b0cd867840d16fb5ad9e8010825",
+        "reference_spl_sha256": "0ade851634a15632109c7ad33b8e4772e0ab024b4f5ea9a0bc2d6127dc838f6a"
+      },
+      "group_id": "composition_be0a3d500983c9ce",
+      "id": "scenario_65df931ed19e760d8617",
+      "learning_eligible": false,
+      "mutation": "field_synonym",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "clientip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Correlate index auth sourcetype linux_secure with index web sourcetype access_combined by shared source; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "clientip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"access_combined\") | eval entity=coalesce(src,clientip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::access_combined",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "cloud",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "2a7cf9567a6824bc3f45520ff548de955cdb0ea8ce4ec3dfb0a446816f481396",
+        "reference_plan_sha256": "9089e3c01447d64f6df1cc3f5855646369e08b0cd867840d16fb5ad9e8010825",
+        "reference_spl_sha256": "0ade851634a15632109c7ad33b8e4772e0ab024b4f5ea9a0bc2d6127dc838f6a"
+      },
+      "group_id": "composition_be0a3d500983c9ce",
+      "id": "scenario_d7398ccbbf49eceefc04",
+      "learning_eligible": false,
+      "mutation": "negative_platform",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "clientip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Exclude cloud sources. Correlate index auth sourcetype linux_secure with index web sourcetype access_combined by shared src / clientip; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "clientip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"access_combined\") | eval entity=coalesce(src,clientip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::access_combined",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "fa0d8645a607043a34ae9f4bfa7e1f09d3d5d801a2709ff20c431b17574e3a27",
+        "reference_plan_sha256": "9089e3c01447d64f6df1cc3f5855646369e08b0cd867840d16fb5ad9e8010825",
+        "reference_spl_sha256": "0ade851634a15632109c7ad33b8e4772e0ab024b4f5ea9a0bc2d6127dc838f6a"
+      },
+      "group_id": "composition_be0a3d500983c9ce",
+      "id": "scenario_63019746efb599ffeff9",
+      "learning_eligible": false,
+      "mutation": "paraphrase",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "clientip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Join the activity represented by auth/linux_secure and web/access_combined through src / clientip, then count records and source varieties for each shared value.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "clientip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"access_combined\") | eval entity=coalesce(src,clientip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::access_combined",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "explicit_scope_in_question": false,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "2abc611a3577b379ad52dfec46c8be1727fefbcd0293257f70fa96314f252adb",
+        "reference_plan_sha256": "9089e3c01447d64f6df1cc3f5855646369e08b0cd867840d16fb5ad9e8010825",
+        "reference_spl_sha256": "0ade851634a15632109c7ad33b8e4772e0ab024b4f5ea9a0bc2d6127dc838f6a"
+      },
+      "group_id": "composition_be0a3d500983c9ce",
+      "id": "scenario_31241d1c1532bb6f71b4",
+      "learning_eligible": false,
+      "mutation": "scope_removal",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "clientip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Correlate the relevant auth and web event streams by shared src / clientip; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "clientip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"access_combined\") | eval entity=coalesce(src,clientip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "domain_id": "auth::linux_secure+web::access_combined",
+        "kind": "cross_event",
+        "platform": "mixed"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "source_types"
+        ]
+      },
+      "family": "cross_event_correlation",
+      "fingerprints": {
+        "question_sha256": "a2bc207653e5130eb27aa20667681f4e8379563ae6dae34c9460996e66a8c91a",
+        "reference_plan_sha256": "9089e3c01447d64f6df1cc3f5855646369e08b0cd867840d16fb5ad9e8010825",
+        "reference_spl_sha256": "0ade851634a15632109c7ad33b8e4772e0ab024b4f5ea9a0bc2d6127dc838f6a"
+      },
+      "group_id": "composition_be0a3d500983c9ce",
+      "id": "scenario_a0246cdbf6e02c50f7d3",
+      "learning_eligible": false,
+      "mutation": "time_shift",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "cross_event_correlation",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src",
+          "clientip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Correlate index auth sourcetype linux_secure with index web sourcetype access_combined by shared src / clientip; report event volume and distinct contributing sourcetypes over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "sourcetype",
+              "function": "dc",
+              "name": "source_types"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "source_types"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "source_types",
+              "operator": "gte",
+              "value": 2
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 20
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "linux_secure"
+          },
+          {
+            "index": "web",
+            "sourcetype": "access_combined"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src",
+              "clientip"
+            ],
+            "kind": "coalesce",
+            "output": "entity"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"linux_secure\") OR (index=\"web\" sourcetype=\"access_combined\") | eval entity=coalesce(src,clientip) | stats count as events dc(sourcetype) as source_types by entity | where source_types>=2 | sort 0 -events | fields entity events source_types | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "auth::XmlWinEventLog:Security",
+        "index": "auth",
+        "kind": "auth",
+        "platform": "windows",
+        "sourcetype": "XmlWinEventLog:Security"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "user_values",
+          "host_values",
+          "intersection_events"
+        ]
+      },
+      "family": "multivalue_intersection",
+      "fingerprints": {
+        "question_sha256": "66713e62d4c230862220b6b7e3022a7f0cf48d3b2701b65f10e0e8493bca440f",
+        "reference_plan_sha256": "f4b0a9008f0cfea49de5071373db1792ecd56e04583bfd5cb4fe0dd6d6e844ed",
+        "reference_spl_sha256": "a47b7cfa5b64180886eb42629e85956b8120b8b209a93c1654846dbf9537134a"
+      },
+      "group_id": "composition_408faa0997e32724",
+      "id": "scenario_a8f38c001bfd661ce9b1",
+      "learning_eligible": false,
+      "mutation": "base",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "multivalue_intersection",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "IpAddress",
+          "TargetUserName",
+          "Computer"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "For index auth sourcetype XmlWinEventLog:Security, group by IpAddress, collect the observed TargetUserName and Computer values, and count events where both are present during the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [
+            {
+              "fields": [
+                "user",
+                "host"
+              ],
+              "name": "intersection_events"
+            }
+          ],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "user",
+              "function": "values",
+              "name": "user_values"
+            },
+            {
+              "field": "host",
+              "function": "values",
+              "name": "host_values"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "user_values",
+            "host_values",
+            "intersection_events"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "IpAddress"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "TargetUserName"
+            ],
+            "kind": "native",
+            "output": "user"
+          },
+          {
+            "fields": [
+              "Computer"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"XmlWinEventLog:Security\") | eval entity=IpAddress | eval user=TargetUserName | eval host=Computer | stats count as events values(user) as user_values values(host) as host_values count(eval(isnotnull(user) AND isnotnull(host))) as intersection_events by entity | fields entity events user_values host_values intersection_events | head 100",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "auth::XmlWinEventLog:Security",
+        "index": "auth",
+        "kind": "auth",
+        "platform": "windows",
+        "sourcetype": "XmlWinEventLog:Security"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "user_values",
+          "host_values",
+          "intersection_events"
+        ]
+      },
+      "family": "multivalue_intersection",
+      "fingerprints": {
+        "question_sha256": "1d12efe94f5a5d9785d8f561b10ea7a3a9395f279e913f8fa4f05ff5b4999e89",
+        "reference_plan_sha256": "f4b0a9008f0cfea49de5071373db1792ecd56e04583bfd5cb4fe0dd6d6e844ed",
+        "reference_spl_sha256": "a47b7cfa5b64180886eb42629e85956b8120b8b209a93c1654846dbf9537134a"
+      },
+      "group_id": "composition_408faa0997e32724",
+      "id": "scenario_3c53ecc263274df8ad8d",
+      "learning_eligible": false,
+      "mutation": "field_synonym",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "multivalue_intersection",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "IpAddress",
+          "TargetUserName",
+          "Computer"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "For index auth sourcetype XmlWinEventLog:Security, group by source, collect the observed account and system values, and count events where both are present during the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [
+            {
+              "fields": [
+                "user",
+                "host"
+              ],
+              "name": "intersection_events"
+            }
+          ],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "user",
+              "function": "values",
+              "name": "user_values"
+            },
+            {
+              "field": "host",
+              "function": "values",
+              "name": "host_values"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "user_values",
+            "host_values",
+            "intersection_events"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "IpAddress"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "TargetUserName"
+            ],
+            "kind": "native",
+            "output": "user"
+          },
+          {
+            "fields": [
+              "Computer"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"XmlWinEventLog:Security\") | eval entity=IpAddress | eval user=TargetUserName | eval host=Computer | stats count as events values(user) as user_values values(host) as host_values count(eval(isnotnull(user) AND isnotnull(host))) as intersection_events by entity | fields entity events user_values host_values intersection_events | head 100",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "auth::XmlWinEventLog:Security",
+        "index": "auth",
+        "kind": "auth",
+        "platform": "windows",
+        "sourcetype": "XmlWinEventLog:Security"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "linux",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "user_values",
+          "host_values",
+          "intersection_events"
+        ]
+      },
+      "family": "multivalue_intersection",
+      "fingerprints": {
+        "question_sha256": "e3bd93313634cb40b33be88c9821e066fd408f0fe394892c15b64da636ea2b89",
+        "reference_plan_sha256": "f4b0a9008f0cfea49de5071373db1792ecd56e04583bfd5cb4fe0dd6d6e844ed",
+        "reference_spl_sha256": "a47b7cfa5b64180886eb42629e85956b8120b8b209a93c1654846dbf9537134a"
+      },
+      "group_id": "composition_408faa0997e32724",
+      "id": "scenario_cfd97e2ce09fd7db2478",
+      "learning_eligible": false,
+      "mutation": "negative_platform",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "multivalue_intersection",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "IpAddress",
+          "TargetUserName",
+          "Computer"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Exclude linux sources. For index auth sourcetype XmlWinEventLog:Security, group by IpAddress, collect the observed TargetUserName and Computer values, and count events where both are present during the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [
+            {
+              "fields": [
+                "user",
+                "host"
+              ],
+              "name": "intersection_events"
+            }
+          ],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "user",
+              "function": "values",
+              "name": "user_values"
+            },
+            {
+              "field": "host",
+              "function": "values",
+              "name": "host_values"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "user_values",
+            "host_values",
+            "intersection_events"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "IpAddress"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "TargetUserName"
+            ],
+            "kind": "native",
+            "output": "user"
+          },
+          {
+            "fields": [
+              "Computer"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"XmlWinEventLog:Security\") | eval entity=IpAddress | eval user=TargetUserName | eval host=Computer | stats count as events values(user) as user_values values(host) as host_values count(eval(isnotnull(user) AND isnotnull(host))) as intersection_events by entity | fields entity events user_values host_values intersection_events | head 100",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "auth::XmlWinEventLog:Security",
+        "index": "auth",
+        "kind": "auth",
+        "platform": "windows",
+        "sourcetype": "XmlWinEventLog:Security"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "user_values",
+          "host_values",
+          "intersection_events"
+        ]
+      },
+      "family": "multivalue_intersection",
+      "fingerprints": {
+        "question_sha256": "0d08f061813bb3094c6074df341dacd0a836fee98c737f865e660796ccb31f61",
+        "reference_plan_sha256": "f4b0a9008f0cfea49de5071373db1792ecd56e04583bfd5cb4fe0dd6d6e844ed",
+        "reference_spl_sha256": "a47b7cfa5b64180886eb42629e85956b8120b8b209a93c1654846dbf9537134a"
+      },
+      "group_id": "composition_408faa0997e32724",
+      "id": "scenario_7d98304b06fa2e131375",
+      "learning_eligible": false,
+      "mutation": "paraphrase",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "multivalue_intersection",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "IpAddress",
+          "TargetUserName",
+          "Computer"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Within auth/XmlWinEventLog:Security, identify IpAddress values that connect TargetUserName with Computer, retaining both value sets and their overlap count.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [
+            {
+              "fields": [
+                "user",
+                "host"
+              ],
+              "name": "intersection_events"
+            }
+          ],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "user",
+              "function": "values",
+              "name": "user_values"
+            },
+            {
+              "field": "host",
+              "function": "values",
+              "name": "host_values"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "user_values",
+            "host_values",
+            "intersection_events"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "IpAddress"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "TargetUserName"
+            ],
+            "kind": "native",
+            "output": "user"
+          },
+          {
+            "fields": [
+              "Computer"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"XmlWinEventLog:Security\") | eval entity=IpAddress | eval user=TargetUserName | eval host=Computer | stats count as events values(user) as user_values values(host) as host_values count(eval(isnotnull(user) AND isnotnull(host))) as intersection_events by entity | fields entity events user_values host_values intersection_events | head 100",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "auth::XmlWinEventLog:Security",
+        "index": "auth",
+        "kind": "auth",
+        "platform": "windows",
+        "sourcetype": "XmlWinEventLog:Security"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "explicit_scope_in_question": false,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "user_values",
+          "host_values",
+          "intersection_events"
+        ]
+      },
+      "family": "multivalue_intersection",
+      "fingerprints": {
+        "question_sha256": "e18e5319008fc3d2c988bc5d5c1571a869002097820b1dd3d4abb8c345a21627",
+        "reference_plan_sha256": "f4b0a9008f0cfea49de5071373db1792ecd56e04583bfd5cb4fe0dd6d6e844ed",
+        "reference_spl_sha256": "a47b7cfa5b64180886eb42629e85956b8120b8b209a93c1654846dbf9537134a"
+      },
+      "group_id": "composition_408faa0997e32724",
+      "id": "scenario_82ed9508ea8ce136b6dd",
+      "learning_eligible": false,
+      "mutation": "scope_removal",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "multivalue_intersection",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "IpAddress",
+          "TargetUserName",
+          "Computer"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Group by IpAddress, collect the observed TargetUserName and Computer values, and count events where both are present during the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [
+            {
+              "fields": [
+                "user",
+                "host"
+              ],
+              "name": "intersection_events"
+            }
+          ],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "user",
+              "function": "values",
+              "name": "user_values"
+            },
+            {
+              "field": "host",
+              "function": "values",
+              "name": "host_values"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "user_values",
+            "host_values",
+            "intersection_events"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "IpAddress"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "TargetUserName"
+            ],
+            "kind": "native",
+            "output": "user"
+          },
+          {
+            "fields": [
+              "Computer"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"XmlWinEventLog:Security\") | eval entity=IpAddress | eval user=TargetUserName | eval host=Computer | stats count as events values(user) as user_values values(host) as host_values count(eval(isnotnull(user) AND isnotnull(host))) as intersection_events by entity | fields entity events user_values host_values intersection_events | head 100",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "auth::XmlWinEventLog:Security",
+        "index": "auth",
+        "kind": "auth",
+        "platform": "windows",
+        "sourcetype": "XmlWinEventLog:Security"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "user_values",
+          "host_values",
+          "intersection_events"
+        ]
+      },
+      "family": "multivalue_intersection",
+      "fingerprints": {
+        "question_sha256": "66713e62d4c230862220b6b7e3022a7f0cf48d3b2701b65f10e0e8493bca440f",
+        "reference_plan_sha256": "f4b0a9008f0cfea49de5071373db1792ecd56e04583bfd5cb4fe0dd6d6e844ed",
+        "reference_spl_sha256": "a47b7cfa5b64180886eb42629e85956b8120b8b209a93c1654846dbf9537134a"
+      },
+      "group_id": "composition_408faa0997e32724",
+      "id": "scenario_79e00216f0e2e8e4c857",
+      "learning_eligible": false,
+      "mutation": "time_shift",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "multivalue_intersection",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "IpAddress",
+          "TargetUserName",
+          "Computer"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "For index auth sourcetype XmlWinEventLog:Security, group by IpAddress, collect the observed TargetUserName and Computer values, and count events where both are present during the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [
+            {
+              "fields": [
+                "user",
+                "host"
+              ],
+              "name": "intersection_events"
+            }
+          ],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "user",
+              "function": "values",
+              "name": "user_values"
+            },
+            {
+              "field": "host",
+              "function": "values",
+              "name": "host_values"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "user_values",
+            "host_values",
+            "intersection_events"
+          ],
+          "post_aggregation_predicates": [],
+          "ranking": [],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "auth",
+            "sourcetype": "XmlWinEventLog:Security"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "IpAddress"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "TargetUserName"
+            ],
+            "kind": "native",
+            "output": "user"
+          },
+          {
+            "fields": [
+              "Computer"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"auth\" sourcetype=\"XmlWinEventLog:Security\") | eval entity=IpAddress | eval user=TargetUserName | eval host=Computer | stats count as events values(user) as user_values values(host) as host_values count(eval(isnotnull(user) AND isnotnull(host))) as intersection_events by entity | fields entity events user_values host_values intersection_events | head 100",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "bucket",
+          "entity",
+          "total_events",
+          "matching_state_events",
+          "state_pct"
+        ]
+      },
+      "family": "time_bin_anomaly",
+      "fingerprints": {
+        "question_sha256": "66088cf10662503cefeca95cac569ffce7b2c38556fb6ee60927e897a51988b3",
+        "reference_plan_sha256": "9ad0c3df7ed1e07d456cfd6ac23b9d6c0d1a4eb624c4919e83f517b57194e1ce",
+        "reference_spl_sha256": "59dc7fff78ce4eceebc9b3100062b7e6fd0fc5b714a8596d22e2a6d43a51c7bb"
+      },
+      "group_id": "composition_840ae16174509406",
+      "id": "scenario_88b422976a7eec891198",
+      "learning_eligible": false,
+      "mutation": "base",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "time_bin_anomaly",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "status_code"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In index web sourcetype proxy:access, find 15-minute buckets by src_ip where status_code=403 exceeds 20% of total bucket volume.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": 403
+              },
+              "function": "count",
+              "name": "matching_state_events"
+            }
+          ],
+          "output_fields": [
+            "bucket",
+            "entity",
+            "total_events",
+            "matching_state_events",
+            "state_pct"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "state_pct",
+              "operator": "gt",
+              "value": 20
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "state_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "state_pct",
+              "numerator": "matching_state_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": {
+            "alias": "bucket",
+            "field": "_time",
+            "span": "15m"
+          }
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "status_code"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval state=status_code | bin _time span=15m | eval bucket=_time | stats count as total_events count(eval(state=403)) as matching_state_events by bucket entity | eval state_pct=if(total_events=0,0,(matching_state_events/total_events)*100) | where state_pct>20 | sort 0 -state_pct | fields bucket entity total_events matching_state_events state_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "bucket",
+          "entity",
+          "total_events",
+          "matching_state_events",
+          "state_pct"
+        ]
+      },
+      "family": "time_bin_anomaly",
+      "fingerprints": {
+        "question_sha256": "e48f1bb6e25e1ff311e4e96db2919e8ffc2194798f34b6d473ef05ec59d1c4fb",
+        "reference_plan_sha256": "9ad0c3df7ed1e07d456cfd6ac23b9d6c0d1a4eb624c4919e83f517b57194e1ce",
+        "reference_spl_sha256": "59dc7fff78ce4eceebc9b3100062b7e6fd0fc5b714a8596d22e2a6d43a51c7bb"
+      },
+      "group_id": "composition_840ae16174509406",
+      "id": "scenario_a7c172f1bc51f58cd034",
+      "learning_eligible": false,
+      "mutation": "field_synonym",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "time_bin_anomaly",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "status_code"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In index web sourcetype proxy:access, find 15-minute buckets by source where outcome=403 exceeds 20% of total bucket volume.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": 403
+              },
+              "function": "count",
+              "name": "matching_state_events"
+            }
+          ],
+          "output_fields": [
+            "bucket",
+            "entity",
+            "total_events",
+            "matching_state_events",
+            "state_pct"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "state_pct",
+              "operator": "gt",
+              "value": 20
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "state_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "state_pct",
+              "numerator": "matching_state_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": {
+            "alias": "bucket",
+            "field": "_time",
+            "span": "15m"
+          }
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "status_code"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval state=status_code | bin _time span=15m | eval bucket=_time | stats count as total_events count(eval(state=403)) as matching_state_events by bucket entity | eval state_pct=if(total_events=0,0,(matching_state_events/total_events)*100) | where state_pct>20 | sort 0 -state_pct | fields bucket entity total_events matching_state_events state_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "cloud",
+        "required_output_fields": [
+          "bucket",
+          "entity",
+          "total_events",
+          "matching_state_events",
+          "state_pct"
+        ]
+      },
+      "family": "time_bin_anomaly",
+      "fingerprints": {
+        "question_sha256": "896300e2d5d19d7af5bd2c241510e8ceb9ad4271693c5a16988d39c1711ec7bf",
+        "reference_plan_sha256": "9ad0c3df7ed1e07d456cfd6ac23b9d6c0d1a4eb624c4919e83f517b57194e1ce",
+        "reference_spl_sha256": "59dc7fff78ce4eceebc9b3100062b7e6fd0fc5b714a8596d22e2a6d43a51c7bb"
+      },
+      "group_id": "composition_840ae16174509406",
+      "id": "scenario_078e1b0f94b91f581919",
+      "learning_eligible": false,
+      "mutation": "negative_platform",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "time_bin_anomaly",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "status_code"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Exclude cloud sources. In index web sourcetype proxy:access, find 15-minute buckets by src_ip where status_code=403 exceeds 20% of total bucket volume.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": 403
+              },
+              "function": "count",
+              "name": "matching_state_events"
+            }
+          ],
+          "output_fields": [
+            "bucket",
+            "entity",
+            "total_events",
+            "matching_state_events",
+            "state_pct"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "state_pct",
+              "operator": "gt",
+              "value": 20
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "state_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "state_pct",
+              "numerator": "matching_state_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": {
+            "alias": "bucket",
+            "field": "_time",
+            "span": "15m"
+          }
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "status_code"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval state=status_code | bin _time span=15m | eval bucket=_time | stats count as total_events count(eval(state=403)) as matching_state_events by bucket entity | eval state_pct=if(total_events=0,0,(matching_state_events/total_events)*100) | where state_pct>20 | sort 0 -state_pct | fields bucket entity total_events matching_state_events state_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "bucket",
+          "entity",
+          "total_events",
+          "matching_state_events",
+          "state_pct"
+        ]
+      },
+      "family": "time_bin_anomaly",
+      "fingerprints": {
+        "question_sha256": "eb5bdd50a26f695595651103dae561c9b8a643a9174a8a558012373812695936",
+        "reference_plan_sha256": "9ad0c3df7ed1e07d456cfd6ac23b9d6c0d1a4eb624c4919e83f517b57194e1ce",
+        "reference_spl_sha256": "59dc7fff78ce4eceebc9b3100062b7e6fd0fc5b714a8596d22e2a6d43a51c7bb"
+      },
+      "group_id": "composition_840ae16174509406",
+      "id": "scenario_2fbf56c43cb43d001e72",
+      "learning_eligible": false,
+      "mutation": "paraphrase",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "time_bin_anomaly",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "status_code"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Detect src_ip time slices in web/proxy:access whose status_code value 403 makes up more than 20% of the bucket baseline.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": 403
+              },
+              "function": "count",
+              "name": "matching_state_events"
+            }
+          ],
+          "output_fields": [
+            "bucket",
+            "entity",
+            "total_events",
+            "matching_state_events",
+            "state_pct"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "state_pct",
+              "operator": "gt",
+              "value": 20
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "state_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "state_pct",
+              "numerator": "matching_state_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": {
+            "alias": "bucket",
+            "field": "_time",
+            "span": "15m"
+          }
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "status_code"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval state=status_code | bin _time span=15m | eval bucket=_time | stats count as total_events count(eval(state=403)) as matching_state_events by bucket entity | eval state_pct=if(total_events=0,0,(matching_state_events/total_events)*100) | where state_pct>20 | sort 0 -state_pct | fields bucket entity total_events matching_state_events state_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": false,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "bucket",
+          "entity",
+          "total_events",
+          "matching_state_events",
+          "state_pct"
+        ]
+      },
+      "family": "time_bin_anomaly",
+      "fingerprints": {
+        "question_sha256": "92041d0704e80d715020fb8a90fe0b1c456057548e8af9a7d28fbd82e1e0e23c",
+        "reference_plan_sha256": "9ad0c3df7ed1e07d456cfd6ac23b9d6c0d1a4eb624c4919e83f517b57194e1ce",
+        "reference_spl_sha256": "59dc7fff78ce4eceebc9b3100062b7e6fd0fc5b714a8596d22e2a6d43a51c7bb"
+      },
+      "group_id": "composition_840ae16174509406",
+      "id": "scenario_4c43dd4637fae2066e0e",
+      "learning_eligible": false,
+      "mutation": "scope_removal",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "time_bin_anomaly",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "status_code"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Find 15-minute buckets by src_ip where status_code=403 exceeds 20% of total bucket volume.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": 403
+              },
+              "function": "count",
+              "name": "matching_state_events"
+            }
+          ],
+          "output_fields": [
+            "bucket",
+            "entity",
+            "total_events",
+            "matching_state_events",
+            "state_pct"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "state_pct",
+              "operator": "gt",
+              "value": 20
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "state_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "state_pct",
+              "numerator": "matching_state_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": {
+            "alias": "bucket",
+            "field": "_time",
+            "span": "15m"
+          }
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "status_code"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval state=status_code | bin _time span=15m | eval bucket=_time | stats count as total_events count(eval(state=403)) as matching_state_events by bucket entity | eval state_pct=if(total_events=0,0,(matching_state_events/total_events)*100) | where state_pct>20 | sort 0 -state_pct | fields bucket entity total_events matching_state_events state_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "bucket",
+          "entity",
+          "total_events",
+          "matching_state_events",
+          "state_pct"
+        ]
+      },
+      "family": "time_bin_anomaly",
+      "fingerprints": {
+        "question_sha256": "862e16b3a300b86cb11d4b779fdf00960f7dcbbffd953be76aa35b9a04a31b0b",
+        "reference_plan_sha256": "9ad0c3df7ed1e07d456cfd6ac23b9d6c0d1a4eb624c4919e83f517b57194e1ce",
+        "reference_spl_sha256": "59dc7fff78ce4eceebc9b3100062b7e6fd0fc5b714a8596d22e2a6d43a51c7bb"
+      },
+      "group_id": "composition_840ae16174509406",
+      "id": "scenario_da0196c27f1bb5e251ac",
+      "learning_eligible": false,
+      "mutation": "time_shift",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "time_bin_anomaly",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "status_code"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In index web sourcetype proxy:access, find 15-minute buckets by src_ip where status_code=403 exceeds 20% of total bucket volume. Use the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "total_events"
+            },
+            {
+              "condition": {
+                "field": "state",
+                "operator": "eq",
+                "value": 403
+              },
+              "function": "count",
+              "name": "matching_state_events"
+            }
+          ],
+          "output_fields": [
+            "bucket",
+            "entity",
+            "total_events",
+            "matching_state_events",
+            "state_pct"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "state_pct",
+              "operator": "gt",
+              "value": 20
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "state_pct",
+              "limit": 20
+            }
+          ],
+          "ratios": [
+            {
+              "denominator": "total_events",
+              "name": "state_pct",
+              "numerator": "matching_state_events",
+              "scale": 100,
+              "zero_policy": "zero"
+            }
+          ],
+          "time_bin": {
+            "alias": "bucket",
+            "field": "_time",
+            "span": "15m"
+          }
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "status_code"
+            ],
+            "kind": "native",
+            "output": "state"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval state=status_code | bin _time span=15m | eval bucket=_time | stats count as total_events count(eval(state=403)) as matching_state_events by bucket entity | eval state_pct=if(total_events=0,0,(matching_state_events/total_events)*100) | where state_pct>20 | sort 0 -state_pct | fields bucket entity total_events matching_state_events state_pct | head 20",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "9284462568cc2d453c10afcac70be0981966789d0f7a7b5c5a166a0d8dc63746",
+        "reference_plan_sha256": "c724556a553e3c4c544764b9ae0eaad78acf3102039a029a4fed0828ffd052c9",
+        "reference_spl_sha256": "1282334d084c799900dfd78f7b7a98f2b83034d3d2e3407bfa36ec03e7815a6f"
+      },
+      "group_id": "composition_3243b2796ac8d4a2",
+      "id": "scenario_7b5c6b8635ad9667f660",
+      "learning_eligible": false,
+      "mutation": "base",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In index web sourcetype proxy:access, show the top 10 src_ip values with at least 3 events and include distinct dest cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval host=dest | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "67d276ca2117878bea865e6ed50c2546923147ee0131191309af1451743fee6c",
+        "reference_plan_sha256": "c724556a553e3c4c544764b9ae0eaad78acf3102039a029a4fed0828ffd052c9",
+        "reference_spl_sha256": "1282334d084c799900dfd78f7b7a98f2b83034d3d2e3407bfa36ec03e7815a6f"
+      },
+      "group_id": "composition_3243b2796ac8d4a2",
+      "id": "scenario_1898dcc9d9e3b4963479",
+      "learning_eligible": false,
+      "mutation": "field_synonym",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In index web sourcetype proxy:access, show the top 10 source values with at least 3 events and include distinct system cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval host=dest | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "cloud",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "2460b6ef30ea2e4db8f024a46b412878e707754bb7d1a23d0af825424f7f9f5c",
+        "reference_plan_sha256": "c724556a553e3c4c544764b9ae0eaad78acf3102039a029a4fed0828ffd052c9",
+        "reference_spl_sha256": "1282334d084c799900dfd78f7b7a98f2b83034d3d2e3407bfa36ec03e7815a6f"
+      },
+      "group_id": "composition_3243b2796ac8d4a2",
+      "id": "scenario_9d97490625387b20bd1d",
+      "learning_eligible": false,
+      "mutation": "negative_platform",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Exclude cloud sources. In index web sourcetype proxy:access, show the top 10 src_ip values with at least 3 events and include distinct dest cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval host=dest | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "2873b8a360d5d6689dfbe61d7b27d7870f9eaffa60aa936caff04ba4457d7764",
+        "reference_plan_sha256": "c724556a553e3c4c544764b9ae0eaad78acf3102039a029a4fed0828ffd052c9",
+        "reference_spl_sha256": "1282334d084c799900dfd78f7b7a98f2b83034d3d2e3407bfa36ec03e7815a6f"
+      },
+      "group_id": "composition_3243b2796ac8d4a2",
+      "id": "scenario_7cfa77140b414887606d",
+      "learning_eligible": false,
+      "mutation": "paraphrase",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Rank the busiest src_ip values in web/proxy:access; keep only those reaching 3 records and report how many unique dest values each saw.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval host=dest | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": false,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "3f3c774b27a67fd76cbd08121110fc81c6f1a8d2b674a8f10dc595a44c94af7a",
+        "reference_plan_sha256": "c724556a553e3c4c544764b9ae0eaad78acf3102039a029a4fed0828ffd052c9",
+        "reference_spl_sha256": "1282334d084c799900dfd78f7b7a98f2b83034d3d2e3407bfa36ec03e7815a6f"
+      },
+      "group_id": "composition_3243b2796ac8d4a2",
+      "id": "scenario_240179526396d4eba1a9",
+      "learning_eligible": false,
+      "mutation": "scope_removal",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Show the top 10 src_ip values with at least 3 events and include distinct dest cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval host=dest | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "web::proxy:access",
+        "index": "web",
+        "kind": "web",
+        "platform": "web",
+        "sourcetype": "proxy:access"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "9284462568cc2d453c10afcac70be0981966789d0f7a7b5c5a166a0d8dc63746",
+        "reference_plan_sha256": "c724556a553e3c4c544764b9ae0eaad78acf3102039a029a4fed0828ffd052c9",
+        "reference_spl_sha256": "1282334d084c799900dfd78f7b7a98f2b83034d3d2e3407bfa36ec03e7815a6f"
+      },
+      "group_id": "composition_3243b2796ac8d4a2",
+      "id": "scenario_11c9dd3509eb911be7aa",
+      "learning_eligible": false,
+      "mutation": "time_shift",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In index web sourcetype proxy:access, show the top 10 src_ip values with at least 3 events and include distinct dest cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "web",
+            "sourcetype": "proxy:access"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"web\" sourcetype=\"proxy:access\") | eval entity=src_ip | eval host=dest | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "dns::stream:dns",
+        "index": "dns",
+        "kind": "dns",
+        "platform": "dns",
+        "sourcetype": "stream:dns"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "067b54c80a8132c7ec8805b94fc44175e04a233ce4e3daa0108510cbbbb61d7a",
+        "reference_plan_sha256": "05c091e9e534316d30fa265de99205204f3c1b27ec40a40dc45376b1d2395d5c",
+        "reference_spl_sha256": "fb199f0127380fd76a0da49fb70e42fbc8da4915e53fd1afa8d54b802a88c62f"
+      },
+      "group_id": "composition_91e8f90dc9b05feb",
+      "id": "scenario_57ec78a4fc7f3fe58a1b",
+      "learning_eligible": false,
+      "mutation": "base",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In index dns sourcetype stream:dns, show the top 10 src_ip values with at least 3 events and include distinct dest_ip cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest_ip"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"dns\" sourcetype=\"stream:dns\") | eval entity=src_ip | eval host=dest_ip | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "dns::stream:dns",
+        "index": "dns",
+        "kind": "dns",
+        "platform": "dns",
+        "sourcetype": "stream:dns"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "2f0ad14c3e5ecd8b192e8452b3f88d40c244ade5f45a8438e829aef436e864ee",
+        "reference_plan_sha256": "05c091e9e534316d30fa265de99205204f3c1b27ec40a40dc45376b1d2395d5c",
+        "reference_spl_sha256": "fb199f0127380fd76a0da49fb70e42fbc8da4915e53fd1afa8d54b802a88c62f"
+      },
+      "group_id": "composition_91e8f90dc9b05feb",
+      "id": "scenario_3f724ddb5cd9f532f6df",
+      "learning_eligible": false,
+      "mutation": "field_synonym",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In index dns sourcetype stream:dns, show the top 10 source values with at least 3 events and include distinct system cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest_ip"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"dns\" sourcetype=\"stream:dns\") | eval entity=src_ip | eval host=dest_ip | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "dns::stream:dns",
+        "index": "dns",
+        "kind": "dns",
+        "platform": "dns",
+        "sourcetype": "stream:dns"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "cloud",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "074193594f1617146e3f3a847642aeba3f606893d009ac1b6841c8856e8096b4",
+        "reference_plan_sha256": "05c091e9e534316d30fa265de99205204f3c1b27ec40a40dc45376b1d2395d5c",
+        "reference_spl_sha256": "fb199f0127380fd76a0da49fb70e42fbc8da4915e53fd1afa8d54b802a88c62f"
+      },
+      "group_id": "composition_91e8f90dc9b05feb",
+      "id": "scenario_3979a92e74a01ba6071a",
+      "learning_eligible": false,
+      "mutation": "negative_platform",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Exclude cloud sources. In index dns sourcetype stream:dns, show the top 10 src_ip values with at least 3 events and include distinct dest_ip cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest_ip"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"dns\" sourcetype=\"stream:dns\") | eval entity=src_ip | eval host=dest_ip | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "dns::stream:dns",
+        "index": "dns",
+        "kind": "dns",
+        "platform": "dns",
+        "sourcetype": "stream:dns"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "2e107398986594d4fc10c0b2d045be69873de873be7c4b1988039bb304c261f8",
+        "reference_plan_sha256": "05c091e9e534316d30fa265de99205204f3c1b27ec40a40dc45376b1d2395d5c",
+        "reference_spl_sha256": "fb199f0127380fd76a0da49fb70e42fbc8da4915e53fd1afa8d54b802a88c62f"
+      },
+      "group_id": "composition_91e8f90dc9b05feb",
+      "id": "scenario_2f8890318fbe7c11c520",
+      "learning_eligible": false,
+      "mutation": "paraphrase",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Rank the busiest src_ip values in dns/stream:dns; keep only those reaching 3 records and report how many unique dest_ip values each saw.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest_ip"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"dns\" sourcetype=\"stream:dns\") | eval entity=src_ip | eval host=dest_ip | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "dns::stream:dns",
+        "index": "dns",
+        "kind": "dns",
+        "platform": "dns",
+        "sourcetype": "stream:dns"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "explicit_scope_in_question": false,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "58cb7ddb630508f53420f3689eee89d1d08034a2b146583e8d1b3368ab812b08",
+        "reference_plan_sha256": "05c091e9e534316d30fa265de99205204f3c1b27ec40a40dc45376b1d2395d5c",
+        "reference_spl_sha256": "fb199f0127380fd76a0da49fb70e42fbc8da4915e53fd1afa8d54b802a88c62f"
+      },
+      "group_id": "composition_91e8f90dc9b05feb",
+      "id": "scenario_5659c9e2fcaab00feb0a",
+      "learning_eligible": false,
+      "mutation": "scope_removal",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "Show the top 10 src_ip values with at least 3 events and include distinct dest_ip cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest_ip"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"dns\" sourcetype=\"stream:dns\") | eval entity=src_ip | eval host=dest_ip | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    },
+    {
+      "domain": {
+        "domain_id": "dns::stream:dns",
+        "index": "dns",
+        "kind": "dns",
+        "platform": "dns",
+        "sourcetype": "stream:dns"
+      },
+      "expected_constraints": {
+        "dataset_locks": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "explicit_scope_in_question": true,
+        "forbidden_platform": "",
+        "required_output_fields": [
+          "entity",
+          "events",
+          "distinct_host"
+        ]
+      },
+      "family": "top_n_cardinality",
+      "fingerprints": {
+        "question_sha256": "067b54c80a8132c7ec8805b94fc44175e04a233ce4e3daa0108510cbbbb61d7a",
+        "reference_plan_sha256": "05c091e9e534316d30fa265de99205204f3c1b27ec40a40dc45376b1d2395d5c",
+        "reference_spl_sha256": "fb199f0127380fd76a0da49fb70e42fbc8da4915e53fd1afa8d54b802a88c62f"
+      },
+      "group_id": "composition_91e8f90dc9b05feb",
+      "id": "scenario_1be3d7114635c909213b",
+      "learning_eligible": false,
+      "mutation": "time_shift",
+      "provenance": {
+        "analytical_plan_version": "1.0",
+        "composition_id": "top_n_cardinality",
+        "generator_version": "1.0",
+        "initial_hash_split": "dev",
+        "metadata_fields": [
+          "src_ip",
+          "dest_ip"
+        ],
+        "source": "environment_metadata",
+        "spl_plan_compiler_version": "1.0"
+      },
+      "question": "In index dns sourcetype stream:dns, show the top 10 src_ip values with at least 3 events and include distinct dest_ip cardinality over the last 7 days.",
+      "reference_plan": {
+        "analysis": {
+          "dimensions": [
+            "entity"
+          ],
+          "intersections": [],
+          "measures": [
+            {
+              "function": "count",
+              "name": "events"
+            },
+            {
+              "field": "host",
+              "function": "dc",
+              "name": "distinct_host"
+            }
+          ],
+          "output_fields": [
+            "entity",
+            "events",
+            "distinct_host"
+          ],
+          "post_aggregation_predicates": [
+            {
+              "field": "events",
+              "operator": "gte",
+              "value": 3
+            }
+          ],
+          "ranking": [
+            {
+              "direction": "desc",
+              "field": "events",
+              "limit": 10
+            }
+          ],
+          "ratios": [],
+          "time_bin": null
+        },
+        "datasets": [
+          {
+            "index": "dns",
+            "sourcetype": "stream:dns"
+          }
+        ],
+        "execution": {
+          "earliest": "-7d",
+          "latest": "now",
+          "materialization": "bounded",
+          "row_limit": 100
+        },
+        "normalizations": [
+          {
+            "fields": [
+              "src_ip"
+            ],
+            "kind": "native",
+            "output": "entity"
+          },
+          {
+            "fields": [
+              "dest_ip"
+            ],
+            "kind": "native",
+            "output": "host"
+          }
+        ],
+        "version": "1.0"
+      },
+      "reference_spl": "search (index=\"dns\" sourcetype=\"stream:dns\") | eval entity=src_ip | eval host=dest_ip | stats count as events dc(host) as distinct_host by entity | where events>=3 | sort 0 -events | fields entity events distinct_host | head 10",
+      "split": "dev"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "composition_library_sha256": "0c06a9d51ee956103a5e4df3d7defd4ed2cdff3b391bd7429289c42b7b2ba3b2",
+    "profile_sha256": "16bd1ebefbede26de6ab320c975ce599d086bcbc4cc7293a5de618e927b8f34d"
+  },
+  "split": "dev"
+}

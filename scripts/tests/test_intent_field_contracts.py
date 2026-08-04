@@ -41,6 +41,72 @@ class IntentFieldContractsTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("intent_contract", reason)
 
+    def test_contract_rejects_rex_when_trusted_native_fields_satisfy_intent(self) -> None:
+        ok, reason = validate_query_for_intent(
+            "apache_access_top_ips",
+            {
+                "query": (
+                    "search index=linux sourcetype=access_combined "
+                    '| rex field=_raw "^(?<clientip>\\S+)" '
+                    "| stats count by clientip status method"
+                )
+            },
+            field_strategy={
+                "roles": {
+                    "src_ip": {"trusted_fields": ["clientip"]},
+                    "status": {"trusted_fields": ["status"]},
+                    "method": {"trusted_fields": ["method"]},
+                }
+            },
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "intent_contract_redundant_rex_with_trusted_native_fields")
+
+    def test_contract_allows_vpc_rex_when_raw_parse_is_required(self) -> None:
+        ok, reason = validate_query_for_intent(
+            "aws_vpc_flow_activity",
+            {
+                "query": (
+                    "search index=main sourcetype=aws:cloudwatchlogs:vpcflow "
+                    '| rex field=_raw "^(?<src_ip>\\S+) (?<dest_ip>\\S+) (?<dest_port>\\S+) (?<action>\\S+)$" '
+                    "| eval transport=protocol_num "
+                    "| stats count by action src_ip dest_ip dest_port transport"
+                )
+            },
+            field_strategy={
+                "raw_parse_required": True,
+                "roles": {
+                    "src_ip": {"trusted_fields": ["src_ip"]},
+                    "dest_ip": {"trusted_fields": ["dest_ip"]},
+                    "dest_port": {"trusted_fields": ["dest_port"]},
+                    "protocol": {"trusted_fields": ["protocol_num"]},
+                    "action": {"trusted_fields": ["action"]},
+                },
+            },
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "intent_contract_ok")
+
+    def test_contract_accepts_native_json_shape_without_spath(self) -> None:
+        ok, reason = validate_query_for_intent(
+            "stream_http_activity",
+            {
+                "query": (
+                    "search index=main sourcetype=stream:http "
+                    "| stats count by http_method status site src_ip"
+                )
+            },
+            field_strategy={
+                "roles": {
+                    "method": {"trusted_fields": ["http_method"]},
+                    "status": {"trusted_fields": ["status"]},
+                    "src_ip": {"trusted_fields": ["src_ip"]},
+                }
+            },
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "intent_contract_ok")
+
     def test_linux_priv_escalation_requires_sudo_or_su(self) -> None:
         ok, reason = validate_query_for_intent(
             "linux_privilege_escalation",
@@ -112,7 +178,7 @@ class IntentFieldContractsTests(unittest.TestCase):
             },
         )
         self.assertFalse(ok)
-        self.assertEqual(reason, "intent_contract_missing_group_1")
+        self.assertEqual(reason, "intent_contract_missing_group_2")
 
     def test_windows_auth_failures_passes_expected_query_shape(self) -> None:
         ok, reason = validate_query_for_intent(
@@ -129,6 +195,42 @@ class IntentFieldContractsTests(unittest.TestCase):
                 "earliest_time": "-24h",
                 "latest_time": "now",
                 "row_limit": 10,
+            },
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "intent_contract_ok")
+
+    def test_windows_auth_failures_accepts_environment_grounded_index(self) -> None:
+        ok, reason = validate_query_for_intent(
+            "windows_auth_failures",
+            {
+                "query": (
+                    "search (index=agtsmith_test OR index=soc_windows OR index=botsv3) "
+                    "sourcetype=XmlWinEventLog "
+                    "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
+                    "| eval user_name=coalesce(TargetUserName,SubjectUserName,user) "
+                    "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src) "
+                    "| table _time index host user_name src_ip EventCode EventID"
+                ),
+                "earliest_time": "-24h",
+                "latest_time": "now",
+                "row_limit": 10,
+            },
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "intent_contract_ok")
+
+    def test_internal_auth_contract_accepts_quoted_exact_values(self) -> None:
+        ok, reason = validate_query_for_intent(
+            "internal_auth_failures",
+            {
+                "query": (
+                    'search index="_audit" sourcetype="audittrail" info="failed" '
+                    "| stats count by host user src | sort - count"
+                ),
+                "earliest_time": "-24h",
+                "latest_time": "now",
+                "row_limit": 20,
             },
         )
         self.assertTrue(ok)

@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "assignment": {
+    "strategy": "explicit-frozen-seed",
+    "seed": 20260803,
+    "case_key": "dataset+composition+id"
+  },
+  "corpora": {
+    "train": [
+      "benchmarks/spl_cases.json",
+      "benchmarks/gold_spl_oracles.json"
+    ],
+    "dev": [
+      "benchmarks/operational_spl_accuracy.json",
+      "benchmarks/live_domain_benchmark.json",
+      "benchmarks/unknown_env_cases.json"
+    ],
+    "holdout": [
+      "benchmarks/holdout_eval21_cases.json"
+    ]
+  },
+  "splits": {
+    "train": [],
+    "dev": [],
+    "holdout": [
+      "linux_secure_1",
+      "linux_secure_2",
+      "linux_secure_3",
+      "access_combined_1",
+      "access_combined_2",
+      "access_combined_3",
+      "apache_error_1",
+      "apache_error_2",
+      "apache_error_3",
+      "windows_1",
+      "windows_2",
+      "windows_3",
+      "aws_1",
+      "aws_2",
+      "aws_3",
+      "o365_1",
+      "o365_2",
+      "o365_3",
+      "dns_1",
+      "dns_2",
+      "dns_3"
+    ]
+  },
+  "protected_sources": [
+    "benchmarks/holdout_eval21_cases.json",
+    "benchmarks/holdout_eval21_baseline.json"
+  ],
+  "case_fingerprints": {
+    "linux_secure_1": ["e54396ef5f8e4b445e6664a65fa51b4c4c99b01c7206ef758ecd7e8e7efc40a4", "df338a57fbab7f88cdb302934fae23044078e4718e39840d1ea10d305efbb249"],
+    "linux_secure_2": ["d49280613f5d15209e2d792d38b313dd36d30c8a76e986f198d2deb5de98aef1", "ee889469df1e48d0c4f94a8a13c6a0b84829173547eef95ff94781dd0354dd54"],
+    "linux_secure_3": ["77aab857fcc0034e75731abcbb0f2e062ad81e75806dfe54e203a1c2c848370f", "69a5c12fa0d58bbafe35447d62c493a7f6f549e58b8c458773c12380bc6260a3"],
+    "access_combined_1": ["e708449b69a05985a1a77820940d2b9dbc8098f2acd4a4f497d4d8e1d2a231b1", "27f770ba90ce8a6db43c093f3ada9a1e94141e3d16b66f4be53c643810af562d"],
+    "access_combined_2": ["95ae1760f2f326a9918af280c668832ab453f04d75c5d49e18f95ec857cefeae", "262c30bc3defdbcb63741dd9c823800a60bb2289284e41dfc7aa0ed3d5918b71"],
+    "access_combined_3": ["6129461e627c5f6b408c9b3b572745ad96b3078149ae7220f6868f3b5afac1fa", "76acb0783978168bdaf645fa6680bc540a8ae65cdafe30adb6e8bb1151e944eb"],
+    "apache_error_1": ["7a1ef16aa981769a02897d8535364b742b347af7c75495e3268c70cf3264eaac", "214c3b4f3ffe0abbc9d6411cd3734cd6d581f0f098ab0c1ae85de68e81aefb40"],
+    "apache_error_2": ["244c4ab5a0a0cd62792ea6c5aa6479ae50c5c601cbb8eba6fc27fd8fa1e47682", "9c63333c8c5f6b9e226ed0fc54e7b381427768e37862916f74e12423bd601369"],
+    "apache_error_3": ["8a1f158c886e7694f67b6a5a1db98eb58b47ee7d0c64f2727579987b17aeaa6a", "a3a17532e6b3e91b431822638c77a8f55f5d27a3a48c8f7f7e70836a0550b612"],
+    "windows_1": ["0239f6623781caf99e57983cde91933debe8d4cea63a3f462d78608d02429043", "2b0ae8b44af36468d3f091729c0911f06322cfbcab396db4c6776225d73b133a"],
+    "windows_2": ["b5d440502df5f178dc987835b6f06ff9ccc773f412bbd2820d064d5ecaaa2aa4", "00d4693e6c0637dc034df26637f92533a9a0c392a6aa427bfc7ebb5c3ef2ee2b"],
+    "windows_3": ["bdffff74b3360b7da767231fea44c1b34a9eed9970f5b7179a64401222b538d1", "c887ea5e26cc123f850fb95aa480dc306809c1b39e5d1dde2a8c30a43b472a20"],
+    "aws_1": ["0c7e3463c97a7d3691017aff3f1e00d4b9b9e6ddd17ab9d2585a77f0dd49eabc", "79425bb696a301cb64727fd26fb4847dc8b01197916a8f30b285c1798bbf791d"],
+    "aws_2": ["eab00bc14b1da3172a9e09186f92ad01bca0415cdf50efb92bce9fb7666a3aa8", "7efc7a2c05d0f499fd641a822c2af83143e31d90d0ffde11bc0fa9aba517c68a"],
+    "aws_3": ["75f862a8f454ebe74e969262f3172f51922cfbd1b89991c6b14eb35520511dc8", "5414515754ca53c4c3b8d38736a5070c9e0ac244aec7dac58bbf6224a8bb8816"],
+    "o365_1": ["b59ecc245f087375d237cf498e545cce8d84e797f8e090cbb4d36232b372bf38", "2b2c0d35a80c207dfebd97f54123feddef3d4243b7d95e18bc27bf345c0a45b6"],
+    "o365_2": ["cb79429a262a1f3a83d2cd8e23bf89a4bcd28db619789e941c3cd8b39a46b2cb", "d4f4f54377cf951e8bf07aa1a4983c1fd4b6b9c2904b241eaab987b485ba061e"],
+    "o365_3": ["7eef82c381e098f891ca157cf30f707282d3a8f4417ff97d9113edcf45b81bc6", "512aced449ab434690afeb2e384a0335f291449d0915a0336dd56a6cbec5de4a"],
+    "dns_1": ["c70462a09ef025aaab0d9c95c81dc227f6a8d418a1a477291905a7382f74aaae", "7d66daf5c0d18ff996e4f5fd72950d51b6b30b457b7ae5b5ebf8c25f542ad566"],
+    "dns_2": ["730b3081dc70f9519355c3029807db4d7e8a991d2a3cda22230d47f7f6de38cc", "6d41d4fcd4fc8b887f4000b2529368164eaae0e1adecd9f6882d55478f0e7110"],
+    "dns_3": ["af137c56a4a157941c97f7db5d880fdb7315f66c876a04b34eb1b9f86d9793aa", "d7f758aadb91cac60ff1bc678513f079ae28bf12508d50fe7b61d9585b62c69d"]
+  },
+  "firewall": {
+    "deny_destinations": [
+      "domain_patterns",
+      "embedding_rag",
+      "offline_docs_rag",
+      "skillpack",
+      "query_templates",
+      "local_learning",
+      "improvement_loop"
+    ],
+    "deny_content": [
+      "case_ids",
+      "questions",
+      "reference_spl",
+      "generated_spl",
+      "failures",
+      "content_hashes"
+    ]
+  }
+}

@@ -98,6 +98,26 @@ def _question_tokens(question: str, *, intent: str = "") -> set[str]:
         tokens.update({"5379", "credential", "targetname"})
     elif intent_name in {"windows_privilege_assigned_activity"}:
         tokens.update({"4672", "privilege", "privilegelist"})
+    elif intent_name in {"top_indexes"}:
+        tokens.update({"index", "indexes", "stats", "count", "retrieve", "events", "volume", "busiest"})
+    elif intent_name in {"metadata_inventory"}:
+        tokens.update({"metadata", "metasearch", "hosts", "sources", "sourcetypes", "inventory"})
+    elif intent_name in {"index_sourcetype_volume"}:
+        tokens.update({"sourcetype", "stats", "count", "index", "volume"})
+    elif intent_name in {"splunk_internal_health", "internal_sourcetypes"}:
+        tokens.update({"_internal", "scheduler", "search_telemetry", "splunkd", "internal"})
+    elif intent_name in {"splunk_license_usage"}:
+        tokens.update({"license", "quota", "_internal", "usage"})
+    elif intent_name in {"forwarder_connectivity"}:
+        tokens.update({"forwarder", "deploymentclient", "splunkd", "connectivity"})
+    elif intent_name in {"host_activity_summary", "index_staleness"}:
+        tokens.update({"host", "index", "stats", "count", "activity"})
+    elif intent_name in {"web_traffic_summary", "apache_access_top_ips"}:
+        tokens.update({"web", "access", "clientip", "uri", "status", "stats"})
+    elif intent_name in {"network_flow_summary", "aws_vpc_flow_activity"}:
+        tokens.update({"network", "flow", "src", "dest", "port", "stats"})
+    elif intent_name in {"app_error_spike"}:
+        tokens.update({"error", "sourcetype", "host", "stats", "count"})
     for intent_guess in intents_for_question(question):
         tokens.update(rag_tokens_for_intent(intent_guess))
     return tokens
@@ -115,10 +135,11 @@ def _extract_spl_examples(text: str, *, max_chars: int) -> str:
     return merged
 
 
-def _score_topic(row: dict[str, Any], tokens: set[str]) -> int:
+def _score_topic(row: dict[str, Any], tokens: set[str], *, intent: str = "") -> int:
     title = str(row.get("title", "")).lower()
     path = str(row.get("path", "")).lower()
     text = str(row.get("text", "")).lower()
+    intent_name = str(intent or "").strip().lower()
     score = 0
     for token in tokens:
         if token in title:
@@ -130,6 +151,16 @@ def _score_topic(row: dict[str, Any], tokens: set[str]) -> int:
     for cmd in SPL_COMMAND_TOKENS:
         if cmd in tokens and (cmd in title or cmd in path or f"| {cmd}" in text or f" {cmd} " in text):
             score += 10
+    category = str(row.get("category", "")).strip().lower()
+    if category == "inventory" and intent_name in {"top_indexes", "metadata_inventory", "index_sourcetype_volume", "host_activity_summary"}:
+        score += 12
+    if category == "platform_ops" and intent_name in {
+        "splunk_internal_health",
+        "splunk_license_usage",
+        "forwarder_connectivity",
+        "internal_sourcetypes",
+    }:
+        score += 12
     if "search-reference" in path or "search-manual" in path:
         score += 3
     if "optimizing-searches" in path:
@@ -181,7 +212,7 @@ def build_offline_docs_context(
         lowered = text.lower()
         if any(term in lowered for term in FORBIDDEN_SNIPPET_TERMS):
             continue
-        score = _score_topic(row, tokens)
+        score = _score_topic(row, tokens, intent=intent)
         if score <= 0 and not tokens:
             score = 1
         if score <= 0:

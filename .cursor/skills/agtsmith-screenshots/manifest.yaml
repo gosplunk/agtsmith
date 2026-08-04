@@ -7,6 +7,11 @@ targets:
   - id: login
     url: http://127.0.0.1:8787/login
     wait_ms: 1500
+  - id: mcp-chat
+    url: http://127.0.0.1:8787/mcp
+    auth: agtsmith
+    wait_ms: 2000
+    skip_if_unreachable: true
   - id: investigation
     url: http://127.0.0.1:8787/
     wait_ms: 2000

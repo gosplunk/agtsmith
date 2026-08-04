@@ -4,14 +4,22 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from botsv3_catalog import BOTSV3_SOURCETYPES
 
 _PROFILE_REPO_ROOT = Path(__file__).resolve().parents[1]
-PROFILE_PATH_DEFAULT = _PROFILE_REPO_ROOT / "artifacts/environment/environment_profile_latest.json"
+PROFILE_PATH_DEFAULT = Path(
+    os.getenv(
+        "AGTSMITH_ENVIRONMENT_PROFILE_PATH",
+        str(_PROFILE_REPO_ROOT / "artifacts/environment/environment_profile_latest.json"),
+    )
+).expanduser()
 PROFILE_PATH_LEGACY = _PROFILE_REPO_ROOT / "docs/logs/environment_profile_latest.json"
 INDEX_ALIASES_OVERRIDE_PATH = _PROFILE_REPO_ROOT / "artifacts/environment/index_aliases_override.json"
 
@@ -44,11 +52,21 @@ KNOWN_SOURCETYPE_SEMANTICS: dict[str, dict[str, Any]] = {
     },
     "access_combined": {
         "description": "Apache/Nginx style web access logs.",
-        "use_cases": ["apache_access_top_ips", "apache_404_spike", "web_scanning"],
+        "use_cases": [
+            "apache_access_top_ips",
+            "apache_suspicious_activity",
+            "apache_404_spike",
+            "apache_404_scanning",
+            "apache_suspicious_user_agents",
+            "apache_sensitive_path_probing",
+            "web_scanning",
+        ],
         "field_aliases": {
             "src_ip": ["clientip", "src", "ip"],
             "status_code": ["status", "sc_status"],
             "url_path": ["uri_path", "uri", "url"],
+            "method": ["method", "http_method", "verb"],
+            "user_agent": ["useragent", "user_agent", "http_user_agent"],
         },
         "confidence": "high",
         "sources": [SRC_PRETRAINED],
@@ -322,12 +340,13 @@ def _merge_profile_index_aliases(profile: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def load_environment_profile(path: str | Path = PROFILE_PATH_DEFAULT) -> dict[str, Any]:
-    p = Path(path)
+@lru_cache(maxsize=8)
+def _load_environment_profile_cached(path_str: str) -> dict[str, Any]:
+    p = Path(path_str)
     if not p.exists():
-        # Backward-compatible fallback for older artifact location.
-        if p == PROFILE_PATH_DEFAULT and PROFILE_PATH_LEGACY.exists():
-            p = PROFILE_PATH_LEGACY
+        legacy = PROFILE_PATH_LEGACY
+        if p == PROFILE_PATH_DEFAULT and legacy.exists():
+            p = legacy
         else:
             return {}
     try:
@@ -337,6 +356,142 @@ def load_environment_profile(path: str | Path = PROFILE_PATH_DEFAULT) -> dict[st
         return _merge_profile_index_aliases(data)
     except Exception:
         return {}
+
+
+def load_environment_profile(path: str | Path = PROFILE_PATH_DEFAULT) -> dict[str, Any]:
+    return _load_environment_profile_cached(str(Path(path)))
+
+
+def profile_age_minutes(profile: dict[str, Any] | None = None, *, profile_path: str | Path = PROFILE_PATH_DEFAULT) -> float | None:
+    payload = profile if isinstance(profile, dict) and profile else load_environment_profile(profile_path)
+    ts_raw = str(payload.get("timestamp_utc", "")).strip()
+    if not ts_raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return (datetime.now(timezone.utc) - ts).total_seconds() / 60.0
+
+
+def profile_is_fresh(
+    profile: dict[str, Any] | None = None,
+    *,
+    profile_path: str | Path = PROFILE_PATH_DEFAULT,
+    max_age_minutes: int = 60,
+) -> bool:
+    age = profile_age_minutes(profile, profile_path=profile_path)
+    if age is None:
+        return False
+    return age <= max(1, int(max_age_minutes))
+
+
+def indexes_with_data_in_window(
+    profile: dict[str, Any] | None,
+    *,
+    earliest: str = "-1h",
+    min_count: int = 1,
+) -> list[dict[str, Any]]:
+    if not isinstance(profile, dict):
+        return []
+    activity = profile.get("index_activity", {})
+    if not isinstance(activity, dict):
+        return []
+    windows = activity.get("windows", {})
+    if not isinstance(windows, dict):
+        return []
+    rows = windows.get(str(earliest).strip(), [])
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        index_name = str(row.get("index", "")).strip()
+        if not index_name:
+            continue
+        try:
+            count = int(row.get("count", 0))
+        except Exception:
+            count = 0
+        if count >= max(1, int(min_count)):
+            out.append({"index": index_name, "count": count})
+    out.sort(key=lambda item: (-int(item.get("count", 0)), str(item.get("index", ""))))
+    return out
+
+
+def profile_can_answer_inventory(
+    question: str,
+    profile: dict[str, Any] | None = None,
+    *,
+    profile_path: str | Path = PROFILE_PATH_DEFAULT,
+    max_age_minutes: int = 60,
+) -> tuple[bool, str]:
+    """Return whether a fresh profile snapshot can answer an inventory question."""
+    from question_intelligence import infer_time_window
+
+    payload = profile if isinstance(profile, dict) and profile else load_environment_profile(profile_path)
+    if not payload:
+        return False, "missing_profile"
+    if not profile_is_fresh(payload, max_age_minutes=max_age_minutes):
+        return False, "stale_profile"
+    q = (question or "").lower()
+    inventory_signals = (
+        "index",
+        "indexes",
+        "have data",
+        "has data",
+        "with data",
+        "event volume",
+        "most events",
+        "busiest",
+    )
+    if not any(term in q for term in inventory_signals):
+        return False, "not_inventory_question"
+    earliest, _latest = infer_time_window(question)
+    activity = payload.get("index_activity", {})
+    windows = activity.get("windows", {}) if isinstance(activity, dict) else {}
+    if not isinstance(windows, dict) or earliest not in windows:
+        return False, f"missing_window:{earliest}"
+    rows = indexes_with_data_in_window(payload, earliest=earliest)
+    if not rows:
+        return False, "empty_window"
+    return True, earliest
+
+
+def profile_inventory_structured_results(
+    question: str,
+    profile: dict[str, Any] | None = None,
+    *,
+    profile_path: str | Path = PROFILE_PATH_DEFAULT,
+    max_age_minutes: int = 60,
+) -> dict[str, Any] | None:
+    from question_intelligence import infer_time_window
+
+    payload = profile if isinstance(profile, dict) and profile else load_environment_profile(profile_path)
+    can_answer, reason = profile_can_answer_inventory(
+        question,
+        payload,
+        profile_path=profile_path,
+        max_age_minutes=max_age_minutes,
+    )
+    if not can_answer:
+        return None
+    earliest = reason if reason.startswith("-") else infer_time_window(question)[0]
+    if not str(earliest).startswith("-"):
+        earliest, _latest = infer_time_window(question)
+    _earliest, latest = infer_time_window(question)
+    rows = indexes_with_data_in_window(payload, earliest=_earliest)
+    if not rows:
+        return None
+    return {
+        "results": rows,
+        "total_rows": len(rows),
+        "source": "environment_profile_index_activity",
+        "profile_window": _earliest,
+        "earliest_time": _earliest,
+        "latest_time": latest,
+    }
 
 
 def _normalize_sourcetype(name: str) -> str:
@@ -971,7 +1126,14 @@ def _domain_supports_intent(
             or "xmlwineventlog" in st_joined
             or any(tok in st_joined for tok in ("wineventlog:security", "xmlwineventlog:security"))
         )
-    if intent in {"apache_access_top_ips", "apache_404_spike"}:
+    if intent in {
+        "apache_access_top_ips",
+        "apache_suspicious_activity",
+        "apache_404_spike",
+        "apache_404_scanning",
+        "apache_suspicious_user_agents",
+        "apache_sensitive_path_probing",
+    }:
         return bool(
             {"apache_access_top_ips", "apache_404_spike", "web_scanning"} & use_cases
             or web_fields & all_populated_fields
@@ -1031,7 +1193,11 @@ INTENT_FALLBACK_SOURCETYPES: dict[str, tuple[str, ...]] = {
     "windows_sysmon_dns_activity": ("xmlwineventlog", "XmlWinEventLog"),
     "windows_credential_access_activity": ("xmlwineventlog:security", "xmlwineventlog", "XmlWinEventLog"),
     "apache_access_top_ips": ("access_combined", "apache:access"),
+    "apache_suspicious_activity": ("access_combined", "apache:access"),
     "apache_404_spike": ("access_combined", "apache:access"),
+    "apache_404_scanning": ("access_combined", "apache:access"),
+    "apache_suspicious_user_agents": ("access_combined", "apache:access"),
+    "apache_sensitive_path_probing": ("access_combined", "apache:access"),
     "aws_cloudtrail_activity": ("aws:cloudtrail",),
     "aws_vpc_flow_activity": ("aws:cloudwatchlogs:vpcflow",),
     "aad_signin_activity": ("ms:aad:signin",),
@@ -1620,6 +1786,7 @@ def _rank_domain_sourcetypes(
             index_sourcetype_inventory=index_sourcetype_inventory,
         )
         populated_fields = _field_inventory_populated_names(field_meta)
+        populated_fields_l = {field.casefold() for field in populated_fields}
         st_l = st.lower()
         score = 0
         score += 18 * len(use_cases & target_use_cases)
@@ -1629,6 +1796,7 @@ def _rank_domain_sourcetypes(
         if any(token == st_l or token in st_l for token in tokens):
             score += 10
         score += 2 * sum(1 for token in tokens if token in desc)
+        score += 12 * len(tokens & populated_fields_l)
         if "linux_auth_failures" in target_use_cases and {"user", "uid", "acct", "rhost", "src_ip", "addr"} & populated_fields:
             score += 5
         if "windows_auth_failures" in target_use_cases and {"TargetUserName", "SubjectUserName", "IpAddress", "Source_Network_Address"} & populated_fields:
@@ -1988,6 +2156,30 @@ def suggest_domains_for_question(
             if st_l and st_l in q_tokens:
                 score += 5
                 reasons.append(f"question contains sourcetype '{st}'")
+            inventory_rows = field_inventory.get(str(st), [])
+            if isinstance(inventory_rows, list):
+                q_compact = re.sub(r"[^a-z0-9]", "", q)
+                matched_fields = [
+                    str(item.get("field", "")).strip()
+                    for item in inventory_rows
+                    if isinstance(item, dict)
+                    and str(item.get("field", "")).strip()
+                    and (
+                        str(item.get("field", "")).strip().casefold() in q
+                        or re.sub(
+                            r"[^a-z0-9]",
+                            "",
+                            str(item.get("field", "")).strip().casefold(),
+                        )
+                        in q_compact
+                    )
+                ]
+                if matched_fields:
+                    score += 3 * min(len(matched_fields), 3)
+                    reasons.append(
+                        "question names fields "
+                        + ",".join(matched_fields[:3])
+                    )
             if "failed" in q and ("audit" in st_l or "auth" in st_l):
                 score += 2
             if any(tok in q for tok in ("apache", "http", "web", "404")) and ("access" in st_l or "apache" in st_l):
@@ -2108,32 +2300,38 @@ def infer_index_aliases_from_profile(profile: dict[str, Any] | None) -> dict[str
     }
     if not known:
         return aliases
+    known_lower = {name.casefold() for name in known}
+
+    def set_inferred_alias(alias: str, canonical: str) -> None:
+        """Never shadow a concrete index with an inferred compatibility alias."""
+        if alias.casefold() not in known_lower or alias.casefold() == canonical.casefold():
+            aliases.setdefault(alias, canonical)
 
     windows_idx = _pick_canonical_index(known, ("soc_windows", "windows", "wineventlog", "win"))
     if windows_idx:
         for legacy in ("windows", "windows_sysmon", "soc_windows", "wineventlog"):
-            aliases.setdefault(legacy, windows_idx)
+            set_inferred_alias(legacy, windows_idx)
 
     linux_idx = _pick_canonical_index(known, ("soc_linux", "linux"))
     if linux_idx:
-        aliases.setdefault("soc_linux", linux_idx)
+        set_inferred_alias("soc_linux", linux_idx)
 
     aws_idx = _pick_canonical_index(known, ("aws_cloudtrail", "aws_prod", "cloudtrail", "aws"))
     if aws_idx:
         for legacy in ("aws", "main", "cloudtrail"):
-            aliases.setdefault(legacy, aws_idx)
+            set_inferred_alias(legacy, aws_idx)
 
     if len(known) == 1:
         only_index = next(iter(known))
         for legacy in ("windows", "windows_sysmon", "soc_windows", "main", "aws", "linux", "soc_linux"):
-            aliases.setdefault(legacy, only_index)
+            set_inferred_alias(legacy, only_index)
     else:
         botsv3_idx = _pick_canonical_index(known, ("botsv3",))
         if botsv3_idx and not windows_idx:
             for legacy in ("windows", "windows_sysmon", "soc_windows", "main", "aws"):
-                aliases.setdefault(legacy, botsv3_idx)
+                set_inferred_alias(legacy, botsv3_idx)
         if linux_idx and _pick_canonical_index(known, ("linux",)) and linux_idx.lower() != "linux":
-            aliases.setdefault("linux", _pick_canonical_index(known, ("linux",)) or linux_idx)
+            set_inferred_alias("linux", _pick_canonical_index(known, ("linux",)) or linux_idx)
 
     return aliases
 

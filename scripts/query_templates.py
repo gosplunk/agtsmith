@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from apache_intent import build_apache_query
+
 
 @dataclass(frozen=True)
 class QueryTemplate:
@@ -16,10 +18,82 @@ class QueryTemplate:
     keywords: tuple[str, ...]
     query: str
     tags: tuple[str, ...] = ()
-    earliest_time: str = "-24h"
+    earliest_time: str = "-7d"
     latest_time: str = "now"
     row_limit: int = 10
     summary_hint: str = ""
+    raw_parse_required: bool = False
+
+    @property
+    def native_query(self) -> str:
+        """Return the template shape without optional extraction fallbacks."""
+        if self.raw_parse_required:
+            return self.query
+        native, _fallbacks = split_field_extractions(self.query)
+        return native
+
+    @property
+    def fallback_extractions(self) -> tuple[str, ...]:
+        """Return ordered ``rex``/``spath`` stages available as fallbacks."""
+        _native, fallbacks = split_field_extractions(self.query)
+        return fallbacks
+
+
+def _split_pipeline(query: str) -> list[str]:
+    """Split top-level SPL pipes without splitting quoted expressions."""
+    parts: list[str] = []
+    current: list[str] = []
+    quote = ""
+    escaped = False
+    bracket_depth = 0
+    for char in str(query or ""):
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            current.append(char)
+            continue
+        if char == "[":
+            bracket_depth += 1
+        elif char == "]" and bracket_depth:
+            bracket_depth -= 1
+        if char == "|" and bracket_depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current).strip())
+    return [part for part in parts if part]
+
+
+def split_field_extractions(query: str) -> tuple[str, tuple[str, ...]]:
+    """Separate a template's native shape from optional extraction stages."""
+    parts = _split_pipeline(query)
+    if not parts:
+        return "", ()
+    fallbacks = tuple(
+        part for part in parts[1:] if re.match(r"^(?:rex|spath)\b", part, flags=re.IGNORECASE)
+    )
+    native_parts = [
+        parts[0],
+        *(
+            part
+            for part in parts[1:]
+            if not re.match(r"^(?:rex|spath)\b", part, flags=re.IGNORECASE)
+        ),
+    ]
+    return " | ".join(native_parts), fallbacks
 
 
 TEMPLATES: tuple[QueryTemplate, ...] = (
@@ -40,7 +114,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "| append [ search (index=windows OR index=windows_sysmon) sourcetype=XmlWinEventLog "
             "(EventCode=4625 OR EventID=4625 OR \"An account failed to log on\") "
             "| eval platform=\"windows\" "
-            "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
+            "| eval src_ip=coalesce(IpAddress,Source_Network_Address,src,src_ip,clientip,ip) "
             "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,Caller_User_Name,user,username,account) "
             "| eval auth_port=coalesce(DestinationPort,dest_port) ] "
             "| fillnull value=\"unknown\" src_ip user_name auth_port "
@@ -140,7 +214,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
             "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,Caller_User_Name) "
             "| table _time index host Computer EventCode EventID user_name src_ip LogonType FailureReason SubStatus "
-            "TargetUserName SubjectUserName Account_Name Caller_User_Name Source_Network_Address IpAddress"
+            "TargetUserName SubjectUserName Account_Name Caller_User_Name IpAddress IpPort"
         ),
         tags=("windows", "auth_failure", "summary"),
         summary_hint="Focus on Windows failed logon evidence rows, preserving host, user, and source IP context even when some fields are sparse.",
@@ -157,9 +231,9 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         query=(
             "search index=windows sourcetype=XmlWinEventLog "
             "(EventCode=4624 OR EventID=4624 OR \"An account was successfully logged on\") "
-            "| eval src_ip=coalesce(Source_Network_Address,IpAddress,src,src_ip,clientip,ip) "
+            "| eval src_ip=coalesce(IpAddress,Source_Network_Address,src,src_ip,clientip,ip) "
             "| eval user_name=coalesce(TargetUserName,SubjectUserName,Account_Name,user,username,Caller_User_Name) "
-            "| table _time index host Computer EventCode EventID user_name src_ip LogonType WorkstationName AuthenticationPackageName IpAddress Source_Network_Address"
+            "| table _time index host Computer EventCode EventID user_name src_ip LogonType WorkstationName AuthenticationPackageName IpAddress IpPort"
         ),
         tags=("windows", "auth_success", "summary"),
         summary_hint="Focus on Windows successful logon evidence rows with host, user, source IP, and workstation context.",
@@ -178,10 +252,10 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "(\"Microsoft-Windows-Sysmon/Operational\" OR EventCode=1 OR EventID=1 OR \"<EventID>1</EventID>\") "
             "| spath input=_raw "
             "| search Channel=\"Microsoft-Windows-Sysmon/Operational\" (EventCode=1 OR EventID=1) "
-            "| rex field=_raw \"<Data Name='Image'>(?<Image_xml>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Data Name='CommandLine'>(?<CommandLine_xml>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Data Name='User'>(?<User_xml>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Data Name='ParentImage'>(?<ParentImage_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']Image[\\\"']>(?<Image_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']CommandLine[\\\"']>(?<CommandLine_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']User[\\\"']>(?<User_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']ParentImage[\\\"']>(?<ParentImage_xml>[^<]+)</Data>\" "
             "| rex field=_raw \"<Computer>(?<Computer_xml>[^<]+)</Computer>\" "
             "| eval Image=coalesce(Image,Image_xml) "
             "| eval CommandLine=coalesce(CommandLine,CommandLine_xml) "
@@ -207,7 +281,19 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "search (index=windows_sysmon OR index=windows) sourcetype=XmlWinEventLog "
             "(\"Microsoft-Windows-Sysmon/Operational\" OR EventCode=3 OR EventID=3 OR DestinationIp=*) "
             "| spath input=_raw "
-            "| search Channel=\"Microsoft-Windows-Sysmon/Operational\" (EventID=3 OR EventCode=3 OR DestinationIp=*) "
+            "| rex field=_raw \"<EventID[^>]*>(?<EventID_xml>3)</EventID>\" "
+            "| rex field=_raw \"<Channel>(?<Channel_xml>[^<]+)</Channel>\" "
+            "| rex field=_raw \"<Computer>(?<Computer_xml>[^<]+)</Computer>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']Image[\\\"']>(?<Image_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']SourceIp[\\\"']>(?<SourceIp_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']DestinationIp[\\\"']>(?<DestinationIp_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']DestinationPort[\\\"']>(?<DestinationPort_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']Protocol[\\\"']>(?<Protocol_xml>[^<]+)</Data>\" "
+            "| eval EventID=coalesce(EventID,EventID_xml), Channel=coalesce(Channel,Channel_xml), Computer=coalesce(Computer,Computer_xml) "
+            "| eval Image=coalesce(Image,Image_xml), SourceIp=coalesce(SourceIp,SourceIp_xml), DestinationIp=coalesce(DestinationIp,DestinationIp_xml) "
+            "| eval DestinationPort=coalesce(DestinationPort,DestinationPort_xml), Protocol=coalesce(Protocol,Protocol_xml) "
+            "| search Channel=\"Microsoft-Windows-Sysmon/Operational\" EventID=3 "
+            "| search Image=* SourceIp=* DestinationIp=* DestinationPort=* Protocol=* "
             "| table _time Computer Image SourceIp DestinationIp DestinationPort Protocol "
             "| head 20"
         ),
@@ -229,8 +315,17 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "search (index=windows_sysmon OR index=windows) sourcetype=XmlWinEventLog "
             "(\"Microsoft-Windows-Sysmon/Operational\" OR EventCode=22 OR EventID=22 OR QueryName=*) "
             "| spath input=_raw "
-            "| search Channel=\"Microsoft-Windows-Sysmon/Operational\" (EventID=22 OR EventCode=22 OR QueryName=*) "
-            "| table _time Computer Image QueryName QueryResults "
+            "| rex field=_raw \"<EventID[^>]*>(?<EventID_xml>22)</EventID>\" "
+            "| rex field=_raw \"<Channel>(?<Channel_xml>[^<]+)</Channel>\" "
+            "| rex field=_raw \"<Computer>(?<Computer_xml>[^<]+)</Computer>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']Image[\\\"']>(?<Image_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']QueryName[\\\"']>(?<QueryName_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']QueryStatus[\\\"']>(?<QueryStatus_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']QueryResults[\\\"']>(?<QueryResults_xml>[^<]*)</Data>\" "
+            "| eval EventID=coalesce(EventID,EventID_xml), Channel=coalesce(Channel,Channel_xml), Computer=coalesce(Computer,Computer_xml) "
+            "| eval Image=coalesce(Image,Image_xml), QueryName=coalesce(QueryName,QueryName_xml), QueryStatus=coalesce(QueryStatus,QueryStatus_xml), QueryResults=coalesce(QueryResults,QueryResults_xml) "
+            "| search Channel=\"Microsoft-Windows-Sysmon/Operational\" EventID=22 QueryName=* "
+            "| table _time Computer Image QueryName QueryStatus QueryResults "
             "| head 20"
         ),
         tags=("windows", "sysmon", "dns", "investigate"),
@@ -251,11 +346,13 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "(EventID=5379 OR EventCode=5379 OR \"CountOfCredentialsReturned\") "
             "| spath input=_raw "
             "| search (EventID=5379 OR EventCode=5379 OR CountOfCredentialsReturned=*) "
-            "| rex field=_raw \"<Data Name='SubjectUserName'>(?<SubjectUserName>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Data Name='TargetName'>(?<TargetName>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Data Name='CountOfCredentialsReturned'>(?<CountOfCredentialsReturned>[^<]+)</Data>\" "
-            "| rex field=_raw \"<Data Name='ClientProcessId'>(?<ClientProcessId>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']SubjectUserName[\\\"']>(?<SubjectUserName_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']TargetName[\\\"']>(?<TargetName_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']CountOfCredentialsReturned[\\\"']>(?<CountOfCredentialsReturned_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']ClientProcessId[\\\"']>(?<ClientProcessId_xml>[^<]+)</Data>\" "
             "| rex field=_raw \"<Computer>(?<Computer>[^<]+)</Computer>\" "
+            "| eval SubjectUserName=coalesce(SubjectUserName,SubjectUserName_xml), TargetName=coalesce(TargetName,TargetName_xml) "
+            "| eval CountOfCredentialsReturned=coalesce(CountOfCredentialsReturned,CountOfCredentialsReturned_xml), ClientProcessId=coalesce(ClientProcessId,ClientProcessId_xml) "
             "| table _time Computer SubjectUserName TargetName CountOfCredentialsReturned ClientProcessId"
         ),
         tags=("windows", "investigate", "summary"),
@@ -274,10 +371,14 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         query=(
             "search (index=windows OR index=botsv3 OR index=soc_windows) sourcetype=XmlWinEventLog "
             "(EventCode=4688 OR EventID=4688 OR \"A new process has been created\") "
-            "| eval process_name=coalesce(New_Process_Name,Process_Name,Image) "
-            "| eval command_line=coalesce(Process_Command_Line,CommandLine) "
+            "| rex field=_raw \"<Data Name=[\\\"']NewProcessName[\\\"']>(?<NewProcessName_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']CommandLine[\\\"']>(?<CommandLine_xml>[^<]+)</Data>\" "
+            "| rex field=_raw \"<Data Name=[\\\"']ParentProcessName[\\\"']>(?<ParentProcessName_xml>[^<]+)</Data>\" "
+            "| eval process_name=coalesce(NewProcessName,NewProcessName_xml,New_Process_Name,Process_Name,Image) "
+            "| eval command_line=coalesce(CommandLine,CommandLine_xml,Process_Command_Line) "
+            "| eval parent_process_name=coalesce(ParentProcessName,ParentProcessName_xml,Creator_Process_Name) "
             "| eval user_name=coalesce(SubjectUserName,TargetUserName,user,username) "
-            "| table _time Computer EventCode EventID user_name process_name command_line Creator_Process_Name"
+            "| table _time Computer EventCode EventID user_name process_name command_line parent_process_name"
         ),
         tags=("windows", "process", "audit", "summary"),
         summary_hint="Focus on Security-audit process creation (4688) with executable path and command line.",
@@ -358,6 +459,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "| rex field=_raw \"(?i)new user:\\s+name=(?<new_user>[A-Za-z0-9_.-]+)\" "
             "| rex field=_raw \"(?i)delete user\\s+'(?<deleted_user>[A-Za-z0-9_.-]+)'\" "
             "| rex field=_raw \"(?i)COMMAND=(?<command>.+)$\" "
+            "| rex field=_raw \"(?i)pkexec\\[[^\\]]+\\]:\\s+(?<pkexec_actor>[A-Za-z0-9_.-]+):\" "
             "| eval target_user=coalesce(target_user,target_user_cmd,su_target,passwd_target,new_user,deleted_user) "
             "| eval outcome=case(match(_raw, \"(?i)incorrect password|failure|failed|not in sudoers|conversation failed|auth could not identify password\"), \"failure\", "
             "match(_raw, \"(?i)password changed for\"), \"password_changed\", "
@@ -366,9 +468,12 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "match(_raw, \"(?i)session opened\"), \"session_opened\", "
             "match(_raw, \"(?i)session closed\"), \"session_closed\", "
             "match(_raw, \"(?i)COMMAND=\"), \"command\", true(), \"other\") "
-            "| eval actor=coalesce(sudo_actor, su_actor, session_actor, user, account, uid, user_name) "
+            "| eval process_name=case(isnotnull(process_name),process_name,match(_raw,\"(?i)pkexec\"),\"pkexec\",true(),\"unknown\") "
+            "| eval actor=coalesce(sudo_actor, su_actor, session_actor, pkexec_actor, user, account, uid, user_name) "
+            "| eval actor=if(isnull(actor) AND match(_raw,\"(?i)by\\s+\\(uid=0\\)\"),\"root\",actor) "
             "| eval src_ip=coalesce(rhost, src, src_ip, ip) "
             "| eval tty=coalesce(su_tty, tty) "
+            "| fillnull value=\"unknown\" actor target_user command src_ip tty "
             "| table _time host sourcetype process_name outcome actor target_user command src_ip tty _raw"
         ),
         tags=("linux", "privilege_escalation", "investigate"),
@@ -449,26 +554,56 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
     ),
     QueryTemplate(
         intent="apache_access_top_ips",
-        keywords=("apache access top ips", "top client ips", "top web client ips", "top source ips web", "web access logs"),
-        query=(
-            "search index=linux sourcetype=access_combined "
-            "| rex field=_raw \"^(?<clientip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \\\"(?<method>[A-Z]+) (?<uri_path>\\S+) [^\\\"]+\\\" (?<status>\\d{3})\" "
-            "| stats count by clientip status method | sort - count"
+        keywords=(
+            "apache access top ips",
+            "top client ips",
+            "top web client ips",
+            "top source ips web",
+            "web access logs",
+            "traffic summary",
         ),
+        query=build_apache_query("apache_access_top_ips"),
         tags=("web", "web_access", "top_n", "summary"),
-        summary_hint="Focus on top client IPs, status codes, and methods in Apache access logs.",
+        summary_hint="Preserve every requested Apache dimension while summarizing client IP, response status, method, path, and user-agent traffic.",
+    ),
+    QueryTemplate(
+        intent="apache_suspicious_activity",
+        keywords=(
+            "suspicious web activity",
+            "suspicious activity",
+            "malicious web access",
+            "web attack activity",
+            "web reconnaissance",
+        ),
+        query=build_apache_query("apache_suspicious_activity"),
+        tags=("web", "web_access", "investigate", "suspicious"),
+        row_limit=50,
+        summary_hint=(
+            "Focus on Apache requests that satisfy explicit suspicious criteria and preserve all analyst-requested "
+            "dimensions plus the suspicious reason."
+        ),
     ),
     QueryTemplate(
         intent="apache_404_spike",
         keywords=("apache 404", "404 spike", "not found web", "access_combined 404"),
-        query=(
-            "search index=linux sourcetype=access_combined "
-            "| rex field=_raw \"^(?<clientip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \\\"(?<method>[A-Z]+) (?<uri_path>\\S+) [^\\\"]+\\\" (?<status>\\d{3})\" "
-            "| search status=404 "
-            "| timechart span=1h count by host limit=10"
-        ),
+        query=build_apache_query("apache_404_spike"),
         tags=("web", "web_404", "time_series"),
         summary_hint="Focus on 404 error concentration and possible scanning activity by host.",
+    ),
+    QueryTemplate(
+        intent="apache_404_scanning",
+        keywords=(
+            "404 scanning",
+            "404 scanner",
+            "404 scanners",
+            "404 probing",
+            "not found scanning",
+            "top 404 source ips",
+        ),
+        query=build_apache_query("apache_404_scanning"),
+        tags=("web", "web_404", "investigate", "suspicious"),
+        row_limit=50,
+        summary_hint="Focus on clients generating repeated or diverse 404 paths, preserving methods, paths, and user agents.",
     ),
     QueryTemplate(
         intent="apache_suspicious_user_agents",
@@ -485,13 +620,25 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
             "suspicious scanners",
             "web crawler evidence",
         ),
-        query=(
-            "search index=linux sourcetype=access_combined "
-            "| rex field=_raw \"^(?<clientip>\\S+) \\S+ \\S+ \\[[^\\]]+\\] \\\"(?<method>[A-Z]+) (?<uri_path>\\S+) [^\\\"]+\\\" (?<status>\\d{3}) \\S+ \\\"[^\\\"]*\\\" \\\"(?<useragent>[^\\\"]+)\\\"\" "
-            "| stats count by useragent clientip | sort - count | head 20"
+        query=build_apache_query("apache_suspicious_user_agents"),
+        tags=("web", "user_agent", "summary", "suspicious"),
+        summary_hint="Focus only on explicitly suspicious, automated, empty, or scanner-like user agents and correlated source IPs.",
+    ),
+    QueryTemplate(
+        intent="apache_sensitive_path_probing",
+        keywords=(
+            "sensitive path probing",
+            "sensitive paths",
+            "admin path probing",
+            ".env probing",
+            ".git probing",
+            "wp-admin probing",
+            "configuration file probing",
         ),
-        tags=("web", "user_agent", "summary"),
-        summary_hint="Focus on unusual user agents and correlated source IPs in web traffic.",
+        query=build_apache_query("apache_sensitive_path_probing"),
+        tags=("web", "web_access", "investigate", "suspicious"),
+        row_limit=50,
+        summary_hint="Focus on requests for sensitive administrative, configuration, backup, and framework paths.",
     ),
     QueryTemplate(
         intent="aws_cloudtrail_activity",
@@ -560,6 +707,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         ),
         tags=("aws", "network_flow", "summary"),
         summary_hint="Focus on accepted and rejected AWS VPC flows by source, destination, port, and transport.",
+        raw_parse_required=True,
     ),
     QueryTemplate(
         intent="aad_signin_activity",
@@ -581,12 +729,9 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         keywords=("stream:dns", "stream dns", "dns activity", "reply code", "dns query"),
         query=(
             "search index=main sourcetype=stream:dns "
-            "| spath input=_raw path=query{} output=query "
-            "| spath input=_raw path=reply_code output=reply_code "
-            "| spath input=_raw path=src_ip output=src_ip "
-            "| spath input=_raw path=dest_ip output=dest_ip "
-            "| mvexpand query "
-            "| stats count by query reply_code src_ip dest_ip "
+            "| spath input=_raw path=query{} output=query_name "
+            "| mvexpand query_name "
+            "| stats count by query_name reply_code src_ip dest_ip "
             "| sort - count | head 20"
         ),
         tags=("network", "summary"),
@@ -596,7 +741,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         intent="o365_management_activity",
         keywords=("office 365 management", "o365 management", "ms:o365:management", "sharepoint activity", "onedrive activity"),
         query=(
-            "search index=main sourcetype=ms:o365:management "
+            "search index=main (sourcetype=o365:management:activity OR sourcetype=ms:o365:management) "
             "| spath input=_raw path=UserId output=UserId "
             "| spath input=_raw path=Operation output=Operation "
             "| spath input=_raw path=Workload output=Workload "
@@ -606,6 +751,76 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         ),
         tags=("cross_domain", "summary"),
         summary_hint="Focus on Office 365 management activity by user, operation, workload, and client IP.",
+    ),
+    QueryTemplate(
+        intent="metadata_inventory",
+        keywords=("metadata", "list hosts", "list sources", "list sourcetypes", "hosts in index", "sources in index"),
+        query="search index=* | metadata type=hosts | sort + host",
+        tags=("inventory", "metadata"),
+        summary_hint="Focus on metadata inventory for hosts, sources, or sourcetypes in an index.",
+    ),
+    QueryTemplate(
+        intent="index_sourcetype_volume",
+        keywords=("sourcetype volume", "top sourcetypes", "sourcetypes by index", "sourcetype count"),
+        query="search index=* NOT index=_* | stats count by index sourcetype | sort - count",
+        tags=("inventory", "top_n"),
+        summary_hint="Focus on sourcetype volume across indexes.",
+    ),
+    QueryTemplate(
+        intent="host_activity_summary",
+        keywords=("host activity", "active hosts", "hosts with events", "top hosts", "most activity", "busiest hosts"),
+        query="search index=* NOT index=_* | stats count by index host | sort - count",
+        tags=("inventory", "top_n"),
+        summary_hint="Focus on hosts with the most events by index.",
+    ),
+    QueryTemplate(
+        intent="index_staleness",
+        keywords=("stale index", "no recent data", "indexes without data", "quiet indexes"),
+        query="search index=* NOT index=_* | stats latest(_time) as last_seen by index | sort + last_seen",
+        tags=("inventory", "staleness"),
+        summary_hint="Focus on indexes with stale or missing recent event timestamps.",
+    ),
+    QueryTemplate(
+        intent="splunk_internal_health",
+        keywords=("splunk internal health", "scheduler activity", "search telemetry", "splunk platform health"),
+        query="search index=_internal | stats count by sourcetype | sort - count",
+        tags=("splunk_internal", "platform_ops", "top_n"),
+        summary_hint="Focus on Splunk internal sourcetype volume for platform health.",
+    ),
+    QueryTemplate(
+        intent="splunk_license_usage",
+        keywords=("license usage", "license quota", "splunk license"),
+        query="search index=_internal sourcetype=splunkd OR sourcetype=license_usage | stats count by sourcetype host | sort - count",
+        tags=("splunk_internal", "platform_ops"),
+        summary_hint="Focus on Splunk license and splunkd usage signals in internal indexes.",
+    ),
+    QueryTemplate(
+        intent="forwarder_connectivity",
+        keywords=("forwarder connectivity", "deployment client", "forwarder status", "uf status", "forwarder heartbeat", "heartbeat activity"),
+        query="search index=_internal (sourcetype=splunkd OR sourcetype=deploymentclient) | stats count by host sourcetype | sort - count",
+        tags=("splunk_internal", "platform_ops"),
+        summary_hint="Focus on forwarder and deployment client connectivity signals.",
+    ),
+    QueryTemplate(
+        intent="web_traffic_summary",
+        keywords=("web traffic", "top uris", "http traffic summary", "web request volume"),
+        query="search index=* NOT index=_* (sourcetype=access_combined OR sourcetype=apache:access OR sourcetype=nginx:access) | stats count by uri status clientip | sort - count",
+        tags=("web", "operational", "top_n"),
+        summary_hint="Focus on web traffic volume by URI, status, and client IP.",
+    ),
+    QueryTemplate(
+        intent="network_flow_summary",
+        keywords=("network flow", "top connections", "flow summary", "top src dest"),
+        query="search index=* (sourcetype=stream:ip OR sourcetype=aws:cloudwatchlogs:vpcflow OR sourcetype=cisco:asa) | stats count by src dest dest_port action | sort - count",
+        tags=("network", "operational", "top_n"),
+        summary_hint="Focus on network flow volume by source, destination, and port.",
+    ),
+    QueryTemplate(
+        intent="app_error_spike",
+        keywords=("error spike", "application errors", "error log volume", "error count by host"),
+        query="search index=* (error OR ERROR OR severity=error) | stats count by index sourcetype host | sort - count",
+        tags=("operational", "top_n"),
+        summary_hint="Focus on application error volume by index, sourcetype, and host.",
     ),
     QueryTemplate(
         intent="botsv3_named_sourcetype_overview",
@@ -673,11 +888,22 @@ def question_requests_cardinality(question: str) -> bool:
     )
 
 
-def apply_cardinality_transform(query: str) -> str:
-    """Collapse breakdown/table queries to a scalar total count."""
+def apply_cardinality_transform(query: str, *, question: str = "") -> str:
+    """Collapse breakdown queries to a scalar count of the requested entity."""
     rendered = str(query or "").strip()
     if not rendered:
         return rendered
+    q = (question or "").strip().lower()
+
+    entity_specs = (
+        (r"\b(?:how many|number of|count of|total number of)\s+indexes?\b", "index", "index_count", "search index=* NOT index=_* | stats dc(index) as index_count"),
+        (r"\b(?:how many|number of|count of|total number of)\s+sourcetypes?\b", "sourcetype", "sourcetype_count", "search index=* NOT index=_* | stats dc(sourcetype) as sourcetype_count"),
+        (r"\b(?:how many|number of|count of|total number of)\s+hosts?\b", "host", "host_count", "search index=* NOT index=_* | stats dc(host) as host_count"),
+    )
+    for pattern, _field, _alias, replacement in entity_specs:
+        if re.search(pattern, q):
+            return replacement
+
     rendered = re.sub(r"\|\s*stats\s+count\s+by\s+[^|]+", "| stats count", rendered, flags=re.IGNORECASE)
     rendered = re.sub(r"\|\s*timechart\s+[^|]+", "| stats count", rendered, flags=re.IGNORECASE)
     rendered = re.sub(r"\|\s*table\s+[^|]+", "| stats count", rendered, flags=re.IGNORECASE)

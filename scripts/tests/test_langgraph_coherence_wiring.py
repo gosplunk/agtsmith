@@ -45,6 +45,27 @@ class LangGraphCoherenceWiringTests(unittest.TestCase):
         normalized_args = normalized.get("tool_args", {})
         self.assertEqual(str(normalized_args.get("query", "")), query_once)
 
+    def test_missing_writer_query_uses_deterministic_template_fallback(self) -> None:
+        question = "Show failed Splunk logins today."
+        normalized = mm._normalize_candidate(
+            {
+                "selected_tool": "splunk_run_query",
+                "intent": "internal_auth_failures",
+                "tool_args": {
+                    "earliest_time": "@d",
+                    "latest_time": "now",
+                    "row_limit": 10,
+                },
+            },
+            question,
+            fallback_reason="test",
+        )
+        args = normalized.get("tool_args", {})
+        self.assertEqual(normalized.get("intent"), "internal_auth_failures")
+        self.assertEqual(normalized.get("source"), "deterministic_missing_query_fallback")
+        self.assertIn("index=_audit", str(args.get("query", "")))
+        self.assertEqual(args.get("earliest_time"), "@d")
+
 
 if __name__ == "__main__":
     unittest.main()

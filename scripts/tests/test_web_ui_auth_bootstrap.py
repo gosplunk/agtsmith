@@ -163,7 +163,7 @@ class WebUiAuthBootstrapTests(unittest.TestCase):
     def test_first_run_requires_setup_when_uninitialized_placeholder_env_exists(self) -> None:
         os.environ["SOC_UI_AUTH_INITIALIZED"] = "0"
         os.environ["SOC_UI_AUTH_USERNAME"] = "analyst"
-        os.environ["SOC_UI_AUTH_PASSWORD"] = "changeme123!"
+        os.environ["SOC_UI_AUTH_PASSWORD"] = "Replace-With-A-Strong-Password"
         os.environ["SOC_UI_AUTH_ROLE"] = "ops"
         os.environ.pop("SOC_UI_AUTH_USERS_JSON", None)
 

@@ -21,10 +21,22 @@ import time
 from typing import Any
 
 import httpx
+from apache_intent import build_apache_query, classify_apache_intent
 from botsv3_catalog import extract_explicit_botsv3_sourcetype
-from question_intelligence import infer_question_dimensions, infer_time_window, score_template_for_question
+from question_intelligence import (
+    infer_question_dimensions,
+    infer_time_window,
+    question_requests_privilege_first_seen,
+    score_template_for_question,
+)
 from query_templates import DEFAULT_TEMPLATE, TEMPLATES, QueryTemplate, apply_cardinality_transform, question_requests_cardinality
-from runtime_config import get_ollama_host, get_runtime_secret, get_splunk_mcp_url
+from runtime_config import (
+    get_mcp_request_timeout_sec,
+    get_ollama_host,
+    get_ollama_keep_alive,
+    get_runtime_secret,
+    get_splunk_mcp_url,
+)
 
 OLLAMA_HOST = get_ollama_host()
 DEFAULT_OLLAMA_MODEL_PRIMARY = "granite4:3b"
@@ -34,6 +46,28 @@ OLLAMA_REASONING_MODEL = os.getenv("OLLAMA_MODEL_REASONING", DEFAULT_OLLAMA_MODE
 
 # LAB-ONLY / TEMPORARY / NOT PRODUCTION SAFE
 LAB_BEARER_TOKEN_FALLBACK = "REPLACE_WITH_SPLUNK_MCP_BEARER_TOKEN"
+MCP_TIMEOUT_EVENTS: list[dict[str, Any]] = []
+
+
+class MCPRequestTimeout(TimeoutError):
+    """The total MCP request budget expired across initialization/tool retries."""
+
+    def __init__(self, *, tool_name: str, timeout_seconds: float, attempts: int) -> None:
+        self.tool_name = tool_name
+        self.timeout_seconds = timeout_seconds
+        self.attempts = attempts
+        super().__init__(
+            f"MCP request timed out for {tool_name} after "
+            f"{timeout_seconds:.1f}s across {attempts} attempt(s)"
+        )
+
+
+def reset_mcp_timeout_events() -> None:
+    MCP_TIMEOUT_EVENTS.clear()
+
+
+def get_mcp_timeout_events() -> list[dict[str, Any]]:
+    return [dict(item) for item in MCP_TIMEOUT_EVENTS]
 
 
 def map_question_to_template(question: str, *, profile_path: str | Path | None = None) -> QueryTemplate:
@@ -45,22 +79,7 @@ def map_question_to_template(question: str, *, profile_path: str | Path | None =
     dims = infer_question_dimensions(question)
     platforms = set(dims.get("platforms", []))
     activities = set(dims.get("activities", []))
-    first_seen_priv_esc = any(
-        tok in normalized
-        for tok in (
-            "first time privilege escalation",
-            "first privilege escalation",
-            "first seen privilege escalation",
-            "first time sudo",
-            "first seen sudo",
-            "first time su",
-            "first observed sudo",
-            "first observed root session",
-            "newly observed sudo",
-            "new sudo behavior",
-            "show new sudo behavior",
-        )
-    )
+    first_seen_priv_esc = question_requests_privilege_first_seen(question)
     failed_priv_esc = any(
         tok in normalized
         for tok in (
@@ -81,12 +100,23 @@ def map_question_to_template(question: str, *, profile_path: str | Path | None =
             "root session",
             "sudo sessions",
             "preserve context sudo",
+            "privilege escalation activity",
+            "sudo and privilege escalation",
         )
     )
     explicit_botsv3_sourcetype = extract_explicit_botsv3_sourcetype(question)
     explicit_botsv3_overview = explicit_botsv3_sourcetype and (
         "overview of sourcetype" in normalized or "show an overview of sourcetype" in normalized
     )
+    apache_intent = classify_apache_intent(question)
+    if apache_intent:
+        for template in TEMPLATES:
+            if template.intent == apache_intent:
+                return template
+    if any(marker in normalized for marker in ("osquery", "process monitoring", "added processes")):
+        for template in TEMPLATES:
+            if template.intent == "osquery_process_activity":
+                return template
     if first_seen_priv_esc:
         for template in TEMPLATES:
             if template.intent == "linux_privilege_escalation_first_seen":
@@ -170,6 +200,56 @@ def map_question_to_template(question: str, *, profile_path: str | Path | None =
         for template in TEMPLATES:
             if template.intent == "botsv3_named_sourcetype_overview":
                 return template
+    if (
+        ("splunk internal" in normalized or "_internal" in normalized)
+        and any(term in normalized for term in ("sourcetype", "sourcetypes"))
+        and any(term in normalized for term in ("top", "most", "most active"))
+    ):
+        for template in TEMPLATES:
+            if template.intent == "internal_sourcetypes":
+                return template
+    if "splunk internal" in normalized and any(term in normalized for term in ("health", "volume", "platform")):
+        for template in TEMPLATES:
+            if template.intent == "splunk_internal_health":
+                return template
+    if any(term in normalized for term in ("top sourcetype", "sourcetypes by index")) or (
+        "sourcetype volume" in normalized and "splunk internal" not in normalized
+    ):
+        for template in TEMPLATES:
+            if template.intent == "index_sourcetype_volume":
+                return template
+    if any(term in normalized for term in ("web traffic", "top uris", "http traffic summary")):
+        for template in TEMPLATES:
+            if template.intent == "web_traffic_summary":
+                return template
+    if any(term in normalized for term in ("forwarder", "deployment client", "uf status")) and any(
+        term in normalized for term in ("connectivity", "heartbeat", "forwarder", "deployment")
+    ):
+        for template in TEMPLATES:
+            if template.intent == "forwarder_connectivity":
+                return template
+    if any(term in normalized for term in ("host activity", "active hosts", "top hosts", "hosts with events")) or (
+        "hosts" in normalized and "activity" in normalized and "index" not in normalized and "login" not in normalized
+    ):
+        for template in TEMPLATES:
+            if template.intent == "host_activity_summary":
+                return template
+    if any(term in normalized for term in ("stale index", "no recent data", "indexes without data", "quiet indexes")):
+        for template in TEMPLATES:
+            if template.intent == "index_staleness":
+                return template
+    if any(term in normalized for term in ("license usage", "license quota", "splunk license")):
+        for template in TEMPLATES:
+            if template.intent == "splunk_license_usage":
+                return template
+    if any(term in normalized for term in ("network flow", "top connections", "flow summary")):
+        for template in TEMPLATES:
+            if template.intent == "network_flow_summary":
+                return template
+    if any(term in normalized for term in ("error spike", "application errors", "error log volume")):
+        for template in TEMPLATES:
+            if template.intent == "app_error_spike":
+                return template
     best_template: QueryTemplate | None = None
     best_score: tuple[int, int, int] = (-999, 0, 0)
     for template in TEMPLATES:
@@ -215,6 +295,8 @@ def _dynamic_query_for_question(template: QueryTemplate, question: str) -> str:
     q = (question or "").lower()
     explicit_botsv3_sourcetype = extract_explicit_botsv3_sourcetype(question)
 
+    if template.intent.startswith("apache_"):
+        return build_apache_query(template.intent, question)
     if "auth_success" in activities and platforms == {"windows", "linux"}:
         return (
             "search ("
@@ -268,7 +350,36 @@ def _dynamic_query_for_question(template: QueryTemplate, question: str) -> str:
         return query
     if template.intent == "botsv3_named_sourcetype_overview" and explicit_botsv3_sourcetype:
         return template.query.replace("PLACEHOLDER_SOURCETYPE", explicit_botsv3_sourcetype)
+    if template.intent == "top_indexes" and any(
+        term in q
+        for term in (
+            "have data",
+            "has data",
+            "with data",
+            "contain data",
+            "events in",
+            "last hour",
+            "last day",
+            "last week",
+            "last 24",
+            "last 7",
+            "today",
+            "yesterday",
+        )
+    ):
+        return "search index=* NOT index=_* | stats count by index | sort - count"
     return template.query
+
+
+def _ensure_search_prefix(query: str) -> str:
+    cleaned = str(query or "").strip()
+    if not cleaned:
+        return cleaned
+    if cleaned.lower().startswith("search "):
+        return cleaned
+    if cleaned.startswith("|"):
+        return f"search index=* NOT index=_* {cleaned}"
+    return f"search {cleaned}"
 
 
 def _apply_dataset_scope(query: str, question: str) -> str:
@@ -298,17 +409,115 @@ def _extract_explicit_hosts(question: str) -> list[str]:
         r"\brpi\d+\b",
         r"\bsplunk[a-z0-9_-]+\b",
         r"\bip-\d+(?:-\d+){3}\b",
+        r"\bhost(?:name)?\s*(?:=|:)\s*([A-Za-z0-9_.-]+)\b",
+        r"\bon host\s+([A-Za-z0-9_.-]+)\b",
+        r"\bfor host\s+([A-Za-z0-9_.-]+)\b",
+        r'"([A-Za-z0-9_.-]{2,})"',
+        r"'([A-Za-z0-9_.-]{2,})'",
+    )
+    found: list[str] = []
+    seen: set[str] = set()
+    skip = {
+        "a",
+        "all",
+        "an",
+        "any",
+        "being",
+        "day",
+        "days",
+        "for",
+        "had",
+        "has",
+        "have",
+        "host",
+        "hour",
+        "hours",
+        "index",
+        "indexes",
+        "is",
+        "last",
+        "most",
+        "on",
+        "that",
+        "the",
+        "user",
+        "was",
+        "week",
+        "were",
+        "which",
+        "with",
+    }
+    for pattern in patterns:
+        for match in re.findall(pattern, q, flags=re.IGNORECASE):
+            host = match.strip() if isinstance(match, str) else str(match).strip()
+            host_l = host.lower()
+            if not host or host_l in skip:
+                continue
+            if host_l not in seen:
+                seen.add(host_l)
+                found.append(host)
+    return found
+
+
+def _extract_explicit_ips(question: str) -> list[str]:
+    q = (question or "").strip()
+    if not q:
+        return []
+    patterns = (
+        r"\b(?:source|src|client|origin)(?:\s+ip)?[=:\s]+(\d{1,3}(?:\.\d{1,3}){3})\b",
+        r"\b(?:destination|dest|dst)(?:\s+ip)?[=:\s]+(\d{1,3}(?:\.\d{1,3}){3})\b",
+        r"\b(\d{1,3}(?:\.\d{1,3}){3})\b",
     )
     found: list[str] = []
     seen: set[str] = set()
     for pattern in patterns:
         for match in re.findall(pattern, q, flags=re.IGNORECASE):
-            host = match.strip()
-            host_l = host.lower()
-            if host_l not in seen:
-                seen.add(host_l)
-                found.append(host)
+            ip = match.strip()
+            if ip and ip not in seen:
+                seen.add(ip)
+                found.append(ip)
     return found
+
+
+def _extract_event_codes(question: str) -> list[str]:
+    q = (question or "").strip()
+    if not q:
+        return []
+    codes: list[str] = []
+    seen: set[str] = set()
+    for pattern in (
+        r"\bevent(?:\s+)?(?:code|id)[=:\s]+(\d{3,5})\b",
+        r"\b(?:eventcode|event_id)[=:\s]+(\d{3,5})\b",
+    ):
+        for match in re.findall(pattern, q, flags=re.IGNORECASE):
+            code = match.strip()
+            if code and code not in seen:
+                seen.add(code)
+                codes.append(code)
+    return codes
+
+
+def _apply_ip_scope(query: str, question: str) -> str:
+    ips = _extract_explicit_ips(question)
+    if not ips:
+        return query
+    ip_clause = "src_ip IN (" + ",".join(ips) + ") "
+    if "|" in query:
+        head, tail = query.split("|", 1)
+        return head.replace("search ", f"search {ip_clause}", 1).rstrip() + " |" + tail
+    return query.replace("search ", f"search {ip_clause}", 1)
+
+
+def _apply_event_code_scope(query: str, question: str) -> str:
+    codes = _extract_event_codes(question)
+    if not codes:
+        return query
+    code = codes[0]
+    clause = f"(EventCode={code} OR event_id={code}) "
+    if "|" in query:
+        head, tail = query.split("|", 1)
+        return head.replace("search ", f"search {clause}", 1).rstrip() + " |" + tail
+    return query.replace("search ", f"search {clause}", 1)
 
 
 def _apply_host_scope(query: str, question: str) -> str:
@@ -372,9 +581,11 @@ def template_to_query_args(
             query = apply_environment_query_constraints(question, template.intent, query, profile_path=env_path)
         query = _apply_dataset_scope(query, question)
         query = _apply_host_scope(query, question)
+        query = _apply_ip_scope(query, question)
+        query = _apply_event_code_scope(query, question)
         query = _apply_user_scope(query, question)
         if question_requests_cardinality(question):
-            query = apply_cardinality_transform(query)
+            query = apply_cardinality_transform(query, question=question)
         earliest_time, latest_time = infer_time_window(
             question,
             default_earliest=template.earliest_time,
@@ -382,6 +593,7 @@ def template_to_query_args(
         )
     else:
         earliest_time, latest_time = template.earliest_time, template.latest_time
+    query = _ensure_search_prefix(query)
     return {
         "query": query,
         "earliest_time": earliest_time,
@@ -426,6 +638,7 @@ def _run_mcp_tool(
     *,
     max_attempts: int = 3,
     retry_backoff_seconds: float = 1.25,
+    timeout_seconds: float | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     headers = _mcp_headers()
 
@@ -443,11 +656,37 @@ def _run_mcp_tool(
             "arguments": arguments,
         },
     }
+    bounded_timeout = max(
+        0.1,
+        min(
+            300.0,
+            get_mcp_request_timeout_sec()
+            if timeout_seconds is None
+            else float(timeout_seconds),
+        ),
+    )
+    request_deadline = time.monotonic() + bounded_timeout
     last_error = ""
+    timed_out = False
     for attempt in range(1, max_attempts + 1):
         try:
-            with httpx.Client(timeout=90.0, verify=False, follow_redirects=True) as client:
+            attempt_started = time.monotonic()
+            remaining = request_deadline - attempt_started
+            if remaining <= 0:
+                timed_out = True
+                break
+            with httpx.Client(
+                timeout=remaining,
+                verify=False,
+                follow_redirects=True,
+            ) as client:
                 init_status, init_body = mcp_call(client, headers, init_payload)
+                remaining = request_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"MCP request exceeded {bounded_timeout:.1f}s total timeout"
+                    )
+                client.timeout = httpx.Timeout(max(0.1, remaining))
                 tool_status, tool_body = mcp_call(client, headers, tool_payload)
 
             if init_status != 200:
@@ -462,25 +701,41 @@ def _run_mcp_tool(
             result = tool_body.get("result", {}) if isinstance(tool_body, dict) else {}
             structured = result.get("structuredContent", {}) if isinstance(result, dict) else {}
             return result, structured
+        except (httpx.TimeoutException, TimeoutError) as exc:
+            timed_out = True
+            last_error = f"{type(exc).__name__}: MCP request budget expired"
+            remaining = request_deadline - time.monotonic()
+            if attempt >= max_attempts or remaining <= 0:
+                break
+            time.sleep(min(retry_backoff_seconds * attempt, max(0.0, remaining)))
+            continue
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt < max_attempts:
-                time.sleep(retry_backoff_seconds * attempt)
+                remaining = request_deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                time.sleep(min(retry_backoff_seconds * attempt, remaining))
                 continue
             break
 
+    if timed_out:
+        MCP_TIMEOUT_EVENTS.append(
+            {
+                "tool_name": tool_name,
+                "timeout_seconds": round(bounded_timeout, 3),
+                "attempts": max_attempts,
+            }
+        )
+        raise MCPRequestTimeout(
+            tool_name=tool_name,
+            timeout_seconds=bounded_timeout,
+            attempts=max_attempts,
+        )
     raise RuntimeError(
-        f"MCP tool call failed after {max_attempts} attempts for {tool_name}: {last_error or 'unknown_error'}"
-    )
-
-
-def run_splunk_query(question: str) -> dict[str, Any]:
-    template = map_question_to_template(question)
-    query_args = template_to_query_args(template, question)
-    return run_splunk_query_args(
-        query_args,
-        intent=template.intent,
-        summary_hint=template.summary_hint,
+        f"MCP tool call failed after {max_attempts} attempts for {tool_name}: "
+        f"{last_error or 'unknown_error'}"
     )
 
 
@@ -489,8 +744,15 @@ def run_splunk_query_args(
     *,
     intent: str = "custom_query",
     summary_hint: str = "Summarize key findings and suggest a next investigative check.",
+    timeout_seconds: float | None = None,
+    max_attempts: int = 3,
 ) -> dict[str, Any]:
-    result, structured = _run_mcp_tool("splunk_run_query", query_args)
+    result, structured = _run_mcp_tool(
+        "splunk_run_query",
+        query_args,
+        timeout_seconds=timeout_seconds,
+        max_attempts=max(1, min(3, int(max_attempts))),
+    )
     return {
         "intent": intent,
         "summary_hint": summary_hint,
@@ -498,6 +760,53 @@ def run_splunk_query_args(
         "raw_result": result,
         "structured": structured,
     }
+
+
+def try_profile_inventory_answer(
+    question: str,
+    template: QueryTemplate,
+    *,
+    max_age_minutes: int = 60,
+) -> dict[str, Any] | None:
+    if template.intent != "top_indexes":
+        return None
+    from environment_profile import profile_can_answer_inventory, profile_inventory_structured_results
+
+    can_answer, _reason = profile_can_answer_inventory(question, max_age_minutes=max_age_minutes)
+    if not can_answer:
+        return None
+    structured = profile_inventory_structured_results(question)
+    if not structured:
+        return None
+    earliest = str(structured.get("earliest_time", "-7d"))
+    latest = str(structured.get("latest_time", "now"))
+    return {
+        "intent": template.intent,
+        "summary_hint": template.summary_hint,
+        "mapped_query": {
+            "query": "profile:index_activity",
+            "earliest_time": earliest,
+            "latest_time": latest,
+            "row_limit": template.row_limit,
+            "source": "environment_profile_index_activity",
+        },
+        "raw_result": {"source": "environment_profile_index_activity"},
+        "structured": structured,
+    }
+
+
+def run_splunk_query(question: str, *, prefer_profile_inventory: bool = True) -> dict[str, Any]:
+    template = map_question_to_template(question)
+    if prefer_profile_inventory:
+        profile_answer = try_profile_inventory_answer(question, template)
+        if profile_answer is not None:
+            return profile_answer
+    query_args = template_to_query_args(template, question)
+    return run_splunk_query_args(
+        query_args,
+        intent=template.intent,
+        summary_hint=template.summary_hint,
+    )
 
 
 def run_splunk_get_indexes() -> dict[str, Any]:
@@ -555,6 +864,7 @@ def summarize_with_ollama(question: str, splunk_data: dict[str, Any]) -> str:
         "prompt": prompt,
         "stream": False,
         "think": False,
+        "keep_alive": get_ollama_keep_alive(),
     }
 
     with httpx.Client(timeout=120.0) as client:
@@ -601,6 +911,7 @@ def summarize_with_ollama_model(
         "prompt": prompt,
         "stream": False,
         "think": think,
+        "keep_alive": get_ollama_keep_alive(),
     }
     with httpx.Client(timeout=120.0) as client:
         resp = client.post(f"{OLLAMA_HOST}/api/generate", json=payload)

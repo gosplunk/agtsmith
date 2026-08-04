@@ -11,8 +11,8 @@ def main() -> int:
         ("List indexes I can access", "top_indexes", "splunk_get_indexes", {}, ""),
         ("Show indexes available", "top_indexes", "splunk_get_indexes", {}, ""),
         ("Which indexes had the most events in 24h", "top_indexes", "splunk_run_query", {}, ""),
-        ("Show failed login activity", "failed_login_activity", "splunk_run_query", {}, ""),
-        ("List hosts metadata for the last day", "internal_sourcetypes", "splunk_get_metadata", {"type": "hosts"}, ""),
+        ("Which indexes have data in the last hour?", "top_indexes", "splunk_run_query", {}, ""),
+        ("List hosts metadata for index main", "metadata_inventory", "splunk_get_metadata", {"type": "hosts"}, ""),
         ("Show Splunk version details", "internal_sourcetypes", "splunk_get_info", {}, ""),
         (
             "Investigate top index with metadata drilldown",

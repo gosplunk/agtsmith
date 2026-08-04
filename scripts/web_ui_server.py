@@ -30,6 +30,28 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from langgraph_agentic_soc import run_agentic_investigation
 from langgraph_case_state import bootstrap_graph_case_state, snapshot_graph_case_state
+from investigation_progress import (
+    INDETERMINATE_WAITING_PROGRESS,
+    JOURNEY_TIMING_MS_KEYS,
+    JOURNEY_UI_STEPS,
+    METADATA_REVIEW_INTENTS,
+    NODE_ACTIVE_ROLE,
+    PLAYBOOK_ACTIVE_NODE_ALIASES,
+    PLAYBOOK_EDGES,
+    PLAYBOOK_FLOW_NODES,
+    PLAYBOOK_LAYOUT,
+    PLAYBOOK_LAYOUT_PRESETS,
+    PLAYBOOK_NODE_BRANCH,
+    PLAYBOOK_NODE_ICONS,
+    PLAYBOOK_NODE_TIPS,
+    PLAYBOOK_NODE_ORDER,
+    PLAYBOOK_NODES,
+    WORKFLOW_STAGE_TO_JOURNEY_NODE,
+    is_inventory_question,
+    progress_for_multi_model_node,
+    progress_for_stage_log,
+    skipped_stage_event_payload,
+)
 from langgraph_multi_model_soc import describe_multi_model_graph, run_multi_model_soc
 from local_learning import (
     ensure_learning_registry,
@@ -47,6 +69,7 @@ from minimal_question_to_answer import (
     summarize_with_ollama_model,
     template_to_query_args,
 )
+from question_intelligence import DEFAULT_UNBOUNDED_EARLIEST
 from ollama_log_stream import (
     LocalLogSourceRegistry,
     RemoteLogSourceRegistry,
@@ -59,6 +82,7 @@ from ollama_log_stream import (
 )
 from ollama_ops_monitor import (
     build_local_log_command,
+    collect_analyst_ops_summary,
     collect_ops_snapshot,
     ollama_log_config_status,
 )
@@ -96,6 +120,8 @@ from runtime_config import (
     get_edge_llm_model,
     get_edge_llm_role,
     get_edge_llm_timeout_sec,
+    get_soc_ui_session_remember_timeout_min,
+    get_soc_ui_session_timeout_min,
     get_ollama_host,
     get_splunk_base_url,
     get_splunk_mcp_url,
@@ -122,6 +148,11 @@ ENV_PROFILE_REFRESH_LOCK = ARTIFACTS_ROOT / "environment" / ".refresh.lock"
 ENV_PROFILE_REFRESH_LOG = ARTIFACTS_ROOT / "environment" / "env_profile_refresh_web.log"
 ENV_PROFILE_REFRESH_STATE = ARTIFACTS_ROOT / "environment" / "env_profile_refresh_status.json"
 SPL_SKILLPACK_PATH = ARTIFACTS_ROOT / "knowledge" / "spl_skillpack_latest.json"
+SPL_OFFLINE_DOCS_RAG_PATH = ARTIFACTS_ROOT / "knowledge" / "spl_offline_docs_rag_index.json"
+DEFAULT_SPL_OFFLINE_DOCS_SOURCE = Path(
+    "/home/joehaga/ai_projects/Splunk4Offlinedocs/artifacts/staging/"
+    "splunk_offline_docs/appserver/static/docs/manifest/search-index.json"
+)
 PERSONALIZATION_LOCK = ARTIFACTS_ROOT / "knowledge" / ".personalization.lock"
 PERSONALIZATION_LOG = ARTIFACTS_ROOT / "knowledge" / "personalization_web.log"
 PERSONALIZATION_STATE = ARTIFACTS_ROOT / "knowledge" / "personalization_status.json"
@@ -135,7 +166,12 @@ QUERY_AUDIT_LOG = AUDIT_ROOT / "query_runs.jsonl"
 LOG_SOURCE_REGISTRY = RemoteLogSourceRegistry()
 LOCAL_LOG_SOURCE_REGISTRY = LocalLogSourceRegistry()
 SESSION_COOKIE_NAME = "soc_session"
-SESSION_TTL_SECONDS = 8 * 60 * 60
+DEFAULT_SESSION_TIMEOUT_MIN = 60
+DEFAULT_SESSION_REMEMBER_TIMEOUT_MIN = 480
+MIN_SESSION_TIMEOUT_MIN = 5
+MAX_SESSION_TIMEOUT_MIN = 1440
+MIN_REMEMBER_TIMEOUT_MIN = 60
+MAX_REMEMBER_TIMEOUT_MIN = 10080
 SESSIONS: dict[str, dict[str, Any]] = {}
 SESSIONS_LOCK = threading.Lock()
 ALLOWED_APP_ROLES = {"admin", "ops", "analyst"}
@@ -143,6 +179,7 @@ MCP_CHAT_MODE_LIVE = "live"
 MCP_CHAT_MODE_DEMO = "demo"
 MCP_CHAT_PIPELINE_ASSISTED = "assisted"
 MCP_CHAT_PIPELINE_DETERMINISTIC = "deterministic"
+MCP_DEFAULT_QUESTION = "Which indexes have data in the last hour?"
 EXPECTED_MODEL_KEYS = list(MODEL_ASSIGNMENT_KEYS)
 CONFIG_MODEL_EXTRA_KEYS = list(MODEL_PULL_EXTRA_KEYS)
 DEFAULT_MODEL_ASSIGNMENTS = dict(DEFAULT_MODEL_ASSIGNMENTS)
@@ -163,11 +200,12 @@ CONFIG_EDITABLE_KEYS = [
     "SOC_UI_AUTH_USERNAME",
     "SOC_UI_AUTH_PASSWORD",
     "SOC_UI_AUTH_ROLE",
+    "SOC_UI_SESSION_TIMEOUT_MIN",
+    "SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN",
     *EDGE_CONFIG_KEYS,
     *EXPECTED_MODEL_KEYS,
     *CONFIG_MODEL_EXTRA_KEYS,
 ]
-DEFAULT_UI_PASSWORDS = {"changeme123!", "SplunkLab-Only-ChangeMe!"}
 PLACEHOLDER_UI_PASSWORDS = {
     "Replace-With-A-Strong-Password",
     "replace-with-your-splunk-mcp-token",
@@ -404,6 +442,8 @@ def _mitre_attack_validate(result: dict[str, Any], bundle: dict[str, Any]) -> di
 
 def _mitre_attack_bundle(result: dict[str, Any]) -> dict[str, Any]:
     intent = str(result.get("intent", "")).strip().lower()
+    if intent in METADATA_REVIEW_INTENTS or intent == "top_indexes":
+        return {"mappings": [], "next_pivots": [], "progression": [], "frame": ""}
     summary = str(result.get("summary", "")).lower()
     mappings: list[dict[str, str]] = []
     next_pivots: list[str] = []
@@ -810,7 +850,7 @@ def _quote_values(values: list[str]) -> str:
 
 
 def _base_time_range(result_body: dict[str, Any], query_args: dict[str, Any]) -> tuple[str, str]:
-    earliest = str(query_args.get("earliest_time", "")).strip() or "-24h"
+    earliest = str(query_args.get("earliest_time", "")).strip() or DEFAULT_UNBOUNDED_EARLIEST
     latest = str(query_args.get("latest_time", "")).strip() or "now"
     return earliest, latest
 
@@ -1315,7 +1355,7 @@ def _build_structured_pivot_context(
             "base_query_args": base_query_args,
             "base_query": base_query,
             "time_range": {
-                "earliest": str(base_query_args.get("earliest_time", "")).strip() or "-24h",
+                "earliest": str(base_query_args.get("earliest_time", "")).strip() or DEFAULT_UNBOUNDED_EARLIEST,
                 "latest": str(base_query_args.get("latest_time", "")).strip() or "now",
             },
             "entities": entities,
@@ -1440,7 +1480,7 @@ def _build_structured_pivot_context(
         "base_query_args": base_query_args,
         "base_query": base_query,
         "time_range": {
-            "earliest": str(base_query_args.get("earliest_time", "")).strip() or "-24h",
+            "earliest": str(base_query_args.get("earliest_time", "")).strip() or DEFAULT_UNBOUNDED_EARLIEST,
             "latest": str(base_query_args.get("latest_time", "")).strip() or "now",
         },
         "entities": entities,
@@ -1819,6 +1859,45 @@ def _rail_icon_svg(path: str) -> str:
     )
 
 
+def _brand_logo_paths(*, bg: bool = True) -> str:
+    bg_rect = (
+        '<rect x="1" y="1" width="30" height="30" rx="8" fill="#0f172a" '
+        'stroke="rgba(56,189,248,0.28)" stroke-width="1"/>'
+        if bg
+        else ""
+    )
+    return (
+        f"{bg_rect}"
+        '<g stroke="#38bdf8" stroke-linecap="round">'
+        '<line x1="16" y1="7" x2="8" y2="24" stroke-width="0.8" opacity="0.32"/>'
+        '<line x1="16" y1="7" x2="24" y2="24" stroke-width="0.8" opacity="0.32"/>'
+        '<line x1="8" y1="24" x2="24" y2="24" stroke-width="0.8" opacity="0.32"/>'
+        "</g>"
+        '<path d="M16 7 8 24M16 7 24 24M10.5 18.5h11" fill="none" stroke="#38bdf8" '
+        'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>'
+        '<circle cx="16" cy="7" r="2.2" fill="#38bdf8"/>'
+        '<circle cx="8" cy="24" r="1.7" fill="#7dd3fc"/>'
+        '<circle cx="24" cy="24" r="1.7" fill="#7dd3fc"/>'
+        '<circle cx="16" cy="18.5" r="1.35" fill="#0f172a" stroke="#38bdf8" stroke-width="1.1"/>'
+    )
+
+
+def _rail_brand_logo_svg(*, size: int = 36, css_class: str = "", title: str = "") -> str:
+    attrs = [
+        'xmlns="http://www.w3.org/2000/svg"',
+        f'width="{size}"',
+        f'height="{size}"',
+        'viewBox="0 0 32 32"',
+    ]
+    if css_class:
+        attrs.append(f'class="{html.escape(css_class)}"')
+    if title:
+        attrs.append(f'role="img" aria-label="{html.escape(title)}"')
+    else:
+        attrs.append('aria-hidden="true"')
+    return f"<svg {' '.join(attrs)}>{_brand_logo_paths()}</svg>"
+
+
 _RAIL_ICONS: dict[str, str] = {
     "mcp": _rail_icon_svg(
         '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>'
@@ -1891,7 +1970,7 @@ def _global_nav(active: str) -> str:
     )
     return (
         '<nav class="sidebar-rail" aria-label="Main navigation">'
-        '<div class="rail-logo" title="A.G.E.N.T. Smith">A.S.</div>'
+        f'<div class="rail-logo" title="A.G.E.N.T. Smith">{_rail_brand_logo_svg(size=36)}</div>'
         f'<div class="rail-items">{"".join(links)}</div>'
         '<div class="rail-footer">'
         f'<a class="rail-item{" active" if active == "logout" else ""}" href="/logout" aria-label="Logout">'
@@ -2535,6 +2614,11 @@ def _reconcile_stale_env_profile_refresh() -> None:
     )
 
 
+def _data_domains_maintenance_meta() -> dict[str, Any]:
+    """Maintenance flags for Data Domains / offline-docs RAG (used by refresh status API)."""
+    return {"offline_docs_rag_stale": False}
+
+
 def _environment_profile_refresh_status() -> dict[str, Any]:
     _reconcile_stale_env_profile_refresh()
     state = _read_json(ENV_PROFILE_REFRESH_STATE)
@@ -2545,6 +2629,7 @@ def _environment_profile_refresh_status() -> dict[str, Any]:
                 state["output"] = ENV_PROFILE_REFRESH_LOG.read_text(encoding="utf-8")[-12000:]
             except Exception:
                 pass
+        state["maintenance"] = _data_domains_maintenance_meta()
         return state
     if _environment_profile_refresh_in_progress():
         return {
@@ -2553,16 +2638,21 @@ def _environment_profile_refresh_status() -> dict[str, Any]:
             "detail": "Environment profile refresh is running.",
             "output": "",
             "log_path": display_path(ENV_PROFILE_REFRESH_LOG),
+            "maintenance": _data_domains_maintenance_meta(),
         }
     detail = "Ready to refresh Data Domains and rebuild environment-aware SPL artifacts."
     if not _environment_profile_exists():
         detail = "No Data Domains profile exists yet. Run a refresh after Splunk MCP validates."
+    maintenance = _data_domains_maintenance_meta()
+    if maintenance.get("offline_docs_rag_stale"):
+        detail = f"{detail} Offline-docs RAG index is older than the scraped manifest; refresh will rebuild it."
     return {
         "state": "pending",
         "progress_pct": 0,
         "detail": detail,
         "output": "",
         "log_path": display_path(ENV_PROFILE_REFRESH_LOG),
+        "maintenance": maintenance,
     }
 
 
@@ -2939,6 +3029,10 @@ def _config_snapshot() -> dict[str, Any]:
         values["EDGE_LLM_ROLE"] = get_edge_llm_role()
     if not values.get("EDGE_LLM_TIMEOUT_SEC"):
         values["EDGE_LLM_TIMEOUT_SEC"] = get_edge_llm_timeout_sec()
+    if not values.get("SOC_UI_SESSION_TIMEOUT_MIN"):
+        values["SOC_UI_SESSION_TIMEOUT_MIN"] = get_soc_ui_session_timeout_min()
+    if not values.get("SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN"):
+        values["SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN"] = get_soc_ui_session_remember_timeout_min()
     expected_models = _default_expected_models(values)
     models = [values.get(key, "") for key in EXPECTED_MODEL_KEYS if values.get(key, "").strip()]
     unique_models: list[str] = []
@@ -3063,6 +3157,32 @@ def _validate_runtime_config(values: dict[str, str], scope: str = "full") -> dic
         if extra:
             entry.update(extra)
         results.append(entry)
+
+    if scope != "edge":
+        session_timeout = _clamp_session_timeout_minutes(
+            str(values.get("SOC_UI_SESSION_TIMEOUT_MIN", "")).strip() or get_soc_ui_session_timeout_min(),
+            default=DEFAULT_SESSION_TIMEOUT_MIN,
+            min_val=MIN_SESSION_TIMEOUT_MIN,
+            max_val=MAX_SESSION_TIMEOUT_MIN,
+        )
+        remember_timeout = _clamp_session_timeout_minutes(
+            str(values.get("SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN", "")).strip() or get_soc_ui_session_remember_timeout_min(),
+            default=DEFAULT_SESSION_REMEMBER_TIMEOUT_MIN,
+            min_val=MIN_REMEMBER_TIMEOUT_MIN,
+            max_val=MAX_REMEMBER_TIMEOUT_MIN,
+        )
+        if remember_timeout < session_timeout:
+            add_result(
+                "ui_session_timeouts",
+                "warn",
+                "Remain-logged-in timeout is shorter than the default session timeout; remember-me sessions may expire sooner than expected.",
+            )
+        else:
+            add_result(
+                "ui_session_timeouts",
+                "ok",
+                f"Session idle timeout {session_timeout} min; remain-logged-in idle timeout {remember_timeout} min.",
+            )
 
     if scope != "edge":
         ollama_host = str(values.get("OLLAMA_HOST", "")).strip().rstrip("/")
@@ -3314,7 +3434,7 @@ def _first_run_setup_required() -> bool:
 
     if not username or not password:
         return True
-    if password in DEFAULT_UI_PASSWORDS or password in PLACEHOLDER_UI_PASSWORDS:
+    if password in PLACEHOLDER_UI_PASSWORDS:
         return True
     # Fresh installs ship with SOC_UI_AUTH_INITIALIZED=0 and example placeholders.
     return True
@@ -3370,21 +3490,71 @@ def _load_auth_users() -> dict[str, dict[str, str]]:
     return users
 
 
-def _create_session(username: str, role: str) -> str:
+def _clamp_session_timeout_minutes(raw: str, *, default: int, min_val: int, max_val: int) -> int:
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        value = default
+    return max(min_val, min(max_val, value))
+
+
+def _session_timeout_minutes(*, remember: bool = False) -> int:
+    if remember:
+        raw = get_soc_ui_session_remember_timeout_min()
+        return _clamp_session_timeout_minutes(
+            raw,
+            default=DEFAULT_SESSION_REMEMBER_TIMEOUT_MIN,
+            min_val=MIN_REMEMBER_TIMEOUT_MIN,
+            max_val=MAX_REMEMBER_TIMEOUT_MIN,
+        )
+    raw = get_soc_ui_session_timeout_min()
+    return _clamp_session_timeout_minutes(
+        raw,
+        default=DEFAULT_SESSION_TIMEOUT_MIN,
+        min_val=MIN_SESSION_TIMEOUT_MIN,
+        max_val=MAX_SESSION_TIMEOUT_MIN,
+    )
+
+
+def _session_timeout_seconds(*, remember: bool = False) -> int:
+    return _session_timeout_minutes(remember=remember) * 60
+
+
+def _session_status_payload(session: dict[str, Any]) -> dict[str, Any]:
+    now = int(time.time())
+    remember = bool(session.get("remember"))
+    expires = int(session.get("expires", 0))
+    last_activity = int(session.get("last_activity", session.get("created", now)))
+    timeout_minutes = _session_timeout_minutes(remember=remember)
+    return {
+        "username": str(session.get("username", "")),
+        "role": str(session.get("role", "")),
+        "remember": remember,
+        "timeout_minutes": timeout_minutes,
+        "last_activity_at": last_activity,
+        "expires_at": expires,
+        "expires_in_seconds": max(0, expires - now),
+    }
+
+
+def _create_session(username: str, role: str, *, remember: bool = False) -> str:
     token = secrets.token_urlsafe(32)
     now = int(time.time())
+    ttl = _session_timeout_seconds(remember=remember)
     with SESSIONS_LOCK:
         SESSIONS[token] = {
             "username": username,
             "role": role,
             "created": now,
-            "expires": now + SESSION_TTL_SECONDS,
+            "last_activity": now,
+            "expires": now + ttl,
+            "remember": remember,
             "admin_onboarding_skip": False,
         }
     return token
 
 
-def _get_session(token: str) -> dict[str, Any] | None:
+def _get_session(token: str, *, touch: bool = False) -> dict[str, Any] | None:
     if not token:
         return None
     now = int(time.time())
@@ -3396,6 +3566,11 @@ def _get_session(token: str) -> dict[str, Any] | None:
         if expires <= now:
             SESSIONS.pop(token, None)
             return None
+        if touch:
+            remember = bool(session.get("remember"))
+            ttl = _session_timeout_seconds(remember=remember)
+            session["last_activity"] = now
+            session["expires"] = now + ttl
         return dict(session)
 
 
@@ -3417,34 +3592,2016 @@ def _set_session_admin_onboarding_skip(token: str, skip: bool) -> bool:
     return True
 
 
-FAVICON_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>
-<defs>
-  <linearGradient id='bg' x1='0' y1='0' x2='1' y2='1'>
-    <stop offset='0%' stop-color='#ffffff'/>
-    <stop offset='100%' stop-color='#eef2f7'/>
-  </linearGradient>
-  <linearGradient id='lens' x1='0' y1='0' x2='1' y2='1'>
-    <stop offset='0%' stop-color='#020617'/>
-    <stop offset='100%' stop-color='#0f172a'/>
-  </linearGradient>
-  <filter id='glow' x='-20%' y='-20%' width='140%' height='140%'>
-    <feGaussianBlur stdDeviation='1.4' result='b'/>
-    <feMerge>
-      <feMergeNode in='b'/>
-      <feMergeNode in='SourceGraphic'/>
-    </feMerge>
-  </filter>
-</defs>
-<rect x='2' y='2' width='60' height='60' rx='14' fill='url(#bg)' stroke='#334155' stroke-width='2.4'/>
-<path d='M9 24c8-9 38-9 46 0' stroke='#0f172a' stroke-width='3.2' fill='none' stroke-linecap='round'/>
-<rect x='10' y='23' width='19' height='14' rx='4' fill='url(#lens)' stroke='#020617' stroke-width='1.8'/>
-<rect x='35' y='23' width='19' height='14' rx='4' fill='url(#lens)' stroke='#020617' stroke-width='1.8'/>
-<rect x='28' y='28' width='8' height='4' rx='1.5' fill='#111827'/>
-<path d='M13 27h13M38 27h13' stroke='#475569' stroke-width='1.2' opacity='0.5'/>
-<path d='M14 41h36' stroke='#475569' stroke-width='1.8' opacity='0.9' stroke-linecap='round'/>
-<path d='M18 18l6 4M46 18l-6 4' stroke='#1e293b' stroke-width='1.4' opacity='0.9' stroke-linecap='round'/>
-</svg>
+FAVICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='64' height='64'>"
+    f"{_brand_logo_paths()}"
+    "</svg>"
+)
+
+RUNTIME_RAIL_STORAGE_KEY = "agtsmith_runtime_rail_expanded"
+
+
+def _analyst_runtime_models_payload() -> list[dict[str, str]]:
+    values = _config_snapshot().get("values", {})
+    if not isinstance(values, dict):
+        values = {}
+
+    def _model_for(key: str) -> str:
+        configured = str(values.get(key, "")).strip()
+        if configured:
+            return configured
+        return str(DEFAULT_MODEL_ASSIGNMENTS.get(key, "")).strip()
+
+    return [
+        {"role": "planner", "label": "Planner", "model": _model_for("OLLAMA_MODEL_QUERY_PLANNER")},
+        {"role": "writer", "label": "Writer", "model": _model_for("OLLAMA_MODEL_QUERY_WRITER")},
+        {"role": "analyst", "label": "Analyst", "model": _model_for("OLLAMA_MODEL_ANALYST_REVIEWER")},
+        {"role": "security", "label": "Security", "model": _model_for("OLLAMA_MODEL_SECURITY_REVIEWER")},
+        {"role": "peers", "label": "Peers", "model": _model_for("OLLAMA_MODEL_PEER_REVIEWER")},
+    ]
+
+
+def _runtime_playbook_overlay_nodes_html() -> str:
+    return (
+        '<div class="playbook-flowchart" id="playbook-flowchart" data-testid="playbook-flowchart">'
+        '<svg class="playbook-flowchart-svg" id="playbook-flowchart-svg" '
+        'role="img" aria-label="LangGraph playbook flowchart"></svg>'
+        '<div class="playbook-node-tooltip" id="playbook-node-tooltip" role="tooltip" hidden></div>'
+        "</div>"
+    )
+
+
+def _runtime_journey_overlay_styles() -> str:
+    return """
+    .runtime-journey-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+    .runtime-journey-expand { appearance:none; border:1px solid #27415a; margin:0; padding:2px 6px; border-radius:8px; background:#071523; color:#38bdf8; font-size:11px; font-weight:900; cursor:pointer; line-height:1.2; box-shadow:none; }
+    .runtime-journey-expand:hover { background:#0b2034; border-color:#38bdf8; }
+    .runtime-journey-overlay-backdrop { position:fixed; top:0; bottom:0; left:0; right:var(--runtime-rail-width, 312px); background:rgba(2,8,15,.55); backdrop-filter:blur(4px); z-index:340; }
+    .runtime-journey-overlay-backdrop[hidden] { display:none; }
+    .runtime-journey-overlay { position:fixed; top:0; right:calc(var(--runtime-rail-width, 312px) + 16px); width:min(1500px, calc(100vw - 64px - var(--runtime-rail-width, 312px) - 16px)); height:100vh; z-index:350; display:flex; flex-direction:column; background:rgba(15,23,42,.92); backdrop-filter:blur(16px); border-left:1px solid rgba(62,184,255,.25); box-shadow:-24px 0 48px rgba(2,8,15,.55), inset 1px 0 0 rgba(62,184,255,.12), 0 0 40px rgba(62,184,255,.08); box-sizing:border-box; }
+    .runtime-journey-overlay[hidden] { display:none; }
+    .runtime-journey-overlay-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 16px 12px; border-bottom:1px solid rgba(62,184,255,.15); background:linear-gradient(180deg,rgba(15,23,42,.98),rgba(15,23,42,.85)); }
+    .runtime-journey-overlay-head-left { display:flex; align-items:center; gap:10px; min-width:0; }
+    .runtime-journey-overlay-logo { flex:0 0 auto; color:#3EB1FF; filter:drop-shadow(0 0 6px rgba(62,177,255,.45)); }
+    .runtime-journey-overlay-title-row { display:flex; align-items:center; gap:8px; color:#f1f5f9; font-size:15px; font-weight:800; letter-spacing:.01em; }
+    .runtime-journey-overlay-live-dot { width:8px; height:8px; border-radius:999px; background:#22c55e; box-shadow:0 0 0 0 rgba(34,197,94,.55); animation:runtime-journey-overlay-pulse 1.6s ease-out infinite; flex:0 0 auto; }
+    @keyframes runtime-journey-overlay-pulse { 0% { box-shadow:0 0 0 0 rgba(34,197,94,.55); } 70% { box-shadow:0 0 0 8px rgba(34,197,94,0); } 100% { box-shadow:0 0 0 0 rgba(34,197,94,0); } }
+    .runtime-journey-overlay-head-right { display:flex; align-items:center; gap:10px; flex:0 0 auto; }
+    .runtime-journey-overlay-profile-pill { display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; border:1px solid rgba(62,184,255,.45); background:rgba(62,184,255,.12); color:#7dd3fc; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; box-shadow:0 0 12px rgba(62,184,255,.18); }
+    .runtime-journey-overlay-close { appearance:none; border:1px solid rgba(62,184,255,.25); margin:0; padding:4px 10px; border-radius:10px; background:rgba(7,21,35,.85); color:#dbeafe; font-size:16px; font-weight:700; cursor:pointer; line-height:1; box-shadow:none; }
+    .runtime-journey-overlay-close:hover { border-color:#38bdf8; color:#38bdf8; }
+    .runtime-journey-overlay-flow { flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; padding:12px 16px 16px 12px; }
+    .playbook-flowchart { width:100%; max-width:100%; overflow:hidden; border-radius:12px; position:relative; }
+    .playbook-flowchart-svg { display:block; width:100%; height:auto; min-height:520px; max-height:calc(100vh - 120px); overflow:visible;
+      background-color:#070d18;
+      background-image:linear-gradient(rgba(62,177,255,.05) 1px, transparent 1px),linear-gradient(90deg, rgba(62,177,255,.05) 1px, transparent 1px);
+      background-size:28px 28px; border-radius:12px; }
+    .playbook-flow-edge { fill:none; stroke:#334155; stroke-width:2; transition:stroke .25s, stroke-width .25s, stroke-dasharray .25s, opacity .25s, filter .25s; }
+    .playbook-flow-edge.branch-trunk { stroke:#3EB1FF; opacity:.78; }
+    .playbook-flow-edge.branch-operational { stroke:#22d3ee; opacity:.78; }
+    .playbook-flow-edge.branch-metadata { stroke:#a855f7; opacity:.78; }
+    .playbook-flow-edge.branch-security { stroke:#f59e0b; opacity:.78; }
+    .playbook-flow-edge.branch-blocked { stroke:#fb923c; stroke-width:1.75; stroke-dasharray:7 5; opacity:.42; }
+    .playbook-flow-edge.done { stroke:#22c55e; stroke-width:2; filter:url(#greenGlow); }
+    .playbook-flow-edge.active { stroke:#3EB1FF; stroke-width:2.5; filter:url(#glow); }
+    .playbook-flow-edge.branch-trunk.active { stroke:#3EB1FF; opacity:1; }
+    .playbook-flow-edge.branch-operational.active { stroke:#22d3ee; opacity:1; }
+    .playbook-flow-edge.branch-operational.done { stroke:#22c55e; }
+    .playbook-flow-edge.branch-metadata.active { stroke:#c084fc; opacity:1; }
+    .playbook-flow-edge.branch-security.active { stroke:#fbbf24; opacity:1; }
+    .playbook-flow-edge.is-branch-skipped { stroke:#475569; stroke-dasharray:6 5; opacity:.4; }
+    .playbook-flow-edge-label-group.is-branch-skipped { display:none; }
+    .playbook-flow-edge-label-bg { fill:rgba(15,23,42,.97); stroke:rgba(51,65,85,.85); stroke-width:1; rx:6; }
+    .playbook-flow-edge-labels { pointer-events:none; }
+    .playbook-flow-edge-label-bg.done { stroke:rgba(34,197,94,.35); fill:rgba(6,95,70,.35); }
+    .playbook-flow-edge-label-bg.active { stroke:rgba(62,177,255,.45); fill:rgba(12,74,110,.45); }
+    .playbook-flow-edge-label-bg.is-branch-skipped { opacity:.4; }
+    .playbook-flow-edge-label { fill:#94a3b8; font-size:10px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; pointer-events:none; }
+    .playbook-flow-edge-label.done { fill:#86efac; }
+    .playbook-flow-edge-label.active { fill:#7dd3fc; }
+    .playbook-flow-edge-label.is-branch-skipped { opacity:.4; }
+    .playbook-flow-node { transition:opacity .25s; cursor:help; pointer-events:all; }
+    .playbook-flow-node:focus { outline:none; }
+    .playbook-flow-node:focus-visible .playbook-flow-process,
+    .playbook-flow-node:focus-visible .playbook-flow-decision { stroke-width:2.5; }
+    .playbook-node-tooltip { position:fixed; z-index:360; max-width:min(320px, calc(100vw - 48px)); padding:10px 12px; border-radius:10px; border:1px solid rgba(62,177,255,.35); background:rgba(15,23,42,.96); color:#cbd5e1; font-size:12px; line-height:1.45; box-shadow:0 12px 28px rgba(2,8,15,.45), 0 0 0 1px rgba(62,177,255,.08); pointer-events:none; }
+    .playbook-node-tooltip[hidden] { display:none; }
+    .playbook-node-tooltip strong { display:block; color:#f8fafc; font-size:12px; font-weight:800; margin-bottom:4px; }
+    .playbook-node-tooltip span { display:block; color:#94a3b8; font-size:11px; line-height:1.5; }
+    .playbook-flow-node.is-branch-skipped { opacity:.45; }
+    .playbook-flow-node.is-skipped { opacity:.45; }
+    .playbook-flow-node.pending .playbook-flow-process { stroke-width:1.85; transition:stroke .25s, filter .25s, opacity .25s; }
+    .playbook-flow-node.phase-trunk.pending .playbook-flow-process { fill:url(#nodeGradTrunk); stroke:#3EB1FF; filter:url(#trunkGlow); }
+    .playbook-flow-node.phase-operational.pending .playbook-flow-process { fill:url(#nodeGradOperational); stroke:#22d3ee; filter:url(#operationalGlow); }
+    .playbook-flow-node.phase-metadata.pending .playbook-flow-process { fill:url(#nodeGradMetadata); stroke:#a855f7; filter:url(#metadataGlow); }
+    .playbook-flow-node.phase-security.pending .playbook-flow-process { fill:url(#nodeGradSecurity); stroke:#f59e0b; filter:url(#securityGlow); }
+    .playbook-flow-node.done .playbook-flow-process { fill:url(#nodeGradDone); stroke:#22c55e; filter:url(#greenGlow); }
+    .playbook-flow-node.active .playbook-flow-process { fill:url(#nodeGradActive); stroke:#3EB1FF; stroke-width:2; filter:url(#glow); }
+    .playbook-flow-node.is-skipped .playbook-flow-process, .playbook-flow-node.is-branch-skipped .playbook-flow-process { fill:url(#nodeGradPending); stroke:#475569; stroke-dasharray:5 4; opacity:.55; filter:none; }
+    .playbook-flow-decision { stroke-width:2; transition:stroke .25s, filter .25s, opacity .25s; }
+    .playbook-flow-node.phase-gate.pending .playbook-flow-decision { fill:url(#nodeGradGate); stroke:#f59e0b; filter:url(#amberGlow); }
+    .playbook-flow-node.done .playbook-flow-decision { fill:url(#nodeGradDone); stroke:#22c55e; filter:url(#greenGlow); }
+    .playbook-flow-node.active .playbook-flow-decision { fill:url(#nodeGradActive); stroke:#3EB1FF; filter:url(#glow); }
+    .playbook-flow-node.is-branch-skipped .playbook-flow-decision { fill:url(#nodeGradPending); stroke:#475569; stroke-dasharray:5 4; opacity:.45; filter:none; }
+    .playbook-flow-icon-badge { pointer-events:none; }
+    .playbook-flow-icon-bg { fill:rgba(15,23,42,.92); stroke-width:1.25; }
+    .playbook-flow-node.phase-trunk.pending .playbook-flow-icon-bg { stroke:rgba(62,177,255,.65); }
+    .playbook-flow-node.phase-operational.pending .playbook-flow-icon-bg { stroke:rgba(34,211,238,.65); }
+    .playbook-flow-node.phase-metadata.pending .playbook-flow-icon-bg { stroke:rgba(168,85,247,.65); }
+    .playbook-flow-node.phase-security.pending .playbook-flow-icon-bg { stroke:rgba(245,158,11,.65); }
+    .playbook-flow-node.phase-gate.pending .playbook-flow-icon-bg { stroke:rgba(245,158,11,.65); }
+    .playbook-flow-node.done .playbook-flow-icon-bg { fill:rgba(6,95,70,.85); stroke:rgba(34,197,94,.55); }
+    .playbook-flow-node.active .playbook-flow-icon-bg { fill:rgba(12,74,110,.9); stroke:rgba(62,177,255,.55); }
+    .playbook-flow-node.is-skipped .playbook-flow-icon-bg, .playbook-flow-node.is-branch-skipped .playbook-flow-icon-bg { fill:rgba(15,23,42,.75); stroke:#475569; opacity:.6; }
+    .playbook-flow-icon-path { fill:#94a3b8; }
+    .playbook-flow-node.pending .playbook-flow-icon-path { fill:#e2e8f0; }
+    .playbook-flow-node.done .playbook-flow-icon-path { fill:#ecfdf5; }
+    .playbook-flow-node.active .playbook-flow-icon-path { fill:#dbeafe; }
+    .playbook-flow-node.is-skipped .playbook-flow-icon-path, .playbook-flow-node.is-branch-skipped .playbook-flow-icon-path { fill:#64748b; }
+    .playbook-flow-decision-icon { fill:#fbbf24; opacity:.95; }
+    .playbook-flow-label { fill:#f1f5f9; font-size:11px; font-weight:700; pointer-events:none; }
+    .playbook-flow-label-process { font-size:10.5px; letter-spacing:-.01em; }
+    .playbook-flow-label-decision { font-size:11px; font-weight:800; letter-spacing:-.01em; }
+    .playbook-flow-node.pending .playbook-flow-label { fill:#cbd5e1; }
+    .playbook-flow-node.is-skipped .playbook-flow-label, .playbook-flow-node.is-branch-skipped .playbook-flow-label { fill:#64748b; }
+    .playbook-flow-skip-label { fill:#64748b; font-size:8px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; opacity:0; pointer-events:none; }
+    .playbook-flow-node.is-skipped .playbook-flow-skip-label, .playbook-flow-node.is-branch-skipped .playbook-flow-skip-label { opacity:1; }
+    .playbook-flow-time { fill:#64748b; font-size:9px; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:600; pointer-events:none; }
+    .playbook-flow-node.done .playbook-flow-time { fill:#86efac; }
+    .playbook-flow-node.active .playbook-flow-time { fill:#7dd3fc; }
+    .playbook-flow-done-badge { opacity:0; pointer-events:none; }
+    .playbook-flow-node.done .playbook-flow-done-badge { opacity:1; }
+    .playbook-flow-done-circle { fill:#22c55e; stroke:#ecfdf5; stroke-width:1; }
+    .playbook-flow-done-check { fill:none; stroke:#ecfdf5; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+    .playbook-flow-spinner-track { fill:none; stroke:rgba(100,116,139,.35); stroke-width:2; }
+    .playbook-flow-spinner-arc { fill:none; stroke:#3EB1FF; stroke-width:2; stroke-linecap:round; opacity:0; transform-origin:center; animation:playbook-spinner-spin 1s linear infinite; }
+    .playbook-flow-node.active .playbook-flow-spinner-arc { opacity:1; }
+    @keyframes playbook-spinner-spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+    .playbook-flow-legend { pointer-events:none; }
+    .playbook-flow-legend-box { fill:rgba(15,23,42,.92); stroke:rgba(51,65,85,.85); stroke-width:1; }
+    .playbook-flow-legend-title { fill:#64748b; font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+    .playbook-flow-legend-section { fill:#475569; font-size:8.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+    .playbook-flow-legend-label { fill:#cbd5e1; font-size:10px; font-weight:600; }
+    .playbook-flow-legend-line { stroke-width:2.25; stroke-linecap:round; }
+    .playbook-flow-legend-line.trunk { stroke:#3EB1FF; }
+    .playbook-flow-legend-line.operational { stroke:#22d3ee; }
+    .playbook-flow-legend-line.metadata { stroke:#a855f7; }
+    .playbook-flow-legend-line.security { stroke:#f59e0b; }
+    .playbook-flow-legend-line.blocked { stroke:#fb923c; stroke-dasharray:4 3; }
+    .playbook-flow-legend-decision { fill:rgba(15,23,42,.95); stroke:#f59e0b; stroke-width:1.5; }
+    .playbook-flow-legend-process { fill:rgba(15,23,42,.95); stroke:#3EB1FF; stroke-width:1.5; }
+    .playbook-flow-legend-edge-bg { fill:rgba(30,41,59,.95); stroke:rgba(51,65,85,.8); stroke-width:1; }
+    .playbook-flow-legend-edge-text { fill:#94a3b8; font-size:7px; font-weight:700; letter-spacing:.02em; }
+    @media (max-width: 768px) { .runtime-journey-overlay-backdrop { right:0; } .runtime-journey-overlay { right:0; width:100vw; max-width:100vw; } }
+    """
+
+
+def _runtime_rail_html() -> str:
+    journey_items = "".join(
+        f'<li class="runtime-journey-step" data-node="{html.escape(step["node"])}">'
+        f'<span class="runtime-journey-dot" aria-hidden="true"></span>'
+        f'<span class="runtime-journey-label-wrap">'
+        f'<span class="runtime-journey-label">{html.escape(step["label"])}</span>'
+        f'<span class="runtime-journey-step-time" aria-live="polite"></span>'
+        f"</span>"
+        f"</li>"
+        for step in JOURNEY_UI_STEPS
+    )
+    model_rows = "".join(
+        f'<div class="runtime-model-row" data-role="{html.escape(item["role"])}">'
+        f'<span class="runtime-model-role">{html.escape(item["label"])}</span>'
+        f'<span class="runtime-model-chip"><span class="runtime-model-name"></span>'
+        f'<span class="runtime-model-active">ACTIVE</span></span>'
+        f"</div>"
+        for item in _analyst_runtime_models_payload()
+    )
+    return (
+        '<aside class="runtime-rail" id="runtime-rail" data-expanded="false" aria-label="Runtime operations">'
+        '<button type="button" class="runtime-rail-tab" id="runtime-rail-toggle" '
+        'aria-expanded="false" aria-controls="runtime-rail-panel" title="Expand runtime panel">'
+        '<span class="runtime-rail-tab-chevron" aria-hidden="true">››</span>'
+        '<span class="runtime-rail-tab-icon" aria-hidden="true">'
+        '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4">'
+        '<path d="M2 4h12M2 8h12M2 12h8"/>'
+        "</svg></span>"
+        '<span class="runtime-rail-tab-label">Ops</span>'
+        '<span class="runtime-rail-pulse" id="runtime-rail-pulse" hidden aria-hidden="true"></span>'
+        "</button>"
+        '<div class="runtime-rail-panel" id="runtime-rail-panel">'
+        '<div class="runtime-rail-head">'
+        "<span>Runtime</span>"
+        '<button type="button" class="runtime-rail-collapse" id="runtime-rail-collapse" '
+        'aria-label="Collapse runtime panel" title="Collapse">««</button>'
+        "</div>"
+        '<section class="runtime-rail-section">'
+        '<div class="runtime-rail-kicker runtime-journey-head">'
+        "<span>LangGraph Journey</span>"
+        '<button type="button" class="runtime-journey-expand" id="runtime-journey-expand" '
+        'aria-label="Expand LangGraph playbook overlay" aria-controls="runtime-journey-overlay" '
+        'title="Expand playbook graph">⤢</button>'
+        "</div>"
+        f'<ol class="runtime-journey" id="runtime-journey">{journey_items}</ol>'
+        "</section>"
+        '<section class="runtime-rail-section">'
+        '<div class="runtime-rail-kicker">Active Models</div>'
+        f'<div class="runtime-models" id="runtime-models">{model_rows}</div>'
+        "</section>"
+        '<section class="runtime-rail-section runtime-rail-ops">'
+        '<div class="runtime-rail-kicker">Ollama Ops</div>'
+        '<div class="runtime-ops-body" id="runtime-ops-body">'
+        '<div class="runtime-ops-row"><span>Status</span><strong id="runtime-ops-status">—</strong></div>'
+        '<div class="runtime-ops-row runtime-ops-gpu">'
+        "<span>GPU VRAM</span>"
+        '<div class="runtime-ops-vram">'
+        '<div class="runtime-ops-vram-track"><div class="runtime-ops-vram-bar" id="runtime-ops-vram-bar"></div></div>'
+        '<strong id="runtime-ops-vram-label">n/a</strong>'
+        "</div></div>"
+        '<div class="runtime-ops-row"><span>Loaded Models</span><strong id="runtime-ops-loaded">—</strong></div>'
+        '<div class="runtime-ops-row"><span>Host</span><strong id="runtime-ops-host">—</strong></div>'
+        '<div class="runtime-ops-updated muted" id="runtime-ops-updated">Waiting for snapshot...</div>'
+        "</div>"
+        '<a class="runtime-ops-full-link" id="runtime-ops-full-link" href="/admin/ollama-ops" hidden>'
+        "View full Ollama Ops</a>"
+        "</section>"
+        "</div>"
+        '<div class="runtime-journey-overlay-backdrop" id="runtime-journey-overlay-backdrop" hidden aria-hidden="true"></div>'
+        '<div class="runtime-journey-overlay" id="runtime-journey-overlay" hidden aria-hidden="true" role="dialog" '
+        'aria-modal="true" aria-labelledby="runtime-journey-overlay-title">'
+        '<div class="runtime-journey-overlay-head">'
+        '<div class="runtime-journey-overlay-head-left">'
+        '<svg class="runtime-journey-overlay-logo" viewBox="0 0 24 24" width="22" height="22" fill="none" '
+        'stroke="currentColor" stroke-width="1.6" aria-hidden="true">'
+        '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/>'
+        '<path d="M8 6h8M7 8l4 8M17 8l-4 8"/>'
+        "</svg>"
+        '<div class="runtime-journey-overlay-title-row" id="runtime-journey-overlay-title">'
+        "<span>LangGraph Playbook</span>"
+        '<span class="runtime-journey-overlay-live-dot" aria-hidden="true"></span>'
+        "</div>"
+        "</div>"
+        '<div class="runtime-journey-overlay-head-right">'
+        '<span class="runtime-journey-overlay-profile-pill" id="runtime-journey-overlay-profile">OPERATIONAL</span>'
+        '<button type="button" class="runtime-journey-overlay-close" id="runtime-journey-overlay-close" '
+        'aria-label="Close playbook overlay" title="Close">×</button>'
+        "</div>"
+        "</div>"
+        f'<div class="runtime-journey-overlay-flow" id="runtime-journey-overlay-playbook">{_runtime_playbook_overlay_nodes_html()}</div>'
+        "</div>"
+        "</aside>"
+    )
+
+
+def _runtime_rail_script(*, show_ops_link: bool) -> str:
+    models_json = json.dumps(_analyst_runtime_models_payload())
+    journey_json = json.dumps(JOURNEY_UI_STEPS)
+    playbook_json = json.dumps(PLAYBOOK_NODES)
+    playbook_order_json = json.dumps(PLAYBOOK_NODE_ORDER)
+    playbook_flow_json = json.dumps(PLAYBOOK_FLOW_NODES)
+    playbook_edges_json = json.dumps(PLAYBOOK_EDGES)
+    playbook_layout_json = json.dumps(PLAYBOOK_LAYOUT)
+    playbook_presets_json = json.dumps(PLAYBOOK_LAYOUT_PRESETS)
+    playbook_branch_json = json.dumps(PLAYBOOK_NODE_BRANCH)
+    playbook_tips_json = json.dumps(PLAYBOOK_NODE_TIPS)
+    playbook_icons_json = json.dumps(PLAYBOOK_NODE_ICONS)
+    playbook_aliases_json = json.dumps(PLAYBOOK_ACTIVE_NODE_ALIASES)
+    journey_progress_json = json.dumps(
+        [
+            {
+                "node": step["node"],
+                "pct": progress_for_multi_model_node(step["node"]).get("pct"),
+            }
+            for step in JOURNEY_UI_STEPS
+        ]
+    )
+    node_role_json = json.dumps(NODE_ACTIVE_ROLE)
+    journey_timing_keys_json = json.dumps(JOURNEY_TIMING_MS_KEYS)
+    stage_log_journey_json = json.dumps(WORKFLOW_STAGE_TO_JOURNEY_NODE)
+    storage_key = RUNTIME_RAIL_STORAGE_KEY
+    ops_link = "true" if show_ops_link else "false"
+    return f"""
+<script>
+(() => {{
+  const STORAGE_KEY = {json.dumps(storage_key)};
+  const MODELS = {models_json};
+  const JOURNEY = {journey_json};
+  const PLAYBOOK = {playbook_json};
+  const PLAYBOOK_ORDER = {playbook_order_json};
+  const PLAYBOOK_FLOW = {playbook_flow_json};
+  const PLAYBOOK_EDGES = {playbook_edges_json};
+  const PLAYBOOK_LAYOUT = {playbook_layout_json};
+  const PLAYBOOK_LAYOUT_PRESETS = {playbook_presets_json};
+  (function applyPlaybookLayoutPresetFromQuery() {{
+    const presetKey = String(new URLSearchParams(window.location.search).get('playbook_preset') || '').trim();
+    const preset = presetKey ? PLAYBOOK_LAYOUT_PRESETS[presetKey] : null;
+    if (preset && preset.layout && preset.edges) {{
+      Object.assign(PLAYBOOK_LAYOUT, preset.layout);
+      PLAYBOOK_EDGES.length = 0;
+      preset.edges.forEach((edge) => PLAYBOOK_EDGES.push(edge));
+    }}
+  }})();
+  const PLAYBOOK_NODE_BRANCH = {playbook_branch_json};
+  const PLAYBOOK_NODE_TIPS = {playbook_tips_json};
+  const PLAYBOOK_ICONS = {playbook_icons_json};
+  const PLAYBOOK_ALIASES = {playbook_aliases_json};
+  const FLOW_VIEWBOX = {{ x: -78, y: -51, w: 1196, h: 810 }};
+  const PROCESS_W = 172;
+  const PROCESS_H = 50;
+  const DECISION_R = 44;
+  const JOURNEY_PROGRESS = {journey_progress_json};
+  const NODE_ACTIVE_ROLE = {node_role_json};
+  const JOURNEY_TIMING_MS_KEYS = {journey_timing_keys_json};
+  const STAGE_LOG_TO_JOURNEY = {stage_log_journey_json};
+  const STAGE_NODE_ALIASES = {{
+    ingest_question: 'guardrail',
+    query_planner: 'planner',
+    plan: 'planner',
+    field_bind: 'planner',
+    query_writer: 'writer',
+    spl_writer: 'writer',
+    spl_validate: 'writer',
+    reviewer: 'security_review',
+    security_reviewer: 'security_review',
+    peer_review: 'security_review',
+    peer_review_1: 'security_review',
+    peer_review_2: 'security_review',
+    peer_reviewer: 'security_review',
+    peer_reviewer_1: 'security_review',
+    peer_reviewer_2: 'security_review',
+    validation: 'run_tool',
+    validate_final_plan: 'run_tool',
+    execution: 'run_tool',
+    analyst_evidence_review: 'evidence_review',
+    security_evidence_review: 'evidence_review',
+    deterministic_evidence_pack: 'evidence_review',
+    summary: 'summarize',
+    finalize: 'finalize',
+    package_response: 'package_response',
+  }};
+  const SHOW_OPS_LINK = {ops_link};
+  const OPS_POLL_MS = 5000;
+  const RAIL_MIN_WIDTH = 1280;
+  const shell = document.getElementById('app-shell');
+  const rail = document.getElementById('runtime-rail');
+  const toggle = document.getElementById('runtime-rail-toggle');
+  const collapse = document.getElementById('runtime-rail-collapse');
+  const pulse = document.getElementById('runtime-rail-pulse');
+  const journeyExpand = document.getElementById('runtime-journey-expand');
+  const journeyOverlay = document.getElementById('runtime-journey-overlay');
+  const journeyOverlayBackdrop = document.getElementById('runtime-journey-overlay-backdrop');
+  const journeyOverlayClose = document.getElementById('runtime-journey-overlay-close');
+  const opsLink = document.getElementById('runtime-rail-ops-full-link') || document.getElementById('runtime-ops-full-link');
+  let opsTimer = null;
+  let journeyLiveTimer = null;
+  let runActive = false;
+  let playbookDocMode = false;
+  let activeNode = '';
+  let activeRoleNode = '';
+  let completedThrough = -1;
+  let playbookCompletedThrough = -1;
+  let userExpandedPref = null;
+  let journeyOverlayOpen = false;
+  let reviewProfile = 'operational';
+  const skippedNodes = new Set();
+  const skippedPlaybookNodes = new Set();
+  let packagingWallStart = 0;
+  const stageTimingsSec = {{}};
+  const stageStartAt = {{}};
+  const playbookTimingsSec = {{}};
+  const playbookStartAt = {{}};
+
+  function formatStageSeconds(seconds) {{
+    const value = Math.max(0, Number(seconds) || 0);
+    if (value > 0 && value < 10 && Math.abs(value - Math.round(value)) > 0.05) {{
+      return `${{value.toFixed(1)}}s`;
+    }}
+    return `${{Math.round(value)}}s`;
+  }}
+
+  function msToSec(ms) {{
+    return Math.max(0, Number(ms) || 0) / 1000;
+  }}
+
+  function resolvePlaybookNode(rawNode='') {{
+    const key = String(rawNode || '').trim();
+    if (!key) return '';
+    if (PLAYBOOK_ORDER.includes(key)) return key;
+    if (PLAYBOOK_ALIASES[key]) return PLAYBOOK_ALIASES[key];
+    const journeyMapped = STAGE_NODE_ALIASES[key];
+    if (journeyMapped === 'security_review') return 'security_review';
+    if (journeyMapped === 'writer') return 'writer';
+    if (journeyMapped === 'run_tool') return 'run_tool';
+    if (journeyMapped === 'evidence_review') {{
+      if (reviewProfile === 'metadata') return 'deterministic_evidence_pack';
+      if (reviewProfile === 'security') return 'security_evidence_review';
+      return 'analyst_evidence_review';
+    }}
+    if (journeyMapped === 'summarize') return 'summarize';
+    if (journeyMapped === 'finalize') return 'finalize';
+    return '';
+  }}
+
+  function activePlaybookNode() {{
+    const roleNode = resolvePlaybookNode(activeRoleNode);
+    if (roleNode) return roleNode;
+    if (activeNode === 'security_review') return 'security_review';
+    if (activeNode === 'writer') {{
+      if (reviewProfile === 'metadata') return 'writer_direct';
+      if (reviewProfile === 'operational') return 'spl_validate';
+      if (reviewProfile === 'security') return 'security_review';
+    }}
+    if (activeNode === 'evidence_review') {{
+      if (reviewProfile === 'metadata') return 'deterministic_evidence_pack';
+      if (reviewProfile === 'security') return 'security_evidence_review';
+      return 'analyst_evidence_review';
+    }}
+    if (activeNode === 'run_tool') return 'run_tool';
+    if (activeNode === 'summarize') return activeRoleNode === 'finalize' ? 'finalize' : 'summarize';
+    return resolvePlaybookNode(activeNode);
+  }}
+
+  function playbookIndex(node='') {{
+    const key = String(node || '').trim();
+    if (key === 'writer_direct') return PLAYBOOK_ORDER.indexOf('validate_final_plan');
+    return PLAYBOOK_ORDER.indexOf(key);
+  }}
+
+  function finalizeActivePlaybookTiming(node='') {{
+    const key = String(node || '').trim();
+    if (!key || !playbookStartAt[key]) return;
+    const elapsed = (Date.now() - playbookStartAt[key]) / 1000;
+    playbookTimingsSec[key] = Math.max(playbookTimingsSec[key] || 0, elapsed);
+    delete playbookStartAt[key];
+  }}
+
+  function notePlaybookTransition(nextNode='') {{
+    const current = activePlaybookNode();
+    if (current && current !== nextNode) finalizeActivePlaybookTiming(current);
+    const target = String(nextNode || '').trim();
+    if (target && target !== 'writer_direct' && playbookTimingsSec[target] == null && !playbookStartAt[target]) {{
+      playbookStartAt[target] = Date.now();
+    }}
+  }}
+
+  function flowNodeMeta(node='') {{
+    return PLAYBOOK_FLOW.find((item) => String(item?.id || '') === String(node || '')) || null;
+  }}
+
+  function playbookNodeTip(nodeId='') {{
+    const key = String(nodeId || '');
+    const tip = String(PLAYBOOK_NODE_TIPS[key] || '').trim();
+    if (tip) return tip;
+    const meta = flowNodeMeta(key);
+    return String(meta?.label || key);
+  }}
+
+  function fillPlaybookTooltip(tipEl, label='', text='') {{
+    if (!tipEl) return;
+    tipEl.replaceChildren();
+    const strong = document.createElement('strong');
+    strong.textContent = String(label || '');
+    const span = document.createElement('span');
+    span.textContent = String(text || '');
+    tipEl.appendChild(strong);
+    tipEl.appendChild(span);
+  }}
+
+  function positionPlaybookTooltip(event, tipEl) {{
+    if (!tipEl || tipEl.hidden) return;
+    const pad = 14;
+    const offset = 16;
+    const rect = tipEl.getBoundingClientRect();
+    let left = (event?.clientX || 0) + offset;
+    let top = (event?.clientY || 0) + offset;
+    if (left + rect.width + pad > window.innerWidth) {{
+      left = Math.max(pad, (event?.clientX || 0) - rect.width - offset);
+    }}
+    if (top + rect.height + pad > window.innerHeight) {{
+      top = Math.max(pad, (event?.clientY || 0) - rect.height - offset);
+    }}
+    tipEl.style.left = `${{left}}px`;
+    tipEl.style.top = `${{top}}px`;
+  }}
+
+  let playbookTooltipsBound = false;
+  function bindPlaybookNodeTooltips() {{
+    if (playbookTooltipsBound) return;
+    const tipEl = document.getElementById('playbook-node-tooltip');
+    if (!tipEl) return;
+    document.querySelectorAll('#playbook-flowchart-svg .playbook-flow-node').forEach((node) => {{
+      const nodeId = node.getAttribute('data-node') || '';
+      const label = String(flowNodeMeta(nodeId)?.label || nodeId);
+      const show = (event) => {{
+        fillPlaybookTooltip(tipEl, label, playbookNodeTip(nodeId));
+        tipEl.hidden = false;
+        positionPlaybookTooltip(event, tipEl);
+      }};
+      const hide = () => {{
+        tipEl.hidden = true;
+      }};
+      node.setAttribute('tabindex', '0');
+      node.setAttribute('role', 'button');
+      node.setAttribute('aria-describedby', 'playbook-node-tooltip');
+      node.addEventListener('mouseenter', show);
+      node.addEventListener('mousemove', (event) => positionPlaybookTooltip(event, tipEl));
+      node.addEventListener('mouseleave', hide);
+      node.addEventListener('focus', show);
+      node.addEventListener('blur', hide);
+    }});
+    playbookTooltipsBound = true;
+  }}
+
+  function branchProfiles(node='') {{
+    const meta = flowNodeMeta(node);
+    if (!meta || !Array.isArray(meta.profiles)) return [];
+    return meta.profiles.map((item) => String(item));
+  }}
+
+  function isBranchSkipped(node='') {{
+    if (playbookDocMode) return false;
+    const profiles = branchProfiles(node);
+    if (!profiles.length) return false;
+    if (profiles.includes(String(reviewProfile || 'operational'))) return false;
+    return true;
+  }}
+
+  function edgeOnProfilePath(edge={{}}) {{
+    if (playbookDocMode) return true;
+    const profiles = Array.isArray(edge.profiles) ? edge.profiles : [];
+    if (profiles.length && !profiles.includes(String(reviewProfile || 'operational'))) return false;
+    if (isBranchSkipped(edge.from) || isBranchSkipped(edge.to)) return false;
+    return true;
+  }}
+
+  function layoutPoint(node='') {{
+    const pos = PLAYBOOK_LAYOUT[String(node || '')] || {{}};
+    return {{ x: Number(pos.x) || 0, y: Number(pos.y) || 0 }};
+  }}
+
+  function nodeAnchor(node='', side='bottom') {{
+    const {{ x, y }} = layoutPoint(node);
+    const meta = flowNodeMeta(node);
+    const kind = String(meta?.kind || 'process');
+    if (kind === 'decision') {{
+      if (side === 'top') return {{ x, y: y - DECISION_R }};
+      if (side === 'bottom') return {{ x, y: y + DECISION_R }};
+      if (side === 'left') return {{ x: x - DECISION_R, y }};
+      if (side === 'right') return {{ x: x + DECISION_R, y }};
+      return {{ x, y }};
+    }}
+    if (side === 'top') return {{ x, y: y - PROCESS_H / 2 }};
+    if (side === 'bottom') return {{ x, y: y + PROCESS_H / 2 }};
+    if (side === 'left') return {{ x: x - PROCESS_W / 2, y }};
+    if (side === 'right') return {{ x: x + PROCESS_W / 2, y }};
+    return {{ x, y }};
+  }}
+
+  function orthPath(points) {{
+    if (!points.length) return '';
+    let d = `M ${{points[0].x}} ${{points[0].y}}`;
+    for (let i = 1; i < points.length; i += 1) {{
+      d += ` L ${{points[i].x}} ${{points[i].y}}`;
+    }}
+    return d;
+  }}
+
+  function inferEdgeSides(from='', to='') {{
+    const fromPos = layoutPoint(from);
+    const toPos = layoutPoint(to);
+    const dx = toPos.x - fromPos.x;
+    const dy = toPos.y - fromPos.y;
+    if (Math.abs(dy) > Math.abs(dx) * 0.55) {{
+      return {{
+        startSide: dy > 0 ? 'bottom' : 'top',
+        endSide: dy > 0 ? 'top' : 'bottom',
+        vertical: true,
+        dx,
+        dy,
+      }};
+    }}
+    return {{
+      startSide: dx > 0 ? 'right' : 'left',
+      endSide: dx > 0 ? 'left' : 'right',
+      vertical: false,
+      dx,
+      dy,
+    }};
+  }}
+
+  function edgePath(from='', to='', edge={{}}) {{
+    const anchorFrom = String(edge?.anchor_from || '').trim();
+    const anchorTo = String(edge?.anchor_to || '').trim();
+    const waypoints = Array.isArray(edge?.waypoints) ? edge.waypoints : [];
+    if (anchorFrom || anchorTo || waypoints.length) {{
+      const sides = inferEdgeSides(from, to);
+      const startSide = anchorFrom || sides.startSide;
+      const endSide = anchorTo || sides.endSide;
+      const start = nodeAnchor(from, startSide);
+      const end = nodeAnchor(to, endSide);
+      const points = [start];
+      waypoints.forEach((wp) => {{
+        const x = Number(wp?.x);
+        const y = Number(wp?.y);
+        if (Number.isFinite(x) && Number.isFinite(y)) points.push({{ x, y }});
+      }});
+      points.push(end);
+      return orthPath(points);
+    }}
+    const fromPos = layoutPoint(from);
+    const toPos = layoutPoint(to);
+    const dx = toPos.x - fromPos.x;
+    const dy = toPos.y - fromPos.y;
+    let startSide = 'bottom';
+    let endSide = 'top';
+    if (Math.abs(dy) > Math.abs(dx) * 0.55) {{
+      startSide = dy > 0 ? 'bottom' : 'top';
+      endSide = dy > 0 ? 'top' : 'bottom';
+    }} else {{
+      startSide = dx > 0 ? 'right' : 'left';
+      endSide = dx > 0 ? 'left' : 'right';
+    }}
+    const start = nodeAnchor(from, startSide);
+    const end = nodeAnchor(to, endSide);
+    if (Math.abs(start.x - end.x) < 8 && Math.abs(start.y - end.y) < 8) {{
+      return `M ${{start.x}} ${{start.y}} L ${{end.x}} ${{end.y}}`;
+    }}
+    if (Math.abs(dy) <= Math.abs(dx) * 0.55) {{
+      const midX = start.x + (end.x - start.x) * 0.5;
+      return `M ${{start.x}} ${{start.y}} L ${{midX}} ${{start.y}} L ${{midX}} ${{end.y}} L ${{end.x}} ${{end.y}}`;
+    }}
+    const midY = start.y + (end.y - start.y) * 0.5;
+    if (Math.abs(start.x - end.x) < 12) {{
+      return `M ${{start.x}} ${{start.y}} L ${{end.x}} ${{end.y}}`;
+    }}
+    const bend = Math.max(18, Math.abs(end.y - start.y) * 0.12);
+    const routeY = start.y < end.y ? midY + bend * 0.15 : midY - bend * 0.15;
+    return `M ${{start.x}} ${{start.y}} L ${{start.x}} ${{routeY}} L ${{end.x}} ${{routeY}} L ${{end.x}} ${{end.y}}`;
+  }}
+
+  function edgeSides(from='', to='') {{
+    return inferEdgeSides(from, to);
+  }}
+
+  function edgeLabelPosition(from='', to='', edge={{}}) {{
+    const anchor = edge?.label_at;
+    if (anchor && Number.isFinite(Number(anchor.x)) && Number.isFinite(Number(anchor.y))) {{
+      return {{ x: Number(anchor.x), y: Number(anchor.y) }};
+    }}
+    const {{ startSide, endSide, vertical, dx, dy }} = edgeSides(from, to);
+    const start = nodeAnchor(from, startSide);
+    const end = nodeAnchor(to, endSide);
+    let lx = (start.x + end.x) / 2;
+    let ly = (start.y + end.y) / 2;
+    if (vertical) {{
+      lx += dx >= 0 ? 18 : -18;
+      ly += dy >= 0 ? -18 : 18;
+    }} else {{
+      ly += dy >= 0 ? -20 : 20;
+      lx += dx >= 0 ? 0 : 0;
+    }}
+    return {{ x: lx, y: ly }};
+  }}
+
+  function edgeBranchClass(edge={{}}) {{
+    const branch = String(edge?.branch || '').trim();
+    if (branch) return `branch-${{branch}}`;
+    const label = String(edge?.label || '').trim().toLowerCase();
+    if (label === 'operational') return 'branch-operational';
+    if (label === 'metadata') return 'branch-metadata';
+    if (label === 'security') return 'branch-security';
+    if (label === 'blocked') return 'branch-blocked';
+    return '';
+  }}
+
+  function edgeLabelText(edge={{}}) {{
+    const short = String(edge?.label_short || '').trim();
+    if (short) return short.toUpperCase();
+    const full = String(edge?.label || '').trim();
+    return full ? full.toUpperCase() : '';
+  }}
+
+  function edgeDrawOrder(edge={{}}) {{
+    const branch = String(edge?.branch || '').trim();
+    if (branch === 'blocked') return 0;
+    if (Array.isArray(edge?.profiles) && edge.profiles.length) return 1;
+    return 2;
+  }}
+
+  function playbookNodeDisplayLines(label='') {{
+    const text = String(label || '').trim();
+    if (text.length <= 14) return [text];
+    const words = text.split(/\\s+/);
+    if (words.length >= 2) {{
+      const mid = Math.ceil(words.length / 2);
+      return [words.slice(0, mid).join(' '), words.slice(mid).join(' ')];
+    }}
+    return [text.slice(0, 14) + '…'];
+  }}
+
+  function appendProcessNodeTitle(group, ns, label, pos) {{
+    const lines = playbookNodeDisplayLines(label);
+    const title = document.createElementNS(ns, 'text');
+    title.setAttribute('class', 'playbook-flow-label playbook-flow-label-process');
+    title.setAttribute('text-anchor', 'middle');
+    title.setAttribute('x', String(pos.x + 8));
+    const lineHeight = 12;
+    const startY = lines.length > 1 ? pos.y - 4 : pos.y + 4;
+    title.setAttribute('y', String(startY));
+    lines.forEach((line, index) => {{
+      const span = document.createElementNS(ns, 'tspan');
+      span.setAttribute('x', String(pos.x + 8));
+      span.setAttribute('dy', index === 0 ? '0' : String(lineHeight));
+      span.textContent = line;
+      title.appendChild(span);
+    }});
+    group.appendChild(title);
+  }}
+
+  let playbookFlowchartBuilt = false;
+
+  function playbookIconPath(nodeId='') {{
+    const raw = String(PLAYBOOK_ICONS[nodeId] || '');
+    return raw.startsWith('M') ? raw : '';
+  }}
+
+  function appendPlaybookDefs(svg, ns) {{
+    const defs = document.createElementNS(ns, 'defs');
+    defs.innerHTML = `
+      <linearGradient id="nodeGradPending" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#1e293b"/>
+        <stop offset="100%" stop-color="#0f172a"/>
+      </linearGradient>
+      <linearGradient id="nodeGradTrunk" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#1e3a5f"/>
+        <stop offset="100%" stop-color="#0c1929"/>
+      </linearGradient>
+      <linearGradient id="nodeGradOperational" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#164e63"/>
+        <stop offset="100%" stop-color="#0c1929"/>
+      </linearGradient>
+      <linearGradient id="nodeGradMetadata" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#4c1d95"/>
+        <stop offset="100%" stop-color="#1a1033"/>
+      </linearGradient>
+      <linearGradient id="nodeGradSecurity" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#78350f"/>
+        <stop offset="100%" stop-color="#1c1208"/>
+      </linearGradient>
+      <linearGradient id="nodeGradGate" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#422006"/>
+        <stop offset="100%" stop-color="#140c04"/>
+      </linearGradient>
+      <linearGradient id="nodeGradDone" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#065f46"/>
+        <stop offset="100%" stop-color="#047857"/>
+      </linearGradient>
+      <linearGradient id="nodeGradActive" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#0c4a6e"/>
+        <stop offset="100%" stop-color="#082f49"/>
+      </linearGradient>
+      <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="2" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="trunkGlow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="2.5" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="operationalGlow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="2.5" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="metadataGlow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="2.5" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="securityGlow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="2.5" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="3" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="greenGlow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="2.5" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="amberGlow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="2.5" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <marker id="playbook-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/>
+      </marker>`;
+    svg.appendChild(defs);
+  }}
+
+  function appendProcessIconBadge(group, ns, nodeId, pos) {{
+    const iconD = playbookIconPath(nodeId);
+    if (!iconD) return;
+    const badge = document.createElementNS(ns, 'g');
+    badge.setAttribute('class', 'playbook-flow-icon-badge');
+    const cx = pos.x - PROCESS_W / 2 + 26;
+    const cy = pos.y;
+    const circle = document.createElementNS(ns, 'circle');
+    circle.setAttribute('class', 'playbook-flow-icon-bg');
+    circle.setAttribute('cx', String(cx));
+    circle.setAttribute('cy', String(cy));
+    circle.setAttribute('r', '13');
+    badge.appendChild(circle);
+    const icon = document.createElementNS(ns, 'path');
+    icon.setAttribute('class', 'playbook-flow-icon-path');
+    icon.setAttribute('d', iconD);
+    icon.setAttribute('transform', `translate(${{cx - 9.5}},${{cy - 9.5}}) scale(0.82)`);
+    badge.appendChild(icon);
+    group.appendChild(badge);
+  }}
+
+  function appendDecisionIcon(group, ns, nodeId, pos) {{
+    const iconD = playbookIconPath(nodeId);
+    if (!iconD) return;
+    const icon = document.createElementNS(ns, 'path');
+    icon.setAttribute('class', 'playbook-flow-decision-icon');
+    icon.setAttribute('d', iconD);
+    icon.setAttribute('transform', `translate(${{pos.x - 9}},${{pos.y - 9}}) scale(0.74)`);
+    group.appendChild(icon);
+  }}
+
+  function appendNodeStatusChrome(group, ns, pos) {{
+    const rightX = pos.x + PROCESS_W / 2 - 20;
+    const cy = pos.y;
+    const doneBadge = document.createElementNS(ns, 'g');
+    doneBadge.setAttribute('class', 'playbook-flow-done-badge');
+    const doneCircle = document.createElementNS(ns, 'circle');
+    doneCircle.setAttribute('class', 'playbook-flow-done-circle');
+    doneCircle.setAttribute('cx', String(rightX));
+    doneCircle.setAttribute('cy', String(cy));
+    doneCircle.setAttribute('r', '7');
+    doneBadge.appendChild(doneCircle);
+    const doneCheck = document.createElementNS(ns, 'polyline');
+    doneCheck.setAttribute('class', 'playbook-flow-done-check');
+    doneCheck.setAttribute('points', `${{rightX - 3}},${{cy}} ${{rightX - 1}},${{cy + 2}} ${{rightX + 4}},${{cy - 3}}`);
+    doneBadge.appendChild(doneCheck);
+    group.appendChild(doneBadge);
+    const spinnerTrack = document.createElementNS(ns, 'circle');
+    spinnerTrack.setAttribute('class', 'playbook-flow-spinner-track');
+    spinnerTrack.setAttribute('cx', String(rightX));
+    spinnerTrack.setAttribute('cy', String(cy));
+    spinnerTrack.setAttribute('r', '7');
+    group.appendChild(spinnerTrack);
+    const spinnerArc = document.createElementNS(ns, 'circle');
+    spinnerArc.setAttribute('class', 'playbook-flow-spinner-arc');
+    spinnerArc.setAttribute('cx', String(rightX));
+    spinnerArc.setAttribute('cy', String(cy));
+    spinnerArc.setAttribute('r', '7');
+    spinnerArc.setAttribute('stroke-dasharray', '12 32');
+    group.appendChild(spinnerArc);
+  }}
+
+  function appendPlaybookLegend(svg, ns) {{
+    const legend = document.createElementNS(ns, 'g');
+    legend.setAttribute('class', 'playbook-flow-legend');
+    legend.setAttribute('aria-hidden', 'true');
+    const LEGEND_Y = 618;
+    const LEGEND_H = 108;
+    const LEGEND_W = 248;
+    const box = document.createElementNS(ns, 'rect');
+    box.setAttribute('class', 'playbook-flow-legend-box');
+    box.setAttribute('x', '12');
+    box.setAttribute('y', String(LEGEND_Y));
+    box.setAttribute('width', String(LEGEND_W));
+    box.setAttribute('height', String(LEGEND_H));
+    box.setAttribute('rx', '8');
+    legend.appendChild(box);
+    const title = document.createElementNS(ns, 'text');
+    title.setAttribute('class', 'playbook-flow-legend-title');
+    title.setAttribute('x', '22');
+    title.setAttribute('y', String(LEGEND_Y + 16));
+    title.textContent = 'Legend';
+    legend.appendChild(title);
+    const pathsHeader = document.createElementNS(ns, 'text');
+    pathsHeader.setAttribute('class', 'playbook-flow-legend-section');
+    pathsHeader.setAttribute('x', '22');
+    pathsHeader.setAttribute('y', String(LEGEND_Y + 32));
+    pathsHeader.textContent = 'Paths';
+    legend.appendChild(pathsHeader);
+    const shapesHeader = document.createElementNS(ns, 'text');
+    shapesHeader.setAttribute('class', 'playbook-flow-legend-section');
+    shapesHeader.setAttribute('x', '138');
+    shapesHeader.setAttribute('y', String(LEGEND_Y + 32));
+    shapesHeader.textContent = 'Shapes';
+    legend.appendChild(shapesHeader);
+    const pathRows = [
+      {{ kind: 'line', cls: 'trunk', label: 'Main Trunk' }},
+      {{ kind: 'line', cls: 'operational', label: 'OP path' }},
+      {{ kind: 'line', cls: 'metadata', label: 'META path' }},
+      {{ kind: 'line', cls: 'security', label: 'SEC path' }},
+      {{ kind: 'line', cls: 'blocked', label: 'Blocked' }},
+    ];
+    const shapeRows = [
+      {{ kind: 'process', label: 'Process step' }},
+      {{ kind: 'decision', label: 'Decision' }},
+      {{ kind: 'edge', label: 'Edge label' }},
+    ];
+    const ROW_H = 14;
+    const pathsStartY = LEGEND_Y + 46;
+    pathRows.forEach((row, index) => {{
+      const y = pathsStartY + index * ROW_H;
+      const line = document.createElementNS(ns, 'line');
+      line.setAttribute('class', `playbook-flow-legend-line ${{row.cls}}`);
+      line.setAttribute('x1', '22');
+      line.setAttribute('y1', String(y - 4));
+      line.setAttribute('x2', '44');
+      line.setAttribute('y2', String(y - 4));
+      legend.appendChild(line);
+      const label = document.createElementNS(ns, 'text');
+      label.setAttribute('class', 'playbook-flow-legend-label');
+      label.setAttribute('x', '50');
+      label.setAttribute('y', String(y));
+      label.textContent = row.label;
+      legend.appendChild(label);
+    }});
+    const shapesStartY = LEGEND_Y + 46;
+    shapeRows.forEach((row, index) => {{
+      const y = shapesStartY + index * ROW_H;
+      if (row.kind === 'decision') {{
+        const diamond = document.createElementNS(ns, 'polygon');
+        diamond.setAttribute('class', 'playbook-flow-legend-decision');
+        diamond.setAttribute('points', `149,${{y - 7}} 156,${{y - 3}} 149,${{y + 1}} 142,${{y - 3}}`);
+        legend.appendChild(diamond);
+      }} else if (row.kind === 'edge') {{
+        const edgeBg = document.createElementNS(ns, 'rect');
+        edgeBg.setAttribute('class', 'playbook-flow-legend-edge-bg');
+        edgeBg.setAttribute('x', '138');
+        edgeBg.setAttribute('y', String(y - 8));
+        edgeBg.setAttribute('width', '34');
+        edgeBg.setAttribute('height', '10');
+        edgeBg.setAttribute('rx', '3');
+        legend.appendChild(edgeBg);
+        const edgeText = document.createElementNS(ns, 'text');
+        edgeText.setAttribute('class', 'playbook-flow-legend-edge-text');
+        edgeText.setAttribute('x', '155');
+        edgeText.setAttribute('y', String(y - 1));
+        edgeText.setAttribute('text-anchor', 'middle');
+        edgeText.textContent = 'label';
+        legend.appendChild(edgeText);
+      }} else {{
+        const pill = document.createElementNS(ns, 'rect');
+        pill.setAttribute('class', 'playbook-flow-legend-process');
+        pill.setAttribute('x', '138');
+        pill.setAttribute('y', String(y - 7));
+        pill.setAttribute('width', '22');
+        pill.setAttribute('height', '8');
+        pill.setAttribute('rx', '4');
+        legend.appendChild(pill);
+      }}
+      const label = document.createElementNS(ns, 'text');
+      label.setAttribute('class', 'playbook-flow-legend-label');
+      label.setAttribute('x', '178');
+      label.setAttribute('y', String(y));
+      label.textContent = row.label;
+      legend.appendChild(label);
+    }});
+    svg.appendChild(legend);
+  }}
+
+  function buildPlaybookFlowchart() {{
+    const svg = document.getElementById('playbook-flowchart-svg');
+    if (!svg || playbookFlowchartBuilt) return;
+    svg.setAttribute('viewBox', `${{FLOW_VIEWBOX.x}} ${{FLOW_VIEWBOX.y}} ${{FLOW_VIEWBOX.w}} ${{FLOW_VIEWBOX.h}}`);
+    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    const ns = 'http://www.w3.org/2000/svg';
+    appendPlaybookDefs(svg, ns);
+    const edgesLayer = document.createElementNS(ns, 'g');
+    edgesLayer.setAttribute('class', 'playbook-flow-edges');
+    const labelsLayer = document.createElementNS(ns, 'g');
+    labelsLayer.setAttribute('class', 'playbook-flow-edge-labels');
+    PLAYBOOK_EDGES.slice().sort((a, b) => edgeDrawOrder(a) - edgeDrawOrder(b)).forEach((edge, index) => {{
+      const from = String(edge.from || '');
+      const to = String(edge.to || '');
+      const path = document.createElementNS(ns, 'path');
+      const branchClass = edgeBranchClass(edge);
+      path.setAttribute('class', `playbook-flow-edge pending${{branchClass ? ` ${{branchClass}}` : ''}}`);
+      path.setAttribute('data-from', from);
+      path.setAttribute('data-to', to);
+      path.setAttribute('data-edge-index', String(PLAYBOOK_EDGES.indexOf(edge)));
+      path.setAttribute('d', edgePath(from, to, edge));
+      if (String(edge?.branch || '') !== 'blocked') {{
+        path.setAttribute('marker-end', 'url(#playbook-arrow)');
+      }}
+      edgesLayer.appendChild(path);
+      const labelText = edgeLabelText(edge);
+      if (labelText) {{
+        const {{ x: lx, y: ly }} = edgeLabelPosition(from, to, edge);
+        const labelGroup = document.createElementNS(ns, 'g');
+        labelGroup.setAttribute('class', `playbook-flow-edge-label-group pending${{branchClass ? ` ${{branchClass}}` : ''}}`);
+        labelGroup.setAttribute('data-from', from);
+        labelGroup.setAttribute('data-to', to);
+        const bg = document.createElementNS(ns, 'rect');
+        bg.setAttribute('class', 'playbook-flow-edge-label-bg pending');
+        bg.setAttribute('x', String(lx - labelText.length * 3.6 - 9));
+        bg.setAttribute('y', String(ly - 11));
+        bg.setAttribute('width', String(labelText.length * 7.2 + 18));
+        bg.setAttribute('height', '18');
+        bg.setAttribute('rx', '6');
+        labelGroup.appendChild(bg);
+        const label = document.createElementNS(ns, 'text');
+        label.setAttribute('class', 'playbook-flow-edge-label pending');
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('x', String(lx));
+        label.setAttribute('y', String(ly + 1));
+        if (edge.label) {{
+          label.appendChild(document.createElementNS(ns, 'title')).textContent = String(edge.label);
+        }}
+        label.textContent = labelText;
+        labelGroup.appendChild(label);
+        labelsLayer.appendChild(labelGroup);
+      }}
+    }});
+    svg.appendChild(edgesLayer);
+    const nodesLayer = document.createElementNS(ns, 'g');
+    nodesLayer.setAttribute('class', 'playbook-flow-nodes');
+    PLAYBOOK_FLOW.forEach((entry) => {{
+      const nodeId = String(entry.id || '');
+      const label = String(entry.label || nodeId);
+      const kind = String(entry.kind || 'process');
+      const pos = layoutPoint(nodeId);
+      const phase = String(
+        PLAYBOOK_NODE_BRANCH[nodeId] || (kind === 'decision' ? 'gate' : 'trunk')
+      );
+      const group = document.createElementNS(ns, 'g');
+      group.setAttribute('class', `playbook-flow-node pending phase-${{phase}}`);
+      group.setAttribute('data-node', nodeId);
+      group.setAttribute('aria-label', `${{label}}: ${{playbookNodeTip(nodeId)}}`);
+      if (kind === 'decision') {{
+        const diamond = document.createElementNS(ns, 'polygon');
+        diamond.setAttribute('class', 'playbook-flow-decision');
+        diamond.setAttribute('points', `${{pos.x}},${{pos.y - DECISION_R}} ${{pos.x + DECISION_R}},${{pos.y}} ${{pos.x}},${{pos.y + DECISION_R}} ${{pos.x - DECISION_R}},${{pos.y}}`);
+        group.appendChild(diamond);
+        const title = document.createElementNS(ns, 'text');
+        title.setAttribute('class', 'playbook-flow-label playbook-flow-label-decision');
+        title.setAttribute('text-anchor', 'middle');
+        title.setAttribute('x', String(pos.x));
+        title.setAttribute('y', String(pos.y + 4));
+        title.textContent = label;
+        group.appendChild(title);
+      }} else {{
+        const rect = document.createElementNS(ns, 'rect');
+        rect.setAttribute('class', 'playbook-flow-process');
+        rect.setAttribute('x', String(pos.x - PROCESS_W / 2));
+        rect.setAttribute('y', String(pos.y - PROCESS_H / 2));
+        rect.setAttribute('width', String(PROCESS_W));
+        rect.setAttribute('height', String(PROCESS_H));
+        rect.setAttribute('rx', '16');
+        group.appendChild(rect);
+        appendProcessIconBadge(group, ns, nodeId, pos);
+        appendNodeStatusChrome(group, ns, pos);
+        appendProcessNodeTitle(group, ns, label, pos);
+      }}
+      const skipLabel = document.createElementNS(ns, 'text');
+      skipLabel.setAttribute('class', 'playbook-flow-skip-label');
+      skipLabel.setAttribute('text-anchor', 'middle');
+      skipLabel.setAttribute('x', String(pos.x));
+      skipLabel.setAttribute('y', String(pos.y + (kind === 'decision' ? DECISION_R + 14 : PROCESS_H / 2 + 26)));
+      skipLabel.textContent = 'skipped';
+      group.appendChild(skipLabel);
+      const time = document.createElementNS(ns, 'text');
+      time.setAttribute('class', 'playbook-flow-time');
+      if (kind === 'decision') {{
+        time.setAttribute('text-anchor', 'middle');
+        time.setAttribute('x', String(pos.x));
+        time.setAttribute('y', String(pos.y + DECISION_R + 16));
+      }} else {{
+        time.setAttribute('text-anchor', 'middle');
+        time.setAttribute('x', String(pos.x));
+        time.setAttribute('y', String(pos.y + PROCESS_H / 2 + 15));
+      }}
+      time.setAttribute('aria-live', 'polite');
+      group.appendChild(time);
+      nodesLayer.appendChild(group);
+    }});
+    svg.appendChild(nodesLayer);
+    svg.appendChild(labelsLayer);
+    appendPlaybookLegend(svg, ns);
+    bindPlaybookNodeTooltips();
+    playbookFlowchartBuilt = true;
+  }}
+
+  function decisionNodeState(nodeId='') {{
+    const key = String(nodeId || '');
+    if (key === 'dec_guardrail') {{
+      if (playbookCompletedThrough >= playbookIndex('guardrail')) {{
+        if (activePlaybookNode() === 'planner' || playbookCompletedThrough >= playbookIndex('planner')) return 'done';
+        if (activePlaybookNode() === 'summarize' && playbookCompletedThrough < playbookIndex('planner')) return 'done';
+      }}
+      if (activePlaybookNode() === 'guardrail' && runActive) return 'active';
+      return 'pending';
+    }}
+    if (key === 'dec_writer') {{
+      if (playbookCompletedThrough >= playbookIndex('writer')) {{
+        const current = activePlaybookNode();
+        if (current && current !== 'writer') return 'done';
+      }}
+      if (activePlaybookNode() === 'writer' && runActive) return 'active';
+      return 'pending';
+    }}
+    if (key === 'dec_security') {{
+      if (isBranchSkipped('security_review')) return 'is-branch-skipped';
+      if (playbookCompletedThrough >= playbookIndex('security_review')) return 'done';
+      if (['security_review', 'peer_review', 'peer_review_2'].includes(activePlaybookNode()) && runActive) return 'active';
+      return 'pending';
+    }}
+    if (key === 'dec_validate') {{
+      if (playbookCompletedThrough >= playbookIndex('validate_final_plan')) {{
+        const current = activePlaybookNode();
+        if (current === 'run_tool' || current === 'summarize' || playbookCompletedThrough >= playbookIndex('run_tool')) return 'done';
+      }}
+      if (activePlaybookNode() === 'validate_final_plan' && runActive) return 'active';
+      return 'pending';
+    }}
+    if (key === 'dec_evidence') {{
+      if (playbookCompletedThrough >= playbookIndex('run_tool')) {{
+        const current = activePlaybookNode();
+        if (current && !String(current).startsWith('dec_')) return 'done';
+      }}
+      if (activePlaybookNode() === 'run_tool' && runActive) return 'active';
+      return 'pending';
+    }}
+    return 'pending';
+  }}
+
+  function processNodeState(node='') {{
+    const nodeId = String(node || '');
+    const resolved = nodeId === 'writer_direct' ? 'validate_final_plan' : nodeId;
+    const idx = playbookIndex(resolved);
+    if (skippedPlaybookNodes.has(nodeId) || skippedNodes.has(nodeId)) return 'is-skipped';
+    if (isBranchSkipped(nodeId)) return 'is-branch-skipped';
+    const current = activePlaybookNode();
+    if (runActive && !playbookDocMode && (nodeId === current || resolved === current)) return 'active';
+    if (idx >= 0 && idx <= playbookCompletedThrough) return 'done';
+    return 'pending';
+  }}
+
+  function renderPlaybookTimes() {{
+    buildPlaybookFlowchart();
+    const nodes = document.querySelectorAll('#playbook-flowchart-svg .playbook-flow-node');
+    nodes.forEach((step) => {{
+      const node = step.getAttribute('data-node') || '';
+      const meta = flowNodeMeta(node);
+      if (meta?.kind === 'decision') return;
+      const timeEl = step.querySelector('.playbook-flow-time');
+      if (!timeEl) return;
+      if (skippedPlaybookNodes.has(node) || skippedNodes.has(node) || isBranchSkipped(node)) {{
+        timeEl.textContent = 'skipped';
+        return;
+      }}
+      const resolved = node === 'writer_direct' ? 'validate_final_plan' : node;
+      const isActive = node === activePlaybookNode() && runActive;
+      const isDone = step.classList.contains('done');
+      let seconds = playbookTimingsSec[resolved] ?? playbookTimingsSec[node];
+      if (isActive && (playbookStartAt[node] || playbookStartAt[resolved])) {{
+        const started = playbookStartAt[node] || playbookStartAt[resolved];
+        seconds = (Date.now() - started) / 1000;
+      }}
+      if (seconds != null && seconds >= 0 && (seconds > 0 || isActive || isDone)) {{
+        timeEl.textContent = formatStageSeconds(seconds);
+      }} else {{
+        timeEl.textContent = '';
+      }}
+    }});
+  }}
+
+  function renderPlaybookFlowchart() {{
+    buildPlaybookFlowchart();
+    if (runActive && !playbookDocMode) syncPlaybookCompletedThrough();
+    document.querySelectorAll('#playbook-flowchart-svg .playbook-flow-node').forEach((step) => {{
+      const node = step.getAttribute('data-node') || '';
+      const meta = flowNodeMeta(node);
+      const kind = String(meta?.kind || 'process');
+      let state = kind === 'decision' ? decisionNodeState(node) : processNodeState(node);
+      step.classList.remove('done', 'active', 'pending', 'is-skipped', 'is-branch-skipped');
+      step.classList.add(state);
+    }});
+    PLAYBOOK_EDGES.forEach((edge, index) => {{
+      const path = document.querySelector(`#playbook-flowchart-svg .playbook-flow-edge[data-edge-index="${{index}}"]`);
+      const labelGroup = document.querySelector(`#playbook-flowchart-svg .playbook-flow-edge-label-group[data-from="${{edge.from}}"][data-to="${{edge.to}}"]`);
+      const label = labelGroup ? labelGroup.querySelector('.playbook-flow-edge-label') : null;
+      const labelBg = labelGroup ? labelGroup.querySelector('.playbook-flow-edge-label-bg') : null;
+      if (!path) return;
+      path.classList.remove('done', 'active', 'pending', 'is-branch-skipped');
+      if (label) label.classList.remove('done', 'active', 'pending', 'is-branch-skipped');
+      if (labelGroup) labelGroup.classList.remove('done', 'active', 'pending', 'is-branch-skipped');
+      if (labelBg) labelBg.classList.remove('done', 'active', 'pending', 'is-branch-skipped');
+      if (!edgeOnProfilePath(edge)) {{
+        path.classList.add('is-branch-skipped');
+        if (label) label.classList.add('is-branch-skipped');
+        if (labelGroup) labelGroup.classList.add('is-branch-skipped');
+        if (labelBg) labelBg.classList.add('is-branch-skipped');
+        return;
+      }}
+      const fromState = flowNodeMeta(edge.from)?.kind === 'decision'
+        ? decisionNodeState(edge.from)
+        : processNodeState(edge.from);
+      const toNode = String(edge.to || '');
+      const toState = flowNodeMeta(toNode)?.kind === 'decision'
+        ? decisionNodeState(toNode)
+        : processNodeState(toNode);
+      let edgeState = 'pending';
+      if (fromState === 'done' && toState === 'done') {{
+        edgeState = 'done';
+      }} else if (fromState === 'done' && (toState === 'active' || toState === 'pending')) {{
+        edgeState = 'active';
+      }}
+      path.classList.add(edgeState);
+      if (label) label.classList.add(edgeState);
+      if (labelGroup) labelGroup.classList.add(edgeState);
+      if (labelBg) labelBg.classList.add(edgeState);
+    }});
+    renderPlaybookTimes();
+  }}
+
+  function updateReviewProfilePill() {{
+    const pill = document.getElementById('runtime-journey-overlay-profile');
+    if (!pill) return;
+    if (playbookDocMode) {{
+      pill.textContent = 'ALL PATHS';
+      return;
+    }}
+    pill.textContent = String(reviewProfile || 'operational').toUpperCase();
+  }}
+
+  function renderPlaybookOverlay() {{
+    updateReviewProfilePill();
+    renderPlaybookFlowchart();
+  }}
+
+  function setJourneyOverlayOpen(open) {{
+    journeyOverlayOpen = Boolean(open);
+    if (journeyOverlay) {{
+      journeyOverlay.hidden = !journeyOverlayOpen;
+      journeyOverlay.setAttribute('aria-hidden', journeyOverlayOpen ? 'false' : 'true');
+    }}
+    if (journeyOverlayBackdrop) {{
+      journeyOverlayBackdrop.hidden = !journeyOverlayOpen;
+      journeyOverlayBackdrop.setAttribute('aria-hidden', journeyOverlayOpen ? 'false' : 'true');
+    }}
+    if (journeyExpand) {{
+      journeyExpand.setAttribute('aria-expanded', journeyOverlayOpen ? 'true' : 'false');
+    }}
+    if (journeyOverlayOpen) {{
+      if (rail?.dataset.expanded !== 'true' && canExpand()) setExpanded(true, false);
+      playbookDocMode = !runActive;
+      renderPlaybookOverlay();
+    }} else {{
+      playbookDocMode = false;
+    }}
+  }}
+
+  function openJourneyOverlay() {{
+    setJourneyOverlayOpen(true);
+  }}
+
+  function closeJourneyOverlay() {{
+    setJourneyOverlayOpen(false);
+  }}
+
+  function resetJourneyTimings() {{
+    Object.keys(stageTimingsSec).forEach((key) => {{ delete stageTimingsSec[key]; }});
+    Object.keys(stageStartAt).forEach((key) => {{ delete stageStartAt[key]; }});
+    Object.keys(playbookTimingsSec).forEach((key) => {{ delete playbookTimingsSec[key]; }});
+    Object.keys(playbookStartAt).forEach((key) => {{ delete playbookStartAt[key]; }});
+    stopJourneyLiveTimer();
+    renderJourneyTimes();
+    renderPlaybookTimes();
+  }}
+
+  function finalizeActiveStageTiming() {{
+    if (!activeNode || !stageStartAt[activeNode]) return;
+    const elapsed = (Date.now() - stageStartAt[activeNode]) / 1000;
+    stageTimingsSec[activeNode] = Math.max(stageTimingsSec[activeNode] || 0, elapsed);
+    delete stageStartAt[activeNode];
+  }}
+
+  function noteStageTransition(nextNode) {{
+    const target = String(nextNode || '').trim();
+    if (activeNode && activeNode !== target) finalizeActiveStageTiming();
+    if (target) {{
+      if (activeNode !== target || !stageStartAt[target]) {{
+        stageStartAt[target] = Date.now();
+      }}
+    }}
+    notePlaybookTransition(resolvePlaybookNode(target) || '');
+    ensureJourneyLiveTimer();
+  }}
+
+  function syncPlaybookCompletedThrough() {{
+    const current = activePlaybookNode();
+    if (!current) return;
+    const idx = playbookIndex(current === 'writer_direct' ? 'validate_final_plan' : current);
+    if (idx >= 0) playbookCompletedThrough = idx - 1;
+  }}
+
+  function completeGraphSummarizeStep() {{
+    const sumIdx = playbookIndex('summarize');
+    if (sumIdx >= 0) {{
+      finalizeActivePlaybookTiming('summarize');
+      playbookCompletedThrough = Math.max(playbookCompletedThrough, sumIdx - 1);
+    }}
+    const summarizeIdx = JOURNEY.findIndex((step) => step.node === 'summarize');
+    if (summarizeIdx >= 0) {{
+      if (activeNode === 'summarize') finalizeActiveStageTiming();
+      completedThrough = Math.max(completedThrough, summarizeIdx);
+    }}
+  }}
+
+  function completeGraphFinalizeStep() {{
+    const finIdx = playbookIndex('finalize');
+    if (finIdx >= 0) {{
+      finalizeActivePlaybookTiming('finalize');
+      if (playbookTimingsSec.finalize == null) playbookTimingsSec.finalize = 0;
+      playbookCompletedThrough = Math.max(playbookCompletedThrough, finIdx);
+    }}
+    const journeyFinIdx = JOURNEY.findIndex((step) => step.node === 'finalize');
+    if (journeyFinIdx >= 0) {{
+      if (activeNode === 'finalize') finalizeActiveStageTiming();
+      if (stageTimingsSec.finalize == null) stageTimingsSec.finalize = 0;
+      completedThrough = Math.max(completedThrough, journeyFinIdx);
+      activeNode = '';
+    }}
+    if (activeRoleNode === 'finalize') activeRoleNode = '';
+  }}
+
+  function ensureJourneyLiveTimer() {{
+    if (journeyLiveTimer || !runActive) return;
+    journeyLiveTimer = window.setInterval(() => {{
+      if (!runActive) {{
+        stopJourneyLiveTimer();
+        return;
+      }}
+      renderJourneyTimes();
+      renderPlaybookTimes();
+    }}, 250);
+  }}
+
+  function stopJourneyLiveTimer() {{
+    if (!journeyLiveTimer) return;
+    window.clearInterval(journeyLiveTimer);
+    journeyLiveTimer = null;
+  }}
+
+  function renderJourneyTimes() {{
+    const steps = document.querySelectorAll('#runtime-journey .runtime-journey-step');
+    steps.forEach((step) => {{
+      const node = step.getAttribute('data-node') || '';
+      const timeEl = step.querySelector('.runtime-journey-step-time');
+      if (!timeEl) return;
+      if (skippedNodes.has(node)) {{
+        timeEl.textContent = 'skipped';
+        return;
+      }}
+      const isActive = node === activeNode && runActive;
+      const isDone = step.classList.contains('done');
+      let seconds = stageTimingsSec[node];
+      if (isActive && stageStartAt[node]) {{
+        seconds = (Date.now() - stageStartAt[node]) / 1000;
+      }}
+      if (isActive) {{
+        timeEl.textContent = formatStageSeconds(Math.max(0, Number(seconds) || 0));
+        return;
+      }}
+      if (seconds != null && seconds >= 0 && (seconds > 0 || isDone)) {{
+        timeEl.textContent = formatStageSeconds(seconds);
+      }} else {{
+        timeEl.textContent = '';
+      }}
+    }});
+  }}
+
+  function hydrateJourneyTimingsFromResult(result) {{
+    if (!result || typeof result !== 'object') return false;
+    const nodeTimings = result.node_timings_ms;
+    let hydrated = false;
+    if (nodeTimings && typeof nodeTimings === 'object' && Object.keys(nodeTimings).length) {{
+      JOURNEY.forEach((step) => {{
+        const keys = JOURNEY_TIMING_MS_KEYS[step.node] || [step.node];
+        const totalMs = keys.reduce((sum, key) => sum + (Number(nodeTimings[key]) || 0), 0);
+        if (totalMs > 0) {{
+          stageTimingsSec[step.node] = msToSec(totalMs);
+          hydrated = true;
+        }}
+      }});
+      PLAYBOOK_ORDER.forEach((node) => {{
+        const ms = Number(nodeTimings[node]) || 0;
+        if (ms > 0) {{
+          playbookTimingsSec[node] = msToSec(ms);
+          hydrated = true;
+        }}
+      }});
+    }}
+    if (!hydrated) {{
+      const logs = Array.isArray(result.stage_logs) ? result.stage_logs : [];
+      const totals = {{}};
+      logs.forEach((entry) => {{
+        if (!entry || typeof entry !== 'object') return;
+        const stage = String(entry.stage || '').trim();
+        const journeyNode = STAGE_LOG_TO_JOURNEY[stage];
+        if (!journeyNode) return;
+        totals[journeyNode] = (totals[journeyNode] || 0) + (Number(entry.duration_ms) || 0);
+      }});
+      Object.entries(totals).forEach(([node, ms]) => {{
+        if (ms > 0) {{
+          stageTimingsSec[node] = msToSec(ms);
+          hydrated = true;
+        }}
+      }});
+    }}
+    if (hydrated) {{
+      Object.keys(stageStartAt).forEach((key) => {{ delete stageStartAt[key]; }});
+      Object.keys(playbookStartAt).forEach((key) => {{ delete playbookStartAt[key]; }});
+      renderJourneyTimes();
+      renderPlaybookTimes();
+    }}
+    const packMs = Number(result.packaging_duration_ms || result.meta?.packaging_duration_ms || 0);
+    if (result.packaging_skipped === true) {{
+      delete stageTimingsSec.package_response;
+      renderJourneyTimes();
+      hydrated = true;
+    }} else if (packMs > 0) {{
+      stageTimingsSec.package_response = msToSec(packMs);
+      renderJourneyTimes();
+      hydrated = true;
+    }}
+    return hydrated;
+  }}
+
+  function canExpand() {{
+    return window.innerWidth >= RAIL_MIN_WIDTH;
+  }}
+
+  function setExpanded(expanded, persist=false) {{
+    if (!rail || !shell) return;
+    const next = Boolean(expanded) && canExpand();
+    rail.dataset.expanded = next ? 'true' : 'false';
+    shell.classList.toggle('runtime-rail-expanded', next);
+    if (toggle) toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
+    if (persist) {{
+      userExpandedPref = next;
+      try {{ window.localStorage.setItem(STORAGE_KEY, next ? '1' : '0'); }} catch (_e) {{}}
+    }}
+    if (next) startOpsPoll();
+    else stopOpsPoll();
+  }}
+
+  function readStoredExpanded() {{
+    try {{
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    }} catch (_e) {{}}
+    return false;
+  }}
+
+  function shortModelName(model) {{
+    const text = String(model || '').trim();
+    if (!text) return 'n/a';
+    const leaf = text.split('/').pop() || text;
+    return leaf.length > 28 ? `${{leaf.slice(0, 25)}}...` : leaf;
+  }}
+
+  function activeRoleKey() {{
+    if (activeNode === 'package_response' || activeRoleNode === 'package_response') return '';
+    if (activeNode && skippedNodes.has(activeNode)) return '';
+    if (activeRoleNode && skippedNodes.has(resolveJourneyNode({{ node: activeRoleNode, stage: activeRoleNode }}))) return '';
+    if (activeNode === 'summarize' || activeRoleNode === 'summarize') {{
+      const summaryRole = reviewProfile === 'security' ? 'security' : (reviewProfile === 'operational' ? 'analyst' : '');
+      if (summaryRole) return summaryRole;
+    }}
+    const roleKey = (() => {{
+      if (NODE_ACTIVE_ROLE[activeRoleNode]) return NODE_ACTIVE_ROLE[activeRoleNode];
+      if (NODE_ACTIVE_ROLE[activeNode]) return NODE_ACTIVE_ROLE[activeNode];
+      const aliased = STAGE_NODE_ALIASES[activeRoleNode] || STAGE_NODE_ALIASES[activeNode];
+      if (aliased && skippedNodes.has(aliased)) return '';
+      if (aliased && NODE_ACTIVE_ROLE[aliased]) return NODE_ACTIVE_ROLE[aliased];
+      return '';
+    }})();
+    if (skippedNodes.has('security_review') && roleKey === 'security') return '';
+    return roleKey;
+  }}
+
+  function applyEvidenceJourneyLabel(profile) {{
+    const label = {{
+      metadata: 'Evidence Pack',
+      operational: 'Analyst Review',
+      security: 'Security Evidence',
+    }}[String(profile || 'operational')] || 'Evidence Review';
+    const step = document.querySelector('#runtime-journey .runtime-journey-step[data-node="evidence_review"] .runtime-journey-label');
+    if (step) step.textContent = label;
+  }}
+
+  function hydrateModels() {{
+    const root = document.getElementById('runtime-models');
+    if (!root) return;
+    const roleKey = activeRoleKey();
+    MODELS.forEach((item) => {{
+      const row = root.querySelector(`[data-role="${{item.role}}"]`);
+      if (!row) return;
+      const nameEl = row.querySelector('.runtime-model-name');
+      if (nameEl) nameEl.textContent = shortModelName(item.model);
+      row.classList.toggle('active', item.role === roleKey);
+    }});
+  }}
+
+  function renderJourney() {{
+    const steps = document.querySelectorAll('#runtime-journey .runtime-journey-step');
+    steps.forEach((step, index) => {{
+      const node = step.getAttribute('data-node') || '';
+      step.classList.remove('done', 'active', 'pending', 'is-skipped');
+      const timeEl = step.querySelector('.runtime-journey-step-time');
+      if (skippedNodes.has(node)) {{
+        step.classList.add('is-skipped');
+        if (timeEl) timeEl.textContent = 'skipped';
+        return;
+      }}
+      if (index <= completedThrough) step.classList.add('done');
+      else if (node && node === activeNode) step.classList.add('active');
+      else step.classList.add('pending');
+    }});
+    renderJourneyTimes();
+    renderPlaybookOverlay();
+  }}
+
+  function markJourneySkipped(node) {{
+    const key = String(node || '').trim();
+    if (!key) return;
+    skippedNodes.add(key);
+    if (key === 'security_review') skippedPlaybookNodes.add('security_review');
+  }}
+
+  function hydrateSkippedFromResult(result) {{
+    if (!result || typeof result !== 'object') return;
+    if (result.review_profile) {{
+      reviewProfile = String(result.review_profile || 'operational');
+      applyEvidenceJourneyLabel(reviewProfile);
+      updateReviewProfilePill();
+    }}
+    const nodes = Array.isArray(result.skipped_nodes) ? result.skipped_nodes : [];
+    nodes.forEach((node) => markJourneySkipped(node));
+    if (result.packaging_skipped === true) markJourneySkipped('package_response');
+    if (nodes.length || result.packaging_skipped === true) {{
+      renderJourney();
+      renderPlaybookOverlay();
+    }}
+  }}
+
+  function setRunActive(active) {{
+    runActive = Boolean(active);
+    if (runActive) playbookDocMode = false;
+    if (pulse) pulse.hidden = !runActive;
+    if (journeyOverlayOpen) renderPlaybookOverlay();
+  }}
+
+  function resolveJourneyNode(event={{}}) {{
+    const node = String(event.node || '').trim();
+    if (node && JOURNEY.some((step) => step.node === node)) return node;
+    if (node && STAGE_NODE_ALIASES[node]) return STAGE_NODE_ALIASES[node];
+    const stage = String(event.stage || '').trim();
+    if (stage && STAGE_NODE_ALIASES[stage]) return STAGE_NODE_ALIASES[stage];
+    if (stage && JOURNEY.some((step) => step.node === stage)) return stage;
+    return node || stage || '';
+  }}
+
+  function updateFromStage(event={{}}) {{
+    if (event.skipped || event.status === 'skipped') {{
+      const node = resolveJourneyNode(event);
+      if (node) {{
+        if (activeNode === node) {{
+          finalizeActiveStageTiming();
+          activeNode = '';
+        }}
+        if (activeRoleNode && resolveJourneyNode({{ node: activeRoleNode, stage: activeRoleNode }}) === node) {{
+          activeRoleNode = '';
+        }}
+        markJourneySkipped(node);
+        const idx = JOURNEY.findIndex((step) => step.node === node);
+        if (idx >= 0) completedThrough = Math.max(completedThrough, idx);
+      }}
+      renderJourney();
+      hydrateModels();
+      setRunActive(true);
+      return;
+    }}
+    activeRoleNode = String(event.node || event.stage || '').trim();
+    const rawNode = activeRoleNode;
+    if (rawNode === 'finalize') {{
+      const progressPct = Number(event.progress_pct || 0);
+      const label = String(event.label || '').toLowerCase();
+      const packagingDone = progressPct >= 99 || label.includes('complete');
+      const pkgIdx = JOURNEY.findIndex((step) => step.node === 'package_response');
+      const packagingSkipped = skippedNodes.has('package_response');
+      if (packagingDone) {{
+        if (packagingSkipped) {{
+          if (activeNode === 'package_response') {{
+            finalizeActiveStageTiming();
+            activeNode = '';
+          }}
+          if (pkgIdx >= 0) completedThrough = Math.max(completedThrough, pkgIdx);
+        }} else {{
+          if (activeNode === 'package_response') finalizeActiveStageTiming();
+          if (pkgIdx >= 0) {{
+            completedThrough = Math.max(completedThrough, pkgIdx);
+            activeNode = 'package_response';
+          }}
+        }}
+      }} else {{
+        completeGraphSummarizeStep();
+        activeNode = 'summarize';
+      }}
+      renderJourney();
+      hydrateModels();
+      setRunActive(true);
+      return;
+    }}
+    if (rawNode === 'package_response') {{
+      const pkgIdx = JOURNEY.findIndex((step) => step.node === 'package_response');
+      if (pkgIdx >= 0) {{
+        completedThrough = Math.max(completedThrough, pkgIdx - 1);
+        if (skippedNodes.has('package_response')) {{
+          if (activeNode === 'package_response') {{
+            finalizeActiveStageTiming();
+            activeNode = '';
+          }}
+        }} else {{
+          noteStageTransition('package_response');
+          activeNode = 'package_response';
+          packagingWallStart = Date.now();
+        }}
+      }}
+      renderJourney();
+      hydrateModels();
+      setRunActive(true);
+      return;
+    }}
+    const node = resolveJourneyNode(event);
+    if (node) {{
+      noteStageTransition(node);
+      activeNode = node;
+      const idx = JOURNEY.findIndex((step) => step.node === node);
+      if (idx >= 0) completedThrough = Math.max(completedThrough, idx - 1);
+    }}
+    renderJourney();
+    hydrateModels();
+    setRunActive(true);
+  }}
+
+  function updateFromProgressPct(pct, _label='') {{
+    const value = Math.max(0, Math.min(100, Number(pct || 0)));
+    let nextActive = JOURNEY[0]?.node || '';
+    let nextCompleted = -1;
+    for (let i = 0; i < JOURNEY_PROGRESS.length; i += 1) {{
+      const entry = JOURNEY_PROGRESS[i];
+      const threshold = Number(entry.pct || 0);
+      if (value >= threshold) {{
+        nextCompleted = i;
+        nextActive = JOURNEY_PROGRESS[i + 1]?.node || entry.node;
+      }} else {{
+        nextActive = entry.node;
+        break;
+      }}
+    }}
+    activeNode = nextActive;
+    activeRoleNode = nextActive;
+    completedThrough = nextCompleted;
+    noteStageTransition(nextActive);
+    renderJourney();
+    hydrateModels();
+    setRunActive(true);
+  }}
+
+  function resetJourney() {{
+    activeNode = '';
+    activeRoleNode = '';
+    completedThrough = -1;
+    playbookCompletedThrough = -1;
+    packagingWallStart = 0;
+    skippedNodes.clear();
+    skippedPlaybookNodes.clear();
+    resetJourneyTimings();
+    renderJourney();
+    hydrateModels();
+    setRunActive(false);
+  }}
+
+  function onRunStart() {{
+    completedThrough = -1;
+    playbookCompletedThrough = -1;
+    activeNode = '';
+    activeRoleNode = '';
+    resetJourneyTimings();
+    renderJourney();
+    hydrateModels();
+    setRunActive(true);
+    if (canExpand() && userExpandedPref !== false) setExpanded(true, false);
+  }}
+
+  function onRunEnd() {{
+    finalizeActiveStageTiming();
+    finalizeActivePlaybookTiming(activePlaybookNode());
+    stopJourneyLiveTimer();
+    setRunActive(false);
+    if (completedThrough >= JOURNEY.length - 1) {{
+      renderJourney();
+      return;
+    }}
+    if (activeNode) {{
+      const idx = JOURNEY.findIndex((step) => step.node === activeNode);
+      if (idx >= 0) completedThrough = Math.max(completedThrough, idx);
+    }}
+    renderJourney();
+  }}
+
+  function completeFromWorkflow(workflow, result=null) {{
+    if (!Array.isArray(workflow) || !workflow.length) {{
+      onRunEnd();
+      return;
+    }}
+    hydrateSkippedFromResult(result);
+    const packagingSkipped = skippedNodes.has('package_response') || result?.packaging_skipped === true;
+    if (packagingSkipped) {{
+      markJourneySkipped('package_response');
+      delete stageTimingsSec.package_response;
+      delete stageStartAt.package_response;
+      packagingWallStart = 0;
+    }} else if (activeNode === 'package_response') {{
+      finalizeActiveStageTiming();
+    }}
+    const packMs = Number(result?.packaging_duration_ms || result?.meta?.packaging_duration_ms || 0);
+    if (!packagingSkipped && packMs > 0) {{
+      stageTimingsSec.package_response = msToSec(packMs);
+    }} else if (!packagingSkipped && packagingWallStart > 0) {{
+      stageTimingsSec.package_response = msToSec(Date.now() - packagingWallStart);
+    }}
+    packagingWallStart = 0;
+    const lastNode = JOURNEY[JOURNEY.length - 1]?.node || '';
+    activeNode = lastNode;
+    activeRoleNode = 'package_response';
+    completedThrough = JOURNEY.length - 1;
+    playbookCompletedThrough = PLAYBOOK_ORDER.length - 1;
+    stopJourneyLiveTimer();
+    if (!hydrateJourneyTimingsFromResult(result)) renderJourneyTimes();
+    renderJourney();
+    hydrateModels();
+    setRunActive(false);
+  }}
+
+  function parseSseBuffer(buffer, onEvent) {{
+    const chunks = buffer.split('\\n\\n');
+    const remainder = chunks.pop() || '';
+    for (const chunk of chunks) {{
+      if (!chunk.trim()) continue;
+      const lines = chunk.split('\\n').filter(Boolean);
+      let eventName = 'message';
+      const dataLines = [];
+      for (const line of lines) {{
+        if (line.startsWith('event:')) eventName = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+      }}
+      if (!dataLines.length) continue;
+      let payload = null;
+      try {{ payload = JSON.parse(dataLines.join('\\n')); }} catch (_e) {{ continue; }}
+      onEvent(eventName, payload);
+    }}
+    return remainder;
+  }}
+
+  async function consumeAskStream(resp, onStage, options = {{}}) {{
+    const streamLabel = String(options.context || options.streamLabel || 'Investigation').trim() || 'Investigation';
+    const hint = streamLabel === 'MCP'
+      ? 'Verify Splunk MCP credentials, confirm Ollama is reachable from the UI container (not just the host), and check agtsmith-ui-deploy logs.'
+      : 'Verify Ollama and Splunk MCP connectivity, then check server logs for packaging or serialization errors.';
+    if (!resp.body) throw new Error(`${{streamLabel}} streaming body unavailable`);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalPayload = null;
+    let streamError = null;
+
+    function handleEvent(eventName, payload) {{
+      if (eventName === 'stage' && typeof onStage === 'function') onStage(payload || {{}});
+      if (eventName === 'spl_ready' && typeof options.onSplReady === 'function') options.onSplReady(payload || {{}});
+      if (eventName === 'complete') {{
+        finalPayload = payload || null;
+        if (typeof options.onComplete === 'function') options.onComplete(finalPayload);
+      }}
+      if (eventName === 'error') {{
+        const message = String(payload?.message || payload?.code || `${{streamLabel}} stream failed`);
+        streamError = new Error(message);
+      }}
+    }}
+
+    while (true) {{
+      const {{ done, value }} = await reader.read();
+      if (value) {{
+        buffer += decoder.decode(value, {{ stream: true }});
+        buffer = parseSseBuffer(buffer, handleEvent);
+      }}
+      if (streamError) throw streamError;
+      if (finalPayload) {{
+        try {{ await reader.cancel(); }} catch (_cancelErr) {{}}
+        break;
+      }}
+      if (done) break;
+    }}
+    buffer += decoder.decode();
+    buffer = parseSseBuffer(buffer, handleEvent);
+    if (streamError) throw streamError;
+    if (!finalPayload) throw new Error(`${{streamLabel}} stream ended before completion. ${{hint}}`);
+    return finalPayload;
+  }}
+
+  function handleAskStreamStage(event={{}}) {{
+    updateFromStage(event);
+  }}
+
+  function formatUpdatedAt(value) {{
+    const text = String(value || '').trim();
+    if (!text) return 'Updated just now';
+    const parsed = Date.parse(text);
+    if (Number.isNaN(parsed)) return 'Updated just now';
+    const delta = Math.max(0, Math.round((Date.now() - parsed) / 1000));
+    if (delta < 8) return 'Updated just now';
+    if (delta < 60) return `Updated ${{delta}}s ago`;
+    return `Updated ${{Math.round(delta / 60)}}m ago`;
+  }}
+
+  async function refreshOpsSummary() {{
+    const statusEl = document.getElementById('runtime-ops-status');
+    const loadedEl = document.getElementById('runtime-ops-loaded');
+    const hostEl = document.getElementById('runtime-ops-host');
+    const vramLabel = document.getElementById('runtime-ops-vram-label');
+    const vramBar = document.getElementById('runtime-ops-vram-bar');
+    const updatedEl = document.getElementById('runtime-ops-updated');
+    try {{
+      const resp = await fetch('/api/runtime/ops-summary', {{ credentials: 'same-origin' }});
+      if (!resp.ok) throw new Error(`http_${{resp.status}}`);
+      const data = await resp.json();
+      if (statusEl) {{
+        const state = String(data.connection_state || (data.connected ? 'connected' : 'offline')).toLowerCase();
+        statusEl.textContent = state === 'connected' ? 'Connected' : state === 'degraded' ? 'Degraded' : 'Offline';
+      }}
+      if (loadedEl) loadedEl.textContent = String(data.models_loaded ?? '—');
+      if (hostEl) hostEl.textContent = String(data.host || '—');
+      const used = data.gpu_vram_used_gb;
+      const total = data.gpu_vram_total_gb;
+      if (vramLabel) {{
+        vramLabel.textContent = (used != null && total != null) ? `${{used}} / ${{total}} GB` : 'n/a';
+      }}
+      if (vramBar) {{
+        const pct = (used != null && total) ? Math.max(0, Math.min(100, (used / total) * 100)) : 0;
+        vramBar.style.width = `${{pct}}%`;
+      }}
+      if (updatedEl) updatedEl.textContent = formatUpdatedAt(data.updated_at);
+    }} catch (_err) {{
+      if (statusEl) statusEl.textContent = 'Unavailable';
+      if (updatedEl) updatedEl.textContent = 'Snapshot unavailable';
+    }}
+  }}
+
+  function startOpsPoll() {{
+    if (opsTimer) return;
+    refreshOpsSummary();
+    opsTimer = window.setInterval(refreshOpsSummary, OPS_POLL_MS);
+  }}
+
+  function stopOpsPoll() {{
+    if (!opsTimer) return;
+    window.clearInterval(opsTimer);
+    opsTimer = null;
+  }}
+
+  window.updateRuntimeRailFromStage = updateFromStage;
+  window.updateRuntimeRailFromProgress = updateFromProgressPct;
+  window.resetRuntimeRailJourney = resetJourney;
+  window.notifyRuntimeRailRunStart = onRunStart;
+  window.notifyRuntimeRailRunEnd = onRunEnd;
+  window.completeRuntimeRailJourneyFromWorkflow = completeFromWorkflow;
+  window.hydrateRuntimeRailJourneyTimings = hydrateJourneyTimingsFromResult;
+  window.consumeAskStream = consumeAskStream;
+  window.handleAskStreamStage = handleAskStreamStage;
+
+  if (opsLink && SHOW_OPS_LINK) opsLink.hidden = false;
+
+  userExpandedPref = readStoredExpanded();
+  setExpanded(userExpandedPref, false);
+
+  if (toggle) {{
+    toggle.addEventListener('click', () => {{
+      const next = rail?.dataset.expanded !== 'true';
+      setExpanded(next, true);
+    }});
+  }}
+  if (collapse) {{
+    collapse.addEventListener('click', () => setExpanded(false, true));
+  }}
+
+  if (journeyExpand) {{
+    journeyExpand.addEventListener('click', (event) => {{
+      event.stopPropagation();
+      if (journeyOverlayOpen) closeJourneyOverlay();
+      else openJourneyOverlay();
+    }});
+  }}
+  if (journeyOverlayClose) journeyOverlayClose.addEventListener('click', closeJourneyOverlay);
+  if (journeyOverlayBackdrop) journeyOverlayBackdrop.addEventListener('click', closeJourneyOverlay);
+  document.addEventListener('keydown', (event) => {{
+    if (event.key === 'Escape' && journeyOverlayOpen) closeJourneyOverlay();
+  }});
+
+  window.addEventListener('resize', () => {{
+    if (!canExpand() && rail?.dataset.expanded === 'true') setExpanded(false, false);
+  }});
+
+  hydrateModels();
+  renderJourney();
+}})();
+</script>
 """
+
+
+def _runtime_rail_stylesheet() -> str:
+    return """
+    @property --runtime-rail-width { syntax:'<length>'; inherits:true; initial-value:28px; }
+    .app-shell { --runtime-rail-width:28px; grid-template-columns:64px minmax(0,1fr) var(--runtime-rail-width); transition:--runtime-rail-width .18s ease; }
+    .app-shell.runtime-rail-expanded { --runtime-rail-width: 312px; }
+    .runtime-rail { position:sticky; top:0; align-self:start; width:var(--runtime-rail-width); min-width:var(--runtime-rail-width); height:100vh; background:#0f172a; border-left:1px solid #1e293b; z-index:410; box-sizing:border-box; display:flex; flex-direction:row-reverse; overflow:hidden; }
+    .runtime-rail-panel, .runtime-rail-tab { position:relative; z-index:2; background:#0f172a; }
+    .runtime-rail-tab { appearance:none; border:0; margin:0; padding:0; width:28px; min-width:28px; height:100%; display:flex; flex-direction:column; align-items:center; gap:10px; background:linear-gradient(180deg,#0f172a,#08111d); color:#94a3b8; cursor:pointer; position:relative; box-shadow:none; }
+    .runtime-rail-tab:hover { color:#38bdf8; background:rgba(12,28,48,.72); }
+    .runtime-rail-tab-chevron { margin-top:10px; font-size:11px; font-weight:900; letter-spacing:-2px; color:#38bdf8; line-height:1; }
+    .runtime-rail-tab-icon { display:flex; color:#6b8fad; }
+    .runtime-rail-tab-label { writing-mode:vertical-rl; transform:rotate(180deg); font-size:11px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; color:#dbeafe; }
+    .runtime-rail-pulse { width:8px; height:8px; border-radius:999px; background:#38bdf8; box-shadow:0 0 0 0 rgba(56,189,248,.55); animation:runtime-rail-pulse 1.6s ease-out infinite; }
+    @keyframes runtime-rail-pulse { 0% { box-shadow:0 0 0 0 rgba(56,189,248,.55); } 70% { box-shadow:0 0 0 8px rgba(56,189,248,0); } 100% { box-shadow:0 0 0 0 rgba(56,189,248,0); } }
+    .runtime-rail-panel { display:none; flex:1 1 auto; min-width:0; padding:14px 12px 16px; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; }
+    .runtime-rail[data-expanded="true"] .runtime-rail-panel { display:block; }
+    .runtime-rail-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px; color:#e5eef8; font-size:13px; font-weight:800; }
+    .runtime-rail-collapse { appearance:none; border:0; margin:0; padding:2px 4px; background:transparent; color:#38bdf8; font-size:12px; font-weight:900; cursor:pointer; box-shadow:none; }
+    .runtime-rail-section { margin-bottom:14px; }
+    .runtime-rail-kicker { font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; color:#7ea2c1; margin-bottom:8px; }
+    .runtime-journey { list-style:none; margin:0; padding:0; display:grid; gap:0; position:relative; }
+    .runtime-journey-step { display:grid; grid-template-columns:18px minmax(0,1fr); gap:8px; align-items:center; position:relative; padding:6px 0; color:#9fb4cc; font-size:12px; }
+    .runtime-journey-label-wrap { display:flex; align-items:baseline; justify-content:space-between; gap:8px; min-width:0; }
+    .runtime-journey-label { min-width:0; }
+    .runtime-journey-step-time { flex:0 0 auto; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:10px; color:#94a3b8; font-weight:600; font-variant-numeric:tabular-nums; }
+    .runtime-journey-step.active .runtime-journey-step-time { color:#7dd3fc; }
+    .runtime-journey-step.done .runtime-journey-step-time { color:#86efac; }
+    .runtime-journey-step:not(:last-child)::after { content:""; position:absolute; left:8px; top:22px; bottom:-6px; width:2px; background:#1e3348; }
+    .runtime-journey-dot { width:14px; height:14px; border-radius:999px; border:2px solid #2a445c; background:#0f172a; box-sizing:border-box; position:relative; z-index:1; }
+    .runtime-journey-step.done .runtime-journey-dot { border-color:#22c55e; background:#22c55e; }
+    .runtime-journey-step.active .runtime-journey-dot { border-color:#38bdf8; box-shadow:0 0 0 3px rgba(56,189,248,.18); background:radial-gradient(circle at center,#38bdf8 0 35%,#0f172a 36%); }
+    .runtime-journey-step.active { color:#dbeafe; font-weight:700; }
+    .runtime-journey-step.done { color:#bbf7d0; }
+    .runtime-journey-step.is-skipped { color:#64748b; font-weight:500; }
+    .runtime-journey-step.is-skipped .runtime-journey-dot {
+      border-color:#475569;
+      border-style:dashed;
+      background:#0f172a;
+      box-shadow:none;
+    }
+    .runtime-journey-step.is-skipped .runtime-journey-step-time { color:#64748b; font-weight:600; }
+    .runtime-models { display:grid; gap:8px; }
+    .runtime-model-row { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:11px; min-width:0; }
+    .runtime-model-role { color:#9fb4cc; font-weight:700; flex:0 0 auto; }
+    .runtime-model-chip { display:inline-flex; align-items:center; gap:6px; min-width:0; max-width:100%; padding:4px 8px; border-radius:999px; border:1px solid #27415a; background:#071523; color:#dbeafe; font-size:10px; font-weight:700; }
+    .runtime-model-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; word-break:break-all; }
+    .runtime-model-active { display:none; padding:2px 6px; border-radius:999px; background:#38bdf8; color:#041723; font-size:9px; font-weight:900; letter-spacing:.04em; }
+    .runtime-model-row.active .runtime-model-chip { border-color:#38bdf8; background:#0b2034; }
+    .runtime-model-row.active .runtime-model-active { display:inline-flex; }
+    .runtime-ops-body { display:grid; gap:8px; font-size:11px; }
+    .runtime-ops-row { display:flex; align-items:center; justify-content:space-between; gap:8px; color:#9fb4cc; }
+    .runtime-ops-row strong { color:#e5eef8; font-size:11px; font-weight:800; }
+    .runtime-ops-vram { display:flex; align-items:center; gap:8px; min-width:0; }
+    .runtime-ops-vram-track { width:72px; height:6px; border-radius:999px; background:#13263a; overflow:hidden; }
+    .runtime-ops-vram-bar { height:100%; width:0; border-radius:999px; background:linear-gradient(90deg,#38bdf8,#0ea5e9); }
+    .runtime-ops-updated { font-size:10px; margin-top:2px; }
+    .runtime-ops-full-link { display:inline-flex; margin-top:8px; color:#38bdf8; font-size:11px; font-weight:700; text-decoration:none; }
+    .runtime-ops-full-link:hover { text-decoration:underline; }
+    __RUNTIME_JOURNEY_OVERLAY_STYLES__
+    @media (max-width: 1280px) { .app-shell.runtime-rail-expanded { --runtime-rail-width: 28px; } .runtime-rail[data-expanded="true"] .runtime-rail-panel { display:none; } }
+    """.replace("__RUNTIME_JOURNEY_OVERLAY_STYLES__", _runtime_journey_overlay_styles())
+
+
+def _investigation_page_html(user: dict[str, Any] | None) -> str:
+    role = str((user or {}).get("role", "")).strip().lower()
+    show_ops_link = role in {"admin", "ops"}
+    return (
+        APP_HTML.replace("__APP_VERSION_LABEL__", html.escape(APP_VERSION_LABEL))
+        .replace("__CONFIGURE_UI_TAG__", html.escape(CONFIGURE_UI_TAG))
+        .replace("__GLOBAL_NAV__", _global_nav("investigation"))
+        .replace("__SMITH_ROLE__", html.escape(role))
+        .replace("__RUNTIME_JOURNEY_OVERLAY_STYLES__", _runtime_journey_overlay_styles())
+        .replace("__RUNTIME_RAIL__", _runtime_rail_html())
+        .replace("__RUNTIME_RAIL_SCRIPT__", _runtime_rail_script(show_ops_link=show_ops_link))
+    )
 
 
 APP_HTML = """<!doctype html>
@@ -3453,16 +5610,16 @@ APP_HTML = """<!doctype html>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>A.G.E.N.T. Smith</title>
-  <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg?v=agtsmith1\" />
-  <link rel=\"icon\" href=\"/favicon.ico?v=agtsmith1\" />
+  <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg?v=agtsmith2\" />
+  <link rel=\"icon\" href=\"/favicon.ico?v=agtsmith2\" />
   <style>
     :root {
-      --bg:#0f172a; --card:#111827; --card2:#0b1220; --muted:#9ca3af; --fg:#e5e7eb;
-      --accent:#22c55e; --warn:#f59e0b; --link:#93c5fd; --line:#1f2937; --bad:#ef4444; --ok:#10b981;
+      --bg:#0d1b2a; --bg-edge:#050a14; --card:#0f172a; --card2:#0b1220; --muted:#94a3b8; --fg:#ffffff;
+      --accent:#38bdf8; --warn:#f59e0b; --link:#7dd3fc; --line:#1e293b; --border:#1e293b; --bad:#ef4444; --ok:#10b981;
     }
     html {
       min-height:100%;
-      background: linear-gradient(140deg,#0b1220 0%,#111827 65%,#0a1f16 100%);
+      background: radial-gradient(ellipse at center, #0d1b2a 0%, #050a14 100%);
       background-repeat:no-repeat;
       background-size:cover;
     }
@@ -3470,12 +5627,14 @@ APP_HTML = """<!doctype html>
       margin:0;
       min-height:100vh;
       font-family: "Trebuchet MS", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif;
-      background: linear-gradient(140deg,#0b1220,#111827 65%,#0a1f16);
+      background: radial-gradient(ellipse at center, #0d1b2a 0%, #050a14 100%);
       background-repeat:no-repeat;
       background-size:cover;
       color:var(--fg);
     }
-    .app-shell { display:grid; grid-template-columns:64px minmax(0,1fr); min-height:100vh; }
+    @property --runtime-rail-width { syntax:'<length>'; inherits:true; initial-value:28px; }
+    .app-shell { display:grid; --runtime-rail-width:28px; grid-template-columns:64px minmax(0,1fr) var(--runtime-rail-width); min-height:100vh; transition:--runtime-rail-width .18s ease; }
+    .app-shell.runtime-rail-expanded { --runtime-rail-width: 312px; }
     .app-main { min-width:0; min-height:100vh; }
     .wrap { max-width: 1740px; min-height:calc(100vh - 48px); margin: 24px auto; padding: 0 28px 32px; box-sizing:border-box; }
     .sidebar-rail {
@@ -3487,8 +5646,8 @@ APP_HTML = """<!doctype html>
       width:64px;
       min-width:64px;
       height:100vh;
-      background:#0a1628;
-      border-right:1px solid #1a2d45;
+      background:#0f172a;
+      border-right:1px solid #1e293b;
       z-index:300;
       box-sizing:border-box;
     }
@@ -3497,13 +5656,10 @@ APP_HTML = """<!doctype html>
       align-items:center;
       justify-content:center;
       height:56px;
-      font-size:13px;
-      font-weight:900;
-      letter-spacing:.04em;
-      color:#f8fafc;
-      border-bottom:1px solid rgba(26,45,69,.72);
+      border-bottom:1px solid #1e293b;
       flex-shrink:0;
     }
+    .rail-logo svg { display:block; }
     .rail-items {
       display:flex;
       flex-direction:column;
@@ -3518,7 +5674,7 @@ APP_HTML = """<!doctype html>
       align-items:center;
       gap:8px;
       padding:8px 0 12px;
-      border-top:1px solid rgba(26,45,69,.72);
+      border-top:1px solid #1e293b;
       flex-shrink:0;
     }
     .rail-item, .rail-item-flyout {
@@ -3529,7 +5685,7 @@ APP_HTML = """<!doctype html>
       width:64px;
       height:48px;
       text-decoration:none;
-      color:#8ea4ba;
+      color:#94a3b8;
       transition:color .14s ease, background .14s ease;
     }
     .rail-item-flyout { display:block; }
@@ -3550,7 +5706,7 @@ APP_HTML = """<!doctype html>
       bottom:8px;
       width:3px;
       border-radius:0 3px 3px 0;
-      background:linear-gradient(180deg,#22d3ee,#14b8a6);
+      background:linear-gradient(180deg,#38bdf8,#0ea5e9);
       opacity:0;
       transition:opacity .14s ease;
     }
@@ -3559,10 +5715,288 @@ APP_HTML = """<!doctype html>
       background:rgba(15,29,50,.55);
     }
     .rail-item.active, .rail-item-flyout.active {
-      color:#22d3ee;
+      color:#38bdf8;
       background:rgba(12,28,48,.72);
     }
     .rail-item.active::before, .rail-item-flyout.active::before { opacity:1; }
+    .runtime-rail {
+      position:sticky;
+      top:0;
+      align-self:start;
+      width:var(--runtime-rail-width);
+      min-width:var(--runtime-rail-width);
+      height:100vh;
+      background:#0f172a;
+      border-left:1px solid #1e293b;
+      z-index:410;
+      box-sizing:border-box;
+      display:flex;
+      flex-direction:row-reverse;
+      overflow:hidden;
+    }
+    .runtime-rail-panel, .runtime-rail-tab {
+      position:relative;
+      z-index:2;
+      background:#0f172a;
+    }
+    .runtime-rail-tab {
+      appearance:none;
+      border:0;
+      margin:0;
+      padding:0;
+      width:28px;
+      min-width:28px;
+      height:100%;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:10px;
+      background:linear-gradient(180deg,#0f172a,#08111d);
+      color:#94a3b8;
+      cursor:pointer;
+      position:relative;
+      box-shadow:none;
+    }
+    .runtime-rail-tab:hover { color:#38bdf8; background:rgba(12,28,48,.72); }
+    .runtime-rail-tab-chevron {
+      margin-top:10px;
+      font-size:11px;
+      font-weight:900;
+      letter-spacing:-2px;
+      color:#38bdf8;
+      line-height:1;
+    }
+    .runtime-rail-tab-icon { display:flex; color:#6b8fad; }
+    .runtime-rail-tab-label {
+      writing-mode:vertical-rl;
+      transform:rotate(180deg);
+      font-size:11px;
+      font-weight:900;
+      letter-spacing:.14em;
+      text-transform:uppercase;
+      color:#dbeafe;
+    }
+    .runtime-rail-pulse {
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      background:#38bdf8;
+      box-shadow:0 0 0 0 rgba(56,189,248,.55);
+      animation:runtime-rail-pulse 1.6s ease-out infinite;
+    }
+    @keyframes runtime-rail-pulse {
+      0% { box-shadow:0 0 0 0 rgba(56,189,248,.55); }
+      70% { box-shadow:0 0 0 8px rgba(56,189,248,0); }
+      100% { box-shadow:0 0 0 0 rgba(56,189,248,0); }
+    }
+    .runtime-rail-panel {
+      display:none;
+      flex:1 1 auto;
+      min-width:0;
+      padding:14px 12px 16px;
+      overflow-x:hidden;
+      overflow-y:auto;
+      overscroll-behavior:contain;
+    }
+    .runtime-rail[data-expanded="true"] .runtime-rail-panel { display:block; }
+    .runtime-rail-head {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+      margin-bottom:12px;
+      color:#e5eef8;
+      font-size:13px;
+      font-weight:800;
+    }
+    .runtime-rail-collapse {
+      appearance:none;
+      border:0;
+      margin:0;
+      padding:2px 4px;
+      background:transparent;
+      color:#38bdf8;
+      font-size:12px;
+      font-weight:900;
+      cursor:pointer;
+      box-shadow:none;
+    }
+    .runtime-rail-section { margin-bottom:14px; }
+    .runtime-rail-kicker {
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      color:#7ea2c1;
+      margin-bottom:8px;
+    }
+    .runtime-journey {
+      list-style:none;
+      margin:0;
+      padding:0;
+      display:grid;
+      gap:0;
+      position:relative;
+    }
+    .runtime-journey-step {
+      display:grid;
+      grid-template-columns:18px minmax(0,1fr);
+      gap:8px;
+      align-items:center;
+      position:relative;
+      padding:6px 0;
+      color:#9fb4cc;
+      font-size:12px;
+    }
+    .runtime-journey-label-wrap {
+      display:flex;
+      align-items:baseline;
+      justify-content:space-between;
+      gap:8px;
+      min-width:0;
+    }
+    .runtime-journey-label { min-width:0; }
+    .runtime-journey-step-time {
+      flex:0 0 auto;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+      font-size:10px;
+      color:#94a3b8;
+      font-weight:600;
+      font-variant-numeric:tabular-nums;
+    }
+    .runtime-journey-step.active .runtime-journey-step-time { color:#7dd3fc; }
+    .runtime-journey-step.done .runtime-journey-step-time { color:#86efac; }
+    .runtime-journey-step:not(:last-child)::after {
+      content:"";
+      position:absolute;
+      left:8px;
+      top:22px;
+      bottom:-6px;
+      width:2px;
+      background:#1e3348;
+    }
+    .runtime-journey-dot {
+      width:14px;
+      height:14px;
+      border-radius:999px;
+      border:2px solid #2a445c;
+      background:#0f172a;
+      box-sizing:border-box;
+      position:relative;
+      z-index:1;
+    }
+    .runtime-journey-step.done .runtime-journey-dot {
+      border-color:#22c55e;
+      background:#22c55e;
+    }
+    .runtime-journey-step.done .runtime-journey-dot::after {
+      content:"";
+      position:absolute;
+      inset:3px 4px 4px 3px;
+      border:2px solid #052e16;
+      border-top:none;
+      border-right:none;
+      transform:rotate(-45deg);
+    }
+    .runtime-journey-step.active .runtime-journey-dot {
+      border-color:#38bdf8;
+      box-shadow:0 0 0 3px rgba(56,189,248,.18);
+      background:radial-gradient(circle at center,#38bdf8 0 35%,#0f172a 36%);
+    }
+    .runtime-journey-step.active { color:#dbeafe; font-weight:700; }
+    .runtime-journey-step.done { color:#bbf7d0; }
+    .runtime-journey-step.is-skipped { color:#64748b; font-weight:500; }
+    .runtime-journey-step.is-skipped .runtime-journey-dot {
+      border-color:#475569;
+      border-style:dashed;
+      background:#0f172a;
+      box-shadow:none;
+    }
+    .runtime-journey-step.is-skipped .runtime-journey-step-time { color:#64748b; font-weight:600; }
+    .runtime-models { display:grid; gap:8px; }
+    .runtime-model-row {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+      font-size:11px;
+      min-width:0;
+    }
+    .runtime-model-role { color:#9fb4cc; font-weight:700; flex:0 0 auto; }
+    .runtime-model-chip {
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      min-width:0;
+      max-width:100%;
+      padding:4px 8px;
+      border-radius:999px;
+      border:1px solid #27415a;
+      background:#071523;
+      color:#dbeafe;
+      font-size:10px;
+      font-weight:700;
+    }
+    .runtime-model-name {
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      min-width:0;
+      word-break:break-all;
+    }
+    .runtime-model-active {
+      display:none;
+      padding:2px 6px;
+      border-radius:999px;
+      background:#38bdf8;
+      color:#041723;
+      font-size:9px;
+      font-weight:900;
+      letter-spacing:.04em;
+    }
+    .runtime-model-row.active .runtime-model-chip {
+      border-color:#38bdf8;
+      background:#0b2034;
+    }
+    .runtime-model-row.active .runtime-model-active { display:inline-flex; }
+    .runtime-ops-body { display:grid; gap:8px; font-size:11px; }
+    .runtime-ops-row {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+      color:#9fb4cc;
+    }
+    .runtime-ops-row strong { color:#e5eef8; font-size:11px; font-weight:800; }
+    .runtime-ops-vram { display:flex; align-items:center; gap:8px; min-width:0; }
+    .runtime-ops-vram-track {
+      width:72px;
+      height:6px;
+      border-radius:999px;
+      background:#13263a;
+      overflow:hidden;
+    }
+    .runtime-ops-vram-bar {
+      height:100%;
+      width:0;
+      border-radius:999px;
+      background:linear-gradient(90deg,#38bdf8,#0ea5e9);
+    }
+    .runtime-ops-updated { font-size:10px; margin-top:2px; }
+    .runtime-ops-full-link {
+      display:inline-flex;
+      margin-top:8px;
+      color:#38bdf8;
+      font-size:11px;
+      font-weight:700;
+      text-decoration:none;
+    }
+    .runtime-ops-full-link:hover { text-decoration:underline; }
+    __RUNTIME_JOURNEY_OVERLAY_STYLES__
+    @media (max-width: 1280px) {
+      .app-shell.runtime-rail-expanded { --runtime-rail-width: 28px; }
+      .runtime-rail[data-expanded="true"] .runtime-rail-panel { display:none; }
+    }
     .rail-icon {
       display:flex;
       align-items:center;
@@ -3573,8 +6007,8 @@ APP_HTML = """<!doctype html>
       transition:background .14s ease, box-shadow .14s ease;
     }
     .rail-item.active .rail-icon, .rail-item-flyout.active .rail-icon {
-      background:rgba(34,211,238,.12);
-      box-shadow:0 0 12px rgba(34,211,238,.18);
+      background:rgba(56,189,248,.12);
+      box-shadow:0 0 12px rgba(56,189,248,.18);
     }
     .rail-svg { display:block; }
     .rail-tooltip {
@@ -3585,7 +6019,7 @@ APP_HTML = """<!doctype html>
       padding:7px 12px;
       border:1px solid #2a445c;
       border-radius:999px;
-      background:linear-gradient(180deg,#0f1d32,#0a1628);
+      background:linear-gradient(180deg,#0f1d32,#0f172a);
       color:#e5eef8;
       font-size:12px;
       font-weight:700;
@@ -3721,6 +6155,48 @@ APP_HTML = """<!doctype html>
     .control-rail button {
       width:100%;
       justify-content:center;
+    }
+    .invest-run-actions {
+      display: grid;
+      gap: 8px;
+    }
+    .invest-stop-btn {
+      width: 100%;
+      justify-content: center;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border: 1px solid rgba(248,113,113,.45);
+      border-radius: 12px;
+      background: linear-gradient(135deg, #dc2626, #b91c1c);
+      color: #fff7f7;
+      font-size: 14px;
+      font-weight: 900;
+      cursor: pointer;
+      box-shadow: 0 12px 24px rgba(220,38,38,.24), inset 0 1px 0 rgba(255,255,255,.16);
+    }
+    .invest-stop-btn:hover {
+      filter: brightness(1.04);
+    }
+    .invest-stop-btn:disabled {
+      opacity: .65;
+      cursor: not-allowed;
+    }
+    .invest-stop-spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(254,202,202,.35);
+      border-top-color: #fecaca;
+      border-radius: 999px;
+      display: none;
+    }
+    .invest-stop-btn.is-aborting .invest-stop-spinner {
+      display: inline-block;
+      animation: invest-stop-spin .75s linear infinite;
+    }
+    @keyframes invest-stop-spin {
+      to { transform: rotate(360deg); }
     }
     .results-shell {
       display:grid;
@@ -3867,22 +6343,22 @@ APP_HTML = """<!doctype html>
     .ops-actions button { margin-top:0; }
     button {
       margin-top: 14px;
-      background:linear-gradient(135deg,#22c55e,#14b86a);
-      color:#03210d;
-      border:1px solid rgba(134,239,172,.22);
+      background:linear-gradient(135deg,#38bdf8,#0ea5e9);
+      color:#041723;
+      border:1px solid rgba(125,211,252,.28);
       border-radius:14px;
       font-weight:800;
       padding:11px 16px;
       cursor:pointer;
       font-family: "Trebuchet MS", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif;
       letter-spacing:.01em;
-      box-shadow:0 10px 22px rgba(20,184,106,.24), inset 0 1px 0 rgba(255,255,255,.18);
+      box-shadow:0 10px 22px rgba(56,189,248,.24), inset 0 1px 0 rgba(255,255,255,.18);
       transition:transform .18s ease, box-shadow .18s ease, filter .18s ease, border-color .18s ease;
     }
     button:hover {
       transform:translateY(-1px);
       filter:brightness(1.03);
-      box-shadow:0 14px 28px rgba(20,184,106,.30), inset 0 1px 0 rgba(255,255,255,.2);
+      box-shadow:0 14px 28px rgba(56,189,248,.30), inset 0 1px 0 rgba(255,255,255,.2);
     }
     button.is-secondary-action{
       background:linear-gradient(180deg,#16324a,#102435);
@@ -3912,16 +6388,18 @@ APP_HTML = """<!doctype html>
       box-shadow:0 14px 28px rgba(14,165,233,.30), inset 0 1px 0 rgba(255,255,255,.2);
     }
     .btn-splunk {
-      background:linear-gradient(135deg,#22c55e,#16a34a);
-      color:#03210d;
+      background:linear-gradient(135deg,#38bdf8,#0ea5e9);
+      color:#041723;
       border-color:rgba(134,239,172,.24);
-      box-shadow:0 10px 22px rgba(20,184,106,.24), inset 0 1px 0 rgba(255,255,255,.18);
+      box-shadow:0 10px 22px rgba(56,189,248,.24), inset 0 1px 0 rgba(255,255,255,.18);
     }
     .btn-splunk:hover {
-      box-shadow:0 14px 28px rgba(20,184,106,.30), inset 0 1px 0 rgba(255,255,255,.2);
+      box-shadow:0 14px 28px rgba(56,189,248,.30), inset 0 1px 0 rgba(255,255,255,.2);
     }
     .btn-danger { background:#7f1d1d; color:#fee2e2; }
     button:disabled { opacity:.6; cursor:wait; }
+    .invest-stop-btn:disabled,
+    .mcp-stop-btn:disabled { cursor: not-allowed; }
     .run-progress-wrap {
       margin-top:10px;
       border:1px solid #2a4056;
@@ -3952,6 +6430,19 @@ APP_HTML = """<!doctype html>
       border-radius:999px;
       background:linear-gradient(90deg,#22c55e,#10b981);
       transition:width .2s ease;
+    }
+    .run-progress-bar.indeterminate {
+      width:38% !important;
+      animation:run-progress-indeterminate 1.35s ease-in-out infinite;
+    }
+    @keyframes run-progress-indeterminate {
+      0% { transform:translateX(-120%); }
+      50% { transform:translateX(180%); }
+      100% { transform:translateX(-120%); }
+    }
+    .run-progress-track.indeterminate {
+      position:relative;
+      overflow:hidden;
     }
     .run-progress-detail-row {
       display:flex;
@@ -5009,7 +7500,7 @@ APP_HTML = """<!doctype html>
       box-shadow:0 4px 10px rgba(2,6,23,.35);
     }
     .switch input:checked + .slider{
-      background:linear-gradient(135deg,#22c55e,#16a34a);
+      background:linear-gradient(135deg,#38bdf8,#0ea5e9);
       border-color:#22c55e;
     }
     .switch input:checked + .slider:before{
@@ -5966,7 +8457,7 @@ APP_HTML = """<!doctype html>
     .case-header{
       border:1px solid #244360;
       border-radius:14px;
-      background:linear-gradient(180deg,#0a1628,#08111d);
+      background:linear-gradient(180deg,#0f172a,#08111d);
       padding:14px 16px;
     }
     .case-header-grid{
@@ -6808,9 +9299,9 @@ APP_HTML = """<!doctype html>
       box-shadow:none;
     }
     .spl-mode-btn.active{
-      background:linear-gradient(135deg,#22c55e,#16a34a);
+      background:linear-gradient(135deg,#38bdf8,#0ea5e9);
       border-color:#22c55e;
-      color:#03230f;
+      color:#041723;
     }
     .spl-summary-panel{
       border:1px solid #22384f;
@@ -6954,8 +9445,8 @@ APP_HTML = """<!doctype html>
     @media (max-width: 560px) { .row, .row-ops { grid-template-columns: 1fr; } .wrap{padding:0 12px 24px;} }
   </style>
 </head>
-<body>
-  <div class=\"app-shell\">
+<body data-smith-role="__SMITH_ROLE__">
+  <div class=\"app-shell\" id=\"app-shell\">
     __GLOBAL_NAV__
     <div class=\"app-main\">
       <div class=\"wrap\">
@@ -7059,7 +9550,13 @@ APP_HTML = """<!doctype html>
             <p id=\"pipeline-help\" class=\"muted\"></p>
           </div>
         </details>
-        <button id=\"run\" type=\"button\" data-testid=\"investigation-run\" onclick=\"window.runInvestigationSafe && window.runInvestigationSafe(); return false;\" title=\"Execute selected investigation pipeline with current settings\">Run Investigation</button>
+        <div class="invest-run-actions">
+          <button id=\"run\" type=\"button\" data-testid=\"investigation-run\" onclick=\"window.runInvestigationSafe && window.runInvestigationSafe(); return false;\" title=\"Execute selected investigation pipeline with current settings\">Run Investigation</button>
+          <button id="stop-run" type="button" class="invest-stop-btn" style="display:none;" data-testid="investigation-stop">
+            <span class="invest-stop-spinner" aria-hidden="true"></span>
+            Stop
+          </button>
+        </div>
         <div id="run-progress-wrap" class="run-progress-wrap" style="display:none;">
           <div class="run-progress-meta">
             <span id="run-progress-label">Preparing investigation...</span>
@@ -7072,10 +9569,7 @@ APP_HTML = """<!doctype html>
             <span id="run-progress-stage" class="run-progress-detail">Stage: waiting to start</span>
             <span id="run-progress-elapsed" class="run-progress-detail">Elapsed: 0s</span>
           </div>
-          <div id="run-progress-note" class="run-progress-note">This panel shows whether the delay is coming from planning, Splunk retrieval, or evidence review.</div>
-          <div class="run-progress-actions">
-            <button id="cancel-run" type="button" class="btn-secondary" style="display:none; margin-top:0;">Cancel In Browser</button>
-          </div>
+          <div id="run-progress-note" class="run-progress-note">Progress follows completed LangGraph stages when available. During long waits the bar stays indeterminate instead of guessing.</div>
         </div>
         <div class=\"control-status\">
           <div class=\"control-status-head\">
@@ -7428,6 +9922,7 @@ APP_HTML = """<!doctype html>
     </div>
       </div>
     </div>
+    __RUNTIME_RAIL__
   </div>
   <script>
     window.runInvestigationSafe = async function () {
@@ -7445,13 +9940,27 @@ APP_HTML = """<!doctype html>
       const summaryEl = byId('summary');
       const supportedEl = byId('brief-supported');
       const runBtnEl = byId('run');
+      const stopBtnEl = byId('stop-run');
       if (!questionEl || !statusEl || !runBtnEl) {
         return false;
       }
+      function syncInvestRunButtons(running) {
+        runBtnEl.hidden = Boolean(running);
+        runBtnEl.disabled = Boolean(running);
+        if (stopBtnEl) {
+          stopBtnEl.style.display = running ? 'inline-flex' : 'none';
+          stopBtnEl.disabled = false;
+          stopBtnEl.classList.remove('is-aborting');
+          stopBtnEl.setAttribute('aria-busy', 'false');
+        }
+      }
       try {
-        runBtnEl.disabled = true;
+        syncInvestRunButtons(true);
         statusEl.textContent = 'Running...';
         if (supportedEl) supportedEl.textContent = 'Running';
+        if (typeof window.notifyRuntimeRailRunStart === 'function') {
+          window.notifyRuntimeRailRunStart();
+        }
         const payload = {
           question: questionEl.value || '',
           session_id: sessionEl ? sessionEl.value : '',
@@ -7460,12 +9969,26 @@ APP_HTML = """<!doctype html>
           pipeline: pipelineEl ? pipelineEl.value : 'multi_model',
         };
         runAbortController = new AbortController();
-        const resp = await fetch('/api/ask', {
+        const resp = await fetch('/api/ask/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
+          signal: runAbortController.signal,
         });
-        const data = await resp.json();
+        if (!resp.ok) {
+          statusEl.textContent = 'Error';
+          if (supportedEl) supportedEl.textContent = 'Error';
+          if (outputEl) outputEl.textContent = `Request failed (${resp.status})`;
+          return false;
+        }
+        const stageHandler = typeof window.handleAskStreamStage === 'function'
+          ? window.handleAskStreamStage
+          : (typeof window.updateRuntimeRailFromStage === 'function'
+            ? window.updateRuntimeRailFromStage
+            : () => {});
+        const data = typeof window.consumeAskStream === 'function'
+          ? await window.consumeAskStream(resp, stageHandler)
+          : await resp.json();
         if (!resp.ok) {
           statusEl.textContent = 'Error';
           if (supportedEl) supportedEl.textContent = 'Error';
@@ -7476,14 +9999,26 @@ APP_HTML = """<!doctype html>
         if (supportedEl) supportedEl.textContent = data?.result?.supported === false ? 'Blocked' : 'Supported';
         if (summaryEl) summaryEl.textContent = String(data?.result?.summary || '');
         if (outputEl) outputEl.textContent = JSON.stringify(data, null, 2);
+        if (typeof window.completeRuntimeRailJourneyFromWorkflow === 'function') {
+          window.completeRuntimeRailJourneyFromWorkflow(data?.result?.model_workflow, data?.result);
+        } else if (typeof window.notifyRuntimeRailRunEnd === 'function') {
+          window.notifyRuntimeRailRunEnd();
+        }
         return true;
       } catch (err) {
-        statusEl.textContent = 'Request failed';
-        if (supportedEl) supportedEl.textContent = 'Error';
+        const aborted = err && err.name === 'AbortError';
+        statusEl.textContent = aborted
+          ? 'Cancelled in browser. The server may still finish the current request.'
+          : 'Request failed';
+        if (supportedEl) supportedEl.textContent = aborted ? 'Cancelled' : 'Error';
         if (outputEl) outputEl.textContent = String(err);
+        if (aborted && typeof window.notifyRuntimeRailRunEnd === 'function') {
+          window.notifyRuntimeRailRunEnd();
+        }
         return false;
       } finally {
-        runBtnEl.disabled = false;
+        runAbortController = null;
+        syncInvestRunButtons(false);
       }
     };
   </script>
@@ -7491,12 +10026,41 @@ APP_HTML = """<!doctype html>
     const $ = (id) => document.getElementById(id);
     const runBtn = $('run');
     const continueBtn = $('continue-btn');
-    const cancelRunBtn = $('cancel-run');
+    const stopRunBtn = $('stop-run');
     const drawerJsonToggleBtn = $('drawer-json-toggle');
     let runProgressTimer = null;
     let runProgressValue = 0;
+    let runProgressIndeterminate = false;
+    let runProgressStageInfo = null;
+    let runProgressLastEventAt = 0;
     let runStartAt = 0;
     let runAbortController = null;
+    let investigationRunActive = false;
+
+    function syncInvestRunButtons(running) {
+      investigationRunActive = Boolean(running);
+      if (runBtn) {
+        runBtn.disabled = investigationRunActive;
+        runBtn.hidden = investigationRunActive;
+      }
+      if (stopRunBtn) {
+        stopRunBtn.style.display = investigationRunActive ? 'inline-flex' : 'none';
+        stopRunBtn.disabled = false;
+        stopRunBtn.classList.remove('is-aborting');
+        stopRunBtn.setAttribute('aria-busy', 'false');
+      }
+    }
+
+    function cancelInvestigationRun() {
+      if (!runAbortController || (stopRunBtn && stopRunBtn.classList.contains('is-aborting'))) return;
+      if (stopRunBtn) {
+        stopRunBtn.disabled = true;
+        stopRunBtn.classList.add('is-aborting');
+        stopRunBtn.setAttribute('aria-busy', 'true');
+      }
+      runAbortController.abort();
+    }
+
     let lastAskResult = null;
     let pendingContinuationState = null;
     let selectedFollowup = null;
@@ -8999,7 +11563,7 @@ APP_HTML = """<!doctype html>
         result?.query_args?.earliest_time ||
         result?.final_adjudication?.selected_args?.earliest_time ||
         result?.evidence?.time_window?.earliest_time ||
-        '-24h@h'
+        '-7d'
       );
       const latest = String(
         result?.query_args?.latest_time ||
@@ -9380,7 +11944,7 @@ APP_HTML = """<!doctype html>
       const support = reviewClaimSupport(result);
       const decision = decisionGuidanceForResult(result);
       const coverage = extractCoverage(result || {}, extractExecutedSPL(result || {}));
-      const windowLabel = `${String(result?.query_args?.earliest_time || result?.final_adjudication?.selected_args?.earliest_time || '-24h')} -> ${String(result?.query_args?.latest_time || result?.final_adjudication?.selected_args?.latest_time || 'now')}`;
+      const windowLabel = `${String(result?.query_args?.earliest_time || result?.final_adjudication?.selected_args?.earliest_time || '-7d')} -> ${String(result?.query_args?.latest_time || result?.final_adjudication?.selected_args?.latest_time || 'now')}`;
       const items = [
         ['Decision', decision.label || 'n/a'],
         ['Confidence', confidenceDisplayValue(result, coverage)],
@@ -9446,7 +12010,7 @@ APP_HTML = """<!doctype html>
       const runtime = latestRun?.execution_ms ? `${latestRun.execution_ms} ms` : 'n/a';
       const rows = String(result?.rows_returned ?? latestRun?.rows_returned ?? 'n/a');
       const tool = result?.selected_tool || result?.final_adjudication?.selected_tool || 'unknown';
-      const windowLabel = `${String(result?.query_args?.earliest_time || result?.final_adjudication?.selected_args?.earliest_time || '-24h')} -> ${String(result?.query_args?.latest_time || result?.final_adjudication?.selected_args?.latest_time || 'now')}`;
+      const windowLabel = `${String(result?.query_args?.earliest_time || result?.final_adjudication?.selected_args?.earliest_time || '-7d')} -> ${String(result?.query_args?.latest_time || result?.final_adjudication?.selected_args?.latest_time || 'now')}`;
       const splLink = $('spl-link');
       $('spl-meta-strip').innerHTML = [
         ['Runtime', runtime],
@@ -9471,7 +12035,7 @@ APP_HTML = """<!doctype html>
             result?.query_args?.earliest_time ||
             result?.final_adjudication?.selected_args?.earliest_time ||
             result?.evidence?.time_window?.earliest_time ||
-            '-24h@h'
+            '-7d'
           );
         const latest =
           String(
@@ -11054,15 +13618,146 @@ APP_HTML = """<!doctype html>
     }
 
 
-    function currentRunStage(value, elapsedMs) {
-      const pct = Number(value || 0);
+    function currentRunStage(_value, elapsedMs) {
       const elapsed = Number(elapsedMs || 0);
-      if (pct < 18) return { title: 'Question intake and guardrails', note: 'The controller is checking that the request stays inside read-only investigation scope before any tool can run.', status: 'Checking request scope and selecting the investigation path.', timeline: 'Guardrails are validating the question and choosing the allowed path.' };
-      if (pct < 48) return { title: 'Planning and SPL drafting', note: elapsed > 20000 ? 'This delay is usually model-side planning or SPL drafting, not Splunk retrieval.' : 'The planner and writer are building a bounded SPL approach for this question.', status: 'Planner and writer are building the bounded SPL path.', timeline: 'Model roles are planning the search strategy and drafting the first SPL candidate.' };
-      if (pct < 76) return { title: 'Splunk retrieval and evidence collection', note: 'The approved read-only path is retrieving evidence or metadata from Splunk.', status: 'Retrieving evidence from Splunk and checking first-pass results.', timeline: 'The bounded plan is executing against Splunk and collecting evidence rows.' };
-      if (pct < 92) return { title: 'Evidence review and pivot generation', note: elapsed > 45000 ? 'This run is taking longer than usual. The delay is now more likely in evidence review or peer reasoning than in Splunk retrieval.' : 'Returned evidence is being reviewed and turned into analyst-facing pivots and ATT&CK context.', status: 'Reviewing evidence quality and forming the next analyst actions.', timeline: 'The evidence reviewers are checking the returned rows and deciding what matters.' };
-      return { title: 'Final analyst summary', note: elapsed > 45000 ? 'This run is taking longer than usual. You can keep waiting, or cancel in the browser and retry a narrower question or shorter time window.' : 'The final summary is being assembled for the analyst view.', status: 'Finalizing the analyst-facing answer and page sections.', timeline: 'The controller is packaging the final answer, coverage view, and pivots.' };
+      if (runProgressStageInfo) {
+        const title = String(runProgressStageInfo.title || runProgressStageInfo.label || 'Investigation running');
+        const note = String(
+          runProgressStageInfo.note
+          || (runProgressIndeterminate
+            ? 'Waiting on the next pipeline stage. The percentage stays hidden until the server reports another completed stage.'
+            : 'The controller is working through the current pipeline stage.')
+        );
+        return {
+          title,
+          note: elapsed > 45000 && runProgressIndeterminate
+            ? `${note} This run is taking longer than usual; you can keep waiting or cancel and retry a narrower question.`
+            : note,
+          status: String(runProgressStageInfo.label || title),
+          timeline: title,
+        };
+      }
+      return {
+        title: 'Starting investigation',
+        note: 'Waiting for the investigation pipeline to begin.',
+        status: 'Starting investigation...',
+        timeline: 'The controller is preparing the run.',
+      };
     }
+
+    function phaseStateForRunProgress() {
+      const pct = runProgressIndeterminate ? -1 : Number(runProgressValue || 0);
+      if (pct < 18) return { detect: 'in_progress', triage: 'planned', investigate: 'planned' };
+      if (pct < 68) return { detect: 'complete', triage: 'in_progress', investigate: 'planned' };
+      if (pct < 88) return { detect: 'complete', triage: 'complete', investigate: 'in_progress' };
+      return { detect: 'complete', triage: 'complete', investigate: 'in_progress' };
+    }
+
+    function applyRunProgressUi() {
+      const bar = $('run-progress-bar');
+      const track = bar ? bar.parentElement : null;
+      if (bar) {
+        bar.classList.toggle('indeterminate', Boolean(runProgressIndeterminate));
+        if (!runProgressIndeterminate) {
+          bar.style.width = `${Math.max(0, Math.min(100, Number(runProgressValue || 0)))}%`;
+        } else {
+          bar.style.width = '';
+        }
+      }
+      if (track) track.classList.toggle('indeterminate', Boolean(runProgressIndeterminate));
+      if ($('run-progress-pct')) {
+        $('run-progress-pct').textContent = runProgressIndeterminate ? 'Working...' : `${Math.round(runProgressValue)}%`;
+      }
+    }
+
+    function setRunProgressFromStageEvent(event={}) {
+      runProgressLastEventAt = Date.now();
+      runProgressStageInfo = {
+        title: event.title || '',
+        label: event.label || '',
+        note: event.note || '',
+        node: event.node || '',
+      };
+      if (event.indeterminate || event.progress_pct === null || event.progress_pct === undefined) {
+        runProgressIndeterminate = true;
+      } else {
+        runProgressIndeterminate = false;
+        runProgressValue = Math.max(runProgressValue || 0, Number(event.progress_pct || 0));
+      }
+      if (event.label) $('run-progress-label').textContent = event.label;
+      $('run-progress-wrap').style.display = 'block';
+      applyRunProgressUi();
+      refreshRunningUi();
+      if (typeof window.updateRuntimeRailFromStage === 'function') {
+        window.updateRuntimeRailFromStage(event);
+      }
+    }
+
+    function parseSseBuffer(buffer, onEvent) {
+      const chunks = buffer.split('\n\n');
+      const remainder = chunks.pop() || '';
+      for (const chunk of chunks) {
+        if (!chunk.trim()) continue;
+        const lines = chunk.split('\n').filter(Boolean);
+        let eventName = 'message';
+        const dataLines = [];
+        for (const line of lines) {
+          if (line.startsWith('event:')) eventName = line.slice(6).trim();
+          else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+        }
+        if (!dataLines.length) continue;
+        let payload = null;
+        try { payload = JSON.parse(dataLines.join('\n')); } catch (_e) { continue; }
+        onEvent(eventName, payload);
+      }
+      return remainder;
+    }
+
+    async function consumeAskStream(resp, onStage, options = {}) {
+      const streamLabel = String(options.context || options.streamLabel || 'Investigation').trim() || 'Investigation';
+      const hint = streamLabel === 'MCP'
+        ? 'Verify Splunk MCP credentials, confirm Ollama is reachable from the UI container (not just the host), and check agtsmith-ui-deploy logs.'
+        : 'Verify Ollama and Splunk MCP connectivity, then check server logs for packaging or serialization errors.';
+      if (!resp.body) throw new Error(`${streamLabel} streaming body unavailable`);
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalPayload = null;
+      let streamError = null;
+
+      function handleEvent(eventName, payload) {
+        if (eventName === 'stage' && typeof onStage === 'function') onStage(payload || {});
+        if (eventName === 'spl_ready' && typeof options.onSplReady === 'function') options.onSplReady(payload || {});
+        if (eventName === 'complete') {
+          finalPayload = payload || null;
+          if (typeof options.onComplete === 'function') options.onComplete(finalPayload);
+        }
+        if (eventName === 'error') {
+          const message = String(payload?.message || payload?.code || `${streamLabel} stream failed`);
+          streamError = new Error(message);
+        }
+      }
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (value) {
+          buffer += decoder.decode(value, { stream: true });
+          buffer = parseSseBuffer(buffer, handleEvent);
+        }
+        if (streamError) throw streamError;
+        if (finalPayload) {
+          try { await reader.cancel(); } catch (_cancelErr) {}
+          break;
+        }
+        if (done) break;
+      }
+      buffer += decoder.decode();
+      buffer = parseSseBuffer(buffer, handleEvent);
+      if (streamError) throw streamError;
+      if (!finalPayload) throw new Error(`${streamLabel} stream ended before completion. ${hint}`);
+      return finalPayload;
+    }
+    window.consumeAskStream = consumeAskStream;
 
     function refreshRunningUi() {
       const elapsedMs = runStartAt ? (Date.now() - runStartAt) : 0;
@@ -11105,49 +13800,49 @@ APP_HTML = """<!doctype html>
         evidenceHtml: `<div class="evidence-empty">${esc(stage.timeline)}</div>`,
       });
       $('decision-support-summary').innerHTML = `<div class="support-item"><div class="support-label">Current stage</div><div class="support-value">${esc(stage.title)}</div></div><div class="support-item"><div class="support-label">Delay source</div><div class="support-value">${esc(stage.note)}</div></div>`;
-      const phaseState = runProgressValue < 18
-        ? { detect: 'in_progress', triage: 'planned', investigate: 'planned' }
-        : runProgressValue < 48
-          ? { detect: 'complete', triage: 'in_progress', investigate: 'planned' }
-          : { detect: 'complete', triage: 'complete', investigate: 'in_progress' };
+      const phaseState = phaseStateForRunProgress();
       renderPhaseStrip(phaseState);
       syncDrawerMirrors();
     }
     async function executeInvestigation(options = {}) {
-      function setRunProgress(value, label='') {
-        runProgressValue = Math.max(0, Math.min(100, Number(value || 0)));
+      function setRunProgress(value, label='', opts={}) {
+        if (opts.indeterminate) {
+          runProgressIndeterminate = true;
+        } else {
+          runProgressIndeterminate = false;
+          runProgressValue = Math.max(0, Math.min(100, Number(value || 0)));
+        }
         $('run-progress-wrap').style.display = 'block';
-        $('run-progress-bar').style.width = `${runProgressValue}%`;
-        $('run-progress-pct').textContent = `${Math.round(runProgressValue)}%`;
         if (label) $('run-progress-label').textContent = label;
+        applyRunProgressUi();
         refreshRunningUi();
       }
 
       function startRunProgress() {
         if (runProgressTimer) clearInterval(runProgressTimer);
         runStartAt = Date.now();
-        if (cancelRunBtn) cancelRunBtn.style.display = 'inline-flex';
-        setRunProgress(2, 'Starting investigation...');
+        runProgressLastEventAt = runStartAt;
+        runProgressValue = 0;
+        runProgressIndeterminate = true;
+        runProgressStageInfo = {
+          title: 'Starting investigation',
+          label: 'Starting investigation...',
+          note: 'Waiting for the server to report the first completed pipeline stage.',
+        };
+        if (stopRunBtn) stopRunBtn.style.display = 'inline-flex';
+        syncInvestRunButtons(true);
+        setRunProgress(0, 'Starting investigation...', { indeterminate: true });
+        if (typeof window.notifyRuntimeRailRunStart === 'function') {
+          window.notifyRuntimeRailRunStart();
+        }
         runProgressTimer = setInterval(() => {
-          if (runProgressValue < 18) {
-            setRunProgress(runProgressValue + 2.2, 'Checking read-only scope...');
-            return;
-          }
-          if (runProgressValue < 48) {
-            setRunProgress(runProgressValue + 1.6, 'Planning and drafting SPL...');
-            return;
-          }
-          if (runProgressValue < 76) {
-            setRunProgress(runProgressValue + 0.8, 'Retrieving evidence from Splunk...');
-            return;
-          }
-          if (runProgressValue < 92) {
-            setRunProgress(runProgressValue + 0.35, 'Reviewing evidence and pivots...');
-            return;
-          }
-          if (runProgressValue < 96) {
-            setRunProgress(runProgressValue + 0.08, 'Finalizing analyst summary...');
-            return;
+          const idleMs = Date.now() - (runProgressLastEventAt || runStartAt || Date.now());
+          if (idleMs > 12000 && !runProgressIndeterminate) {
+            runProgressIndeterminate = true;
+            if (runProgressStageInfo) {
+              runProgressStageInfo.note = 'Waiting on the next pipeline stage. Progress stays indeterminate until the server reports another completed stage.';
+            }
+            applyRunProgressUi();
           }
           refreshRunningUi();
         }, 1000);
@@ -11160,13 +13855,14 @@ APP_HTML = """<!doctype html>
         }
         const elapsedMs = runStartAt ? (Date.now() - runStartAt) : 0;
         const elapsedSec = Math.max(0, Math.round(elapsedMs / 1000));
-        if (cancelRunBtn) cancelRunBtn.style.display = 'none';
+        if (stopRunBtn) stopRunBtn.style.display = 'none';
         $('run-progress-wrap').style.display = 'block';
+        runProgressIndeterminate = false;
         if (cancelled) {
           runProgressValue = Math.max(runProgressValue || 0, 1);
           $('run-progress-label').textContent = 'Investigation cancelled in browser.';
           $('run-progress-pct').textContent = `${Math.round(runProgressValue)}%`;
-          $('run-progress-bar').style.width = `${runProgressValue}%`;
+          applyRunProgressUi();
           if ($('run-progress-stage')) $('run-progress-stage').textContent = 'Stage: Browser cancellation';
           if ($('run-progress-elapsed')) $('run-progress-elapsed').textContent = `Elapsed: ${elapsedSec}s`;
           if ($('run-progress-note')) $('run-progress-note').textContent = 'The browser stopped waiting for this run. The server may still complete it in the background. Retry a narrower question, reduce the time window, or target a more specific platform or index if needed.';
@@ -11174,7 +13870,7 @@ APP_HTML = """<!doctype html>
           runProgressValue = 100;
           $('run-progress-label').textContent = finalOk ? 'Investigation complete.' : 'Investigation failed.';
           $('run-progress-pct').textContent = '100%';
-          $('run-progress-bar').style.width = '100%';
+          applyRunProgressUi();
           if ($('run-progress-stage')) $('run-progress-stage').textContent = `Stage: ${finalOk ? 'Completed' : 'Stopped before completion'}`;
           if ($('run-progress-elapsed')) $('run-progress-elapsed').textContent = `Elapsed: ${elapsedSec}s`;
           if ($('run-progress-note')) $('run-progress-note').textContent = finalOk
@@ -11182,9 +13878,14 @@ APP_HTML = """<!doctype html>
             : 'The run stopped before a final investigation view could be completed. Check the status and output for the failure reason, then retry a narrower question or shorter time window if needed.';
         }
         runStartAt = 0;
+        runProgressStageInfo = null;
+        if (typeof window.notifyRuntimeRailRunEnd === 'function') {
+          window.notifyRuntimeRailRunEnd();
+        }
       }
 
       runBtn.disabled = true;
+      syncInvestRunButtons(true);
       syncRunButtonPriority('question');
       lastAskResult = null;
       $('status').textContent = 'Starting investigation...';
@@ -11261,60 +13962,57 @@ APP_HTML = """<!doctype html>
           pivot_candidate: options.pivot_candidate || null,
         };
         runAbortController = new AbortController();
-        const resp = await fetch('/api/ask', {
+        const resp = await fetch('/api/ask/stream', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify(payload),
           signal: runAbortController.signal
         });
-        setRunProgress(94, 'Finalizing investigation output...');
-        const data = await resp.json();
         if (!resp.ok) {
-          $('status').innerHTML = '<span class="warn">Error</span>';
-          renderInvestigationJourney(data.result || data || {});
-          renderWorkflowTimeline(data.result || data || {});
-          $('output').textContent = JSON.stringify(data, null, 2);
-          renderContinuationControls(data.result || {});
-          runAbortController = null;
-          stopRunProgress(false);
-        } else {
-          lastAskResult = data.result || {};
-          if (lastAskResult && typeof lastAskResult === 'object') {
-            lastAskResult = {
-              ...lastAskResult,
-              splunk_search_url_base: data.splunk_search_url_base || lastAskResult.splunk_search_url_base || '',
-            };
-          }
-          if (lastAskResult?.case_context?.case_id && lastAskResult?.case_context?.node_id) {
-            latestCaseRef = {
-              case_id: String(lastAskResult.case_context.case_id),
-              node_id: String(lastAskResult.case_context.node_id),
-            };
-          }
-          inspectingSavedNode = false;
-          if (Array.isArray(data.sample_rows)) {
-            lastAskResult.__ui_sample_rows = data.sample_rows;
-          }
-          const result = lastAskResult || {};
-          $('status').textContent = hasEvidenceRows(result) ? 'Complete' : 'Complete (No Hits)';
-          if (hasEvidenceRows(result)) {
-            $('summary').innerHTML = renderSummaryText(result?.summary || '');
-            renderModelDecisions(result || {});
-            renderTDIRCase(result || {});
-            renderInvestigationJourney(result || {});
-            renderWorkflowTimeline(result || {});
-            renderContinuationControls(result || {});
-          } else {
-            renderNoEvidenceOutcome(result || {});
-            $('model-personas').innerHTML = '';
-            $('model-decisions').innerHTML = '';
-            $('workflow-track').innerHTML = '';
-            $('workflow-meta').textContent = '';
-            clearContinuationControls();
-          }
-          $('output').textContent = JSON.stringify(data, null, 2);
-          stopRunProgress(true);
+          let errPayload = null;
+          try { errPayload = await resp.json(); } catch (_e) {}
+          throw new Error(String(errPayload?.error || errPayload?.message || `Investigation request failed (${resp.status})`));
         }
+        const data = await consumeAskStream(resp, setRunProgressFromStageEvent);
+        lastAskResult = data.result || {};
+        if (lastAskResult && typeof lastAskResult === 'object') {
+          lastAskResult = {
+            ...lastAskResult,
+            splunk_search_url_base: data.splunk_search_url_base || lastAskResult.splunk_search_url_base || '',
+          };
+        }
+        if (lastAskResult?.case_context?.case_id && lastAskResult?.case_context?.node_id) {
+          latestCaseRef = {
+            case_id: String(lastAskResult.case_context.case_id),
+            node_id: String(lastAskResult.case_context.node_id),
+          };
+        }
+        inspectingSavedNode = false;
+        if (Array.isArray(data.sample_rows)) {
+          lastAskResult.__ui_sample_rows = data.sample_rows;
+        }
+        const result = lastAskResult || {};
+        $('status').textContent = hasEvidenceRows(result) ? 'Complete' : 'Complete (No Hits)';
+        if (typeof window.completeRuntimeRailJourneyFromWorkflow === 'function') {
+          window.completeRuntimeRailJourneyFromWorkflow(result.model_workflow, result);
+        }
+        if (hasEvidenceRows(result)) {
+          $('summary').innerHTML = renderSummaryText(result?.summary || '');
+          renderModelDecisions(result || {});
+          renderTDIRCase(result || {});
+          renderInvestigationJourney(result || {});
+          renderWorkflowTimeline(result || {});
+          renderContinuationControls(result || {});
+        } else {
+          renderNoEvidenceOutcome(result || {});
+          $('model-personas').innerHTML = '';
+          $('model-decisions').innerHTML = '';
+          $('workflow-track').innerHTML = '';
+          $('workflow-meta').textContent = '';
+          clearContinuationControls();
+        }
+        $('output').textContent = JSON.stringify(data, null, 2);
+        stopRunProgress(true);
       } catch (e) {
         const aborted = e && e.name === 'AbortError';
         if (aborted) {
@@ -11387,8 +14085,8 @@ APP_HTML = """<!doctype html>
         }
       } finally {
         runAbortController = null;
+        syncInvestRunButtons(false);
         runBtn.disabled = false;
-        if (cancelRunBtn) cancelRunBtn.style.display = 'none';
       }
     }
 
@@ -11452,11 +14150,15 @@ APP_HTML = """<!doctype html>
       hintTimer = setTimeout(refreshDomainHints, 220);
     });
     refreshDomainHints();
-    if (cancelRunBtn) {
-      cancelRunBtn.onclick = () => {
-        if (runAbortController) runAbortController.abort();
-      };
+    if (stopRunBtn) {
+      stopRunBtn.onclick = () => cancelInvestigationRun();
     }
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && investigationRunActive) {
+        event.preventDefault();
+        cancelInvestigationRun();
+      }
+    });
     if (drawerJsonToggleBtn) {
       drawerJsonToggleBtn.onclick = () => {
         const out = $('output');
@@ -11476,6 +14178,7 @@ APP_HTML = """<!doctype html>
       }
     } catch (_err) {}
   </script>
+  __RUNTIME_RAIL_SCRIPT__
 </body>
 </html>
 """
@@ -11487,16 +14190,16 @@ DOCS_SHELL_HTML = """<!doctype html>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>{title}</title>
-  <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg?v=agtsmith1\" />
-  <link rel=\"icon\" href=\"/favicon.ico?v=agtsmith1\" />
+  <link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg?v=agtsmith2\" />
+  <link rel=\"icon\" href=\"/favicon.ico?v=agtsmith2\" />
   <style>
     :root {{
-      --bg:#0f172a; --card:#111827; --card2:#0b1220; --muted:#9ca3af; --fg:#e5e7eb;
-      --line:#1f2937; --link:#93c5fd; --accent:#22c55e;
+      --bg:#0d1b2a; --bg-edge:#050a14; --card:#0f172a; --card2:#0b1220; --muted:#94a3b8; --fg:#ffffff;
+      --line:#1e293b; --border:#1e293b; --link:#7dd3fc; --accent:#38bdf8;
     }}
     html {{
       min-height:100%;
-      background: linear-gradient(140deg,#0b1220 0%,#111827 65%,#0a1f16 100%);
+      background: radial-gradient(ellipse at center, #0d1b2a 0%, #050a14 100%);
       background-repeat:no-repeat;
       background-size:cover;
     }}
@@ -11504,16 +14207,20 @@ DOCS_SHELL_HTML = """<!doctype html>
       margin:0;
       min-height:100vh;
       font-family: "Trebuchet MS", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif;
-      background: linear-gradient(140deg,#0b1220,#111827 65%,#0a1f16);
+      background: radial-gradient(ellipse at center, #0d1b2a 0%, #050a14 100%);
       background-repeat:no-repeat;
       background-size:cover;
       color:var(--fg);
     }}
+    @property --runtime-rail-width {{ syntax:'<length>'; inherits:true; initial-value:28px; }}
     .app-shell {{
       display:grid;
-      grid-template-columns:64px minmax(0,1fr);
+      --runtime-rail-width:28px;
+      grid-template-columns:64px minmax(0,1fr) var(--runtime-rail-width);
       min-height:100vh;
+      transition:--runtime-rail-width .18s ease;
     }}
+    .app-shell.runtime-rail-expanded {{ --runtime-rail-width: 312px; }}
     .app-main {{
       min-width:0;
       min-height:100vh;
@@ -11528,8 +14235,8 @@ DOCS_SHELL_HTML = """<!doctype html>
       width:64px;
       min-width:64px;
       height:100vh;
-      background:#0a1628;
-      border-right:1px solid #1a2d45;
+      background:#0f172a;
+      border-right:1px solid #1e293b;
       z-index:300;
       box-sizing:border-box;
     }}
@@ -11538,13 +14245,10 @@ DOCS_SHELL_HTML = """<!doctype html>
       align-items:center;
       justify-content:center;
       height:56px;
-      font-size:13px;
-      font-weight:900;
-      letter-spacing:.04em;
-      color:#f8fafc;
-      border-bottom:1px solid rgba(26,45,69,.72);
+      border-bottom:1px solid #1e293b;
       flex-shrink:0;
     }}
+    .rail-logo svg {{ display:block; }}
     .rail-items {{
       display:flex;
       flex-direction:column;
@@ -11559,7 +14263,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       align-items:center;
       gap:8px;
       padding:8px 0 12px;
-      border-top:1px solid rgba(26,45,69,.72);
+      border-top:1px solid #1e293b;
       flex-shrink:0;
     }}
     .rail-item, .rail-item-flyout {{
@@ -11570,7 +14274,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       width:64px;
       height:48px;
       text-decoration:none;
-      color:#8ea4ba;
+      color:#94a3b8;
       transition:color .14s ease, background .14s ease;
     }}
     .rail-item-flyout {{ display:block; }}
@@ -11591,7 +14295,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       bottom:8px;
       width:3px;
       border-radius:0 3px 3px 0;
-      background:linear-gradient(180deg,#22d3ee,#14b8a6);
+      background:linear-gradient(180deg,#38bdf8,#0ea5e9);
       opacity:0;
       transition:opacity .14s ease;
     }}
@@ -11600,7 +14304,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       background:rgba(15,29,50,.55);
     }}
     .rail-item.active, .rail-item-flyout.active {{
-      color:#22d3ee;
+      color:#38bdf8;
       background:rgba(12,28,48,.72);
     }}
     .rail-item.active::before, .rail-item-flyout.active::before {{ opacity:1; }}
@@ -11614,8 +14318,8 @@ DOCS_SHELL_HTML = """<!doctype html>
       transition:background .14s ease, box-shadow .14s ease;
     }}
     .rail-item.active .rail-icon, .rail-item-flyout.active .rail-icon {{
-      background:rgba(34,211,238,.12);
-      box-shadow:0 0 12px rgba(34,211,238,.18);
+      background:rgba(56,189,248,.12);
+      box-shadow:0 0 12px rgba(56,189,248,.18);
     }}
     .rail-svg {{ display:block; }}
     .rail-tooltip {{
@@ -11626,7 +14330,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       padding:7px 12px;
       border:1px solid #2a445c;
       border-radius:999px;
-      background:linear-gradient(180deg,#0f1d32,#0a1628);
+      background:linear-gradient(180deg,#0f1d32,#0f172a);
       color:#e5eef8;
       font-size:12px;
       font-weight:700;
@@ -11852,7 +14556,7 @@ DOCS_SHELL_HTML = """<!doctype html>
     }}
     .docs-rail-sub {{
       margin:0 0 12px;
-      color:#8ea4ba;
+      color:#94a3b8;
       font-size:13px;
       line-height:1.5;
     }}
@@ -11910,7 +14614,7 @@ DOCS_SHELL_HTML = """<!doctype html>
     }}
     .doc-link-meta {{
       display:block;
-      color:#8ea4ba;
+      color:#94a3b8;
       font-size:11.5px;
       line-height:1.35;
     }}
@@ -12658,8 +15362,8 @@ DOCS_SHELL_HTML = """<!doctype html>
     }}
     .welcome-btn.primary {{
       border:0;
-      background:linear-gradient(135deg,#22c55e,#16a34a);
-      color:#03230f;
+      background:linear-gradient(135deg,#38bdf8,#0ea5e9);
+      color:#041723;
     }}
     .shell-footer {{
       display:flex;
@@ -12702,10 +15406,11 @@ DOCS_SHELL_HTML = """<!doctype html>
       .arch-panels {{ grid-template-columns: 1fr; }}
       .env-list {{ grid-template-columns: 1fr; }}
     }}
+    {runtime_rail_styles}
   </style>
 </head>
 <body data-smith-user="{onboarding_user}" data-smith-role="{onboarding_role}">
-  <div class=\"app-shell\">
+  <div class=\"app-shell\" id=\"app-shell\">
     {nav}
     <div class=\"app-main\">
       <div class=\"wrap\">
@@ -12713,8 +15418,10 @@ DOCS_SHELL_HTML = """<!doctype html>
         <div class=\"shell-footer\"><span class=\"shell-version\">A.G.E.N.T. Smith {app_version}</span></div>
       </div>
     </div>
+    {runtime_rail}
   </div>
   {onboarding_modal}
+  {runtime_rail_script}
   <script type="module">
     import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
     mermaid.initialize({{ startOnLoad: true, theme: 'dark', securityLevel: 'loose' }});
@@ -13406,7 +16113,7 @@ def _docs_view_body(path_value: str) -> str:
             (
                 '<h1 class="doc-brand-title">'
                 '<span>A.G.E.N.T. Smith</span>'
-                '<img class="doc-brand-icon" src="/favicon.svg?v=agtsmith1" alt="A.G.E.N.T. Smith icon" />'
+                '<img class="doc-brand-icon" src="/favicon.svg?v=agtsmith2" alt="A.G.E.N.T. Smith icon" />'
                 "</h1>"
             ),
             1,
@@ -13436,14 +16143,14 @@ def _favicon_preview_body() -> str:
   <div style=\"display:flex; gap:14px; flex-wrap:wrap; align-items:flex-start;\">
     <div class=\"card\" style=\"max-width:420px;\">
       <h3>320px</h3>
-      <img src=\"/favicon.svg?v=agtsmith1\" alt=\"A.G.E.N.T. Smith favicon\" width=\"320\" height=\"320\" style=\"background:#020617; border:1px solid #223245; border-radius:10px;\" />
+      <img src=\"/favicon.svg?v=agtsmith2\" alt=\"A.G.E.N.T. Smith favicon\" width=\"320\" height=\"320\" style=\"background:#020617; border:1px solid #223245; border-radius:10px;\" />
     </div>
     <div class=\"card\" style=\"max-width:220px;\">
       <h3>128px</h3>
-      <img src=\"/favicon.svg?v=agtsmith1\" alt=\"A.G.E.N.T. Smith favicon\" width=\"128\" height=\"128\" style=\"background:#020617; border:1px solid #223245; border-radius:10px;\" />
+      <img src=\"/favicon.svg?v=agtsmith2\" alt=\"A.G.E.N.T. Smith favicon\" width=\"128\" height=\"128\" style=\"background:#020617; border:1px solid #223245; border-radius:10px;\" />
     </div>
   </div>
-  <p><a href=\"/favicon.svg?v=agtsmith1\">Open raw SVG</a></p>
+  <p><a href=\"/favicon.svg?v=agtsmith2\">Open raw SVG</a></p>
 </div>
 """
 
@@ -14953,9 +17660,9 @@ def _configure_page_body() -> str:
     .cfg-artifacts-body{padding:12px 0 4px;display:grid;gap:14px;}
     .cfg-shell button{
       margin-top:0;
-      background:linear-gradient(135deg,#22c55e,#14b86a);
-      color:#03210d;
-      border:1px solid rgba(134,239,172,.22);
+      background:linear-gradient(135deg,#38bdf8,#0ea5e9);
+      color:#041723;
+      border:1px solid rgba(125,211,252,.28);
       border-radius:16px;
       font-weight:800;
       padding:12px 16px;
@@ -15082,7 +17789,7 @@ def _configure_page_body() -> str:
       <div class="cfg-row wide">
         <label for="cfg-splunk-token">Splunk MCP bearer token</label>
         <div class="cfg-example">Env: <code>SPLUNK_LAB_BEARER_TOKEN</code> — Stored server-side; masked unless revealed.</div>
-        <input id="cfg-splunk-token" type="password" placeholder="Bearer token value" autocomplete="off" />
+        <input id="cfg-splunk-token" type="password" placeholder="Bearer token value" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" />
         <div id="cfg-splunk-token-view" class="cfg-secret-view" aria-live="polite"></div>
         <div id="cfg-token-note" class="cfg-secret-note" style="display:none;">Token is revealed in a wrapped read-only view. Hide it to return to the compact masked editor or replace it.</div>
         <div class="cfg-actions" style="margin-top:6px;">
@@ -15094,6 +17801,9 @@ def _configure_page_body() -> str:
       </div>
       <h3>UI Access</h3>
       <div class="cfg-row"><label for="cfg-auth-enabled">SOC_UI_AUTH_ENABLED</label><div class="cfg-example">Keep this enabled for a guarded multi-user UI. First-run setup creates the initial user automatically.</div><div class="cfg-select-wrap"><select id="cfg-auth-enabled"><option value="1">1</option><option value="0">0</option></select></div></div>
+      <div class="cfg-row"><label for="cfg-session-timeout">SOC_UI_SESSION_TIMEOUT_MIN</label><div class="cfg-example">Idle timeout in minutes before an inactive browser session expires. Each authenticated request extends the session.</div><input id="cfg-session-timeout" type="number" min="5" max="1440" placeholder="60" /></div>
+      <div class="cfg-row"><label for="cfg-session-remember-timeout">SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN</label><div class="cfg-example">Longer idle timeout when the user selects Remain logged in at sign-in.</div><input id="cfg-session-remember-timeout" type="number" min="60" max="10080" placeholder="480" /></div>
+      <div class="cfg-row wide"><label>Current browser session</label><div id="cfg-session-status" class="cfg-note">Loading session details...</div></div>
       </div>
       <span id="cfg-status" class="cfg-status" style="display:none;">Loading current values...</span>
      </div>
@@ -15502,6 +18212,25 @@ def _configure_page_body() -> str:
   let cfgTokenReveal = false;
   let cfgTokenActual = '';
   let cfgTokenFetched = false;
+  let cfgTokenEditSeq = 0;
+  let cfgLastSecretState = {};
+  function cfgRefreshTokenState(){
+    const stateEl = cfg$('cfg-token-state');
+    if(!stateEl){ return; }
+    const raw = String(cfgReadValue('cfg-splunk-token') || '').trim();
+    const masked = String(cfgLastSecretState?.splunk_token_masked || '').trim();
+    if(raw && raw !== '__KEEP_EXISTING_SPLUNK_TOKEN__'){
+      stateEl.textContent = 'Draft token in form — Test MCP uses it immediately; Save Configuration to persist it.';
+      return;
+    }
+    if(cfgTokenMasked || cfgSecretTokenPresent){
+      stateEl.textContent = cfgSecretTokenPresent
+        ? `Saved token detected (${masked || 'masked'}). Leave the field as-is to keep it, replace it to rotate it, or clear it to remove it.`
+        : 'Saved token loaded in masked form. Reveal to inspect, replace to rotate, or clear to remove.';
+      return;
+    }
+    stateEl.textContent = 'No saved token detected.';
+  }
   function cfgHasBearerToken(){
     const raw = cfgReadValue('cfg-splunk-token');
     if(raw && raw !== '__KEEP_EXISTING_SPLUNK_TOKEN__'){ return true; }
@@ -16158,18 +18887,24 @@ def _configure_page_body() -> str:
     cfgTokenFetched = true;
     return cfgTokenActual;
   }
-  function cfgApplyPayload(values){
+  function cfgApplyPayload(values, options){
     const payload = values || {};
+    const opts = options || {};
+    const skipToken = Boolean(opts.skipToken);
     cfgSetValue('cfg-ollama-host', payload.OLLAMA_HOST || '');
     cfgSetValue('cfg-splunk-base', payload.SPLUNK_BASE_URL || '');
     cfgSetValue('cfg-splunk-web', payload.SPLUNK_WEB_URL || '');
     cfgSetValue('cfg-splunk-mcp', payload.SPLUNK_MCP_URL || '');
-    cfgSetValue('cfg-splunk-token', payload.SPLUNK_LAB_BEARER_TOKEN || '');
-    cfgTokenMasked = String(payload.SPLUNK_LAB_BEARER_TOKEN || '') === '__KEEP_EXISTING_SPLUNK_TOKEN__';
-    cfgTokenActual = '';
-    cfgTokenFetched = false;
-    cfgShowMaskedTokenEditor();
+    if(!skipToken){
+      cfgSetValue('cfg-splunk-token', payload.SPLUNK_LAB_BEARER_TOKEN || '');
+      cfgTokenMasked = String(payload.SPLUNK_LAB_BEARER_TOKEN || '') === '__KEEP_EXISTING_SPLUNK_TOKEN__';
+      cfgTokenActual = '';
+      cfgTokenFetched = false;
+      cfgShowMaskedTokenEditor();
+    }
     cfgSetValue('cfg-auth-enabled', payload.SOC_UI_AUTH_ENABLED || '1');
+    cfgSetValue('cfg-session-timeout', payload.SOC_UI_SESSION_TIMEOUT_MIN || '60');
+    cfgSetValue('cfg-session-remember-timeout', payload.SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN || '480');
     cfgSetValue('cfg-edge-enabled', payload.EDGE_LLM_ENABLED || '0');
     cfgSetValue('cfg-edge-host', payload.EDGE_LLM_HOST || '');
     cfgSetValue('cfg-edge-model', payload.EDGE_LLM_MODEL || '');
@@ -16189,12 +18924,9 @@ def _configure_page_body() -> str:
   }
   function cfgApplySecretState(secretState){
     const meta = secretState || {};
-    const present = Boolean(meta.splunk_token_present);
-    cfgSecretTokenPresent = present;
-    const masked = String(meta.splunk_token_masked || '').trim();
-    cfg$('cfg-token-state').textContent = present
-      ? `Saved token detected (${masked || 'masked'}). Leave the field as-is to keep it, replace it to rotate it, or clear it to remove it.`
-      : 'No saved token detected.';
+    cfgLastSecretState = meta;
+    cfgSecretTokenPresent = Boolean(meta.splunk_token_present);
+    cfgRefreshTokenState();
     cfgUpdateLaneHints();
   }
   const cfgDefaultAssignments = {
@@ -16412,6 +19144,8 @@ def _configure_page_body() -> str:
       SPLUNK_MCP_URL: cfgReadValue('cfg-splunk-mcp'),
       SPLUNK_LAB_BEARER_TOKEN: cfgTokenMasked && !tokenValue ? '' : (tokenValue || (cfgTokenMasked ? '__KEEP_EXISTING_SPLUNK_TOKEN__' : '')),
       SOC_UI_AUTH_ENABLED: cfgReadValue('cfg-auth-enabled'),
+      SOC_UI_SESSION_TIMEOUT_MIN: cfgReadValue('cfg-session-timeout'),
+      SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN: cfgReadValue('cfg-session-remember-timeout'),
       EDGE_LLM_ENABLED: cfgReadValue('cfg-edge-enabled'),
       EDGE_LLM_HOST: cfgReadValue('cfg-edge-host'),
       EDGE_LLM_MODEL: cfgReadValue('cfg-edge-model'),
@@ -16684,6 +19418,25 @@ def _configure_page_body() -> str:
     cfgUpdateNextAction(cfgLastValidation || {});
     cfgUpdateLaneHealthPills(cfgLastValidation || {expected_models: cfgLastExpectedModels});
   }
+  async function cfgLoadSessionStatus(){
+    const statusEl = cfg$('cfg-session-status');
+    if(!statusEl){ return; }
+    try{
+      const resp = await fetch('/api/session/status');
+      const data = await resp.json();
+      if(!resp.ok){
+        statusEl.textContent = data.error || `Session status unavailable (${resp.status}).`;
+        return;
+      }
+      const expiresIn = Number(data.expires_in_seconds || 0);
+      const minutes = Math.max(1, Math.ceil(expiresIn / 60));
+      const remember = data.remember ? 'Remain logged in enabled' : 'Standard session';
+      const lastActivity = data.last_activity_at ? new Date(Number(data.last_activity_at) * 1000).toLocaleString() : 'unknown';
+      statusEl.textContent = `${remember}. Idle limit ${data.timeout_minutes || 60} min. Last activity ${lastActivity}. Expires in about ${minutes} min if idle.`;
+    } catch(err){
+      statusEl.textContent = `Session status unavailable: ${err}`;
+    }
+  }
   async function cfgLoad(){
     try{
       const depResp = await fetch('/api/config/dependencies');
@@ -16701,6 +19454,7 @@ def _configure_page_body() -> str:
     if(!resp.ok){ cfgSetStatus(data.error || `load failed (${resp.status})`); return; }
     cfgRender(data);
     cfgSetStatus('Loaded current configuration.');
+    await cfgLoadSessionStatus();
     if(String(data.environment_profile_refresh?.state || '') === 'in_progress'){
       await cfgPollEnvRefresh();
     }
@@ -16711,6 +19465,7 @@ def _configure_page_body() -> str:
   }
   async function cfgValidate(){
     const draft = cfgCollectPayload();
+    const tokenSeqAtStart = cfgTokenEditSeq;
     cfgSetStatus('Validating live connections...');
     const resp = await fetch('/api/config/validate', {
       method:'POST',
@@ -16719,13 +19474,13 @@ def _configure_page_body() -> str:
     });
     const data = await resp.json();
     if(!resp.ok){
-      cfgApplyPayload(draft);
+      cfgApplyPayload(draft, {skipToken: tokenSeqAtStart !== cfgTokenEditSeq});
       cfgSetStatus(data.error || `validation failed (${resp.status})`);
       cfg$('cfg-edge-status').textContent = data.error || `edge validation failed (${resp.status})`;
       return;
     }
     if(Array.isArray(data.ollama_available_models)){ cfgPopulateModelOptions(data.ollama_available_models); }
-    cfgApplyPayload(draft);
+    cfgApplyPayload(draft, {skipToken: tokenSeqAtStart !== cfgTokenEditSeq});
     cfgRenderModelCompare(draft, data.ollama_available_models || [], data.expected_models || []);
     cfgRenderValidation(data);
     cfgRenderEdgeModelOptions(data.edge_ollama_available_models || []);
@@ -16745,6 +19500,7 @@ def _configure_page_body() -> str:
   }
   async function cfgValidateEdge(){
     const draft = cfgCollectPayload();
+    const tokenSeqAtStart = cfgTokenEditSeq;
     cfg$('cfg-edge-status').textContent = 'Validating edge helper...';
     const resp = await fetch('/api/config/validate', {
       method:'POST',
@@ -16753,11 +19509,11 @@ def _configure_page_body() -> str:
     });
     const data = await resp.json();
     if(!resp.ok){
-      cfgApplyPayload(draft);
+      cfgApplyPayload(draft, {skipToken: tokenSeqAtStart !== cfgTokenEditSeq});
       cfg$('cfg-edge-status').textContent = data.error || `edge validation failed (${resp.status})`;
       return;
     }
-    cfgApplyPayload(draft);
+    cfgApplyPayload(draft, {skipToken: tokenSeqAtStart !== cfgTokenEditSeq});
     cfgRenderEdgeModelOptions(data.edge_ollama_available_models || []);
     cfgRenderEdgeValidation(data);
     cfg$('cfg-edge-checks').textContent = data.connectivity_checks?.edge_ollama_tags || 'Edge helper disabled or not configured.';
@@ -16765,6 +19521,7 @@ def _configure_page_body() -> str:
   }
   async function cfgProbeMcp(){
     const draft = cfgCollectPayload();
+    const tokenSeqAtStart = cfgTokenEditSeq;
     cfgSetStatus('Running live MCP probe...');
     const resp = await fetch('/api/config/mcp-probe', {
       method:'POST',
@@ -16773,7 +19530,7 @@ def _configure_page_body() -> str:
     });
     const data = await resp.json();
     if(!resp.ok){
-      cfgApplyPayload(draft);
+      cfgApplyPayload(draft, {skipToken: tokenSeqAtStart !== cfgTokenEditSeq});
       cfgRenderMcpProbe({
         status: 'error',
         detail: data.error || `MCP probe failed (${resp.status})`
@@ -16781,7 +19538,7 @@ def _configure_page_body() -> str:
       cfgSetStatus(data.error || `MCP probe failed (${resp.status})`);
       return;
     }
-    cfgApplyPayload(draft);
+    cfgApplyPayload(draft, {skipToken: tokenSeqAtStart !== cfgTokenEditSeq});
     cfgRenderMcpProbe(data);
     cfgSetStatus(data.detail || 'MCP probe complete.');
   }
@@ -17025,17 +19782,20 @@ def _configure_page_body() -> str:
     cfgTokenMasked = false;
     cfgTokenActual = '';
     cfgTokenFetched = false;
+    cfgTokenEditSeq += 1;
     cfgShowMaskedTokenEditor();
-    cfg$('cfg-token-state').textContent = 'Token cleared in the draft form. Save Configuration to remove it from runtime.';
+    cfgRefreshTokenState();
     cfgUpdateLaneHints();
   };
   cfg$('cfg-splunk-token').addEventListener('input', () => {
     const tokenInput = cfg$('cfg-splunk-token');
+    cfgTokenEditSeq += 1;
     if(String(tokenInput.value || '').trim() !== '__KEEP_EXISTING_SPLUNK_TOKEN__'){
       cfgTokenMasked = false;
       cfgTokenActual = String(tokenInput.value || '');
       cfgTokenFetched = false;
     }
+    cfgRefreshTokenState();
     cfgUpdateLaneHints();
   });
   cfgBindConnectFieldHints();
@@ -17065,9 +19825,6 @@ def _configure_page_body_rendered() -> str:
         .replace("__CONFIGURE_UI_TAG__", html.escape(CONFIGURE_UI_TAG))
     )
 
-APP_HTML = APP_HTML.replace("__APP_VERSION_LABEL__", html.escape(APP_VERSION_LABEL))
-APP_HTML = APP_HTML.replace("__CONFIGURE_UI_TAG__", html.escape(CONFIGURE_UI_TAG))
-APP_HTML = APP_HTML.replace("__GLOBAL_NAV__", _global_nav("investigation"))
 
 
 def _remote_log_config_status() -> dict[str, Any]:
@@ -17092,7 +19849,7 @@ def _ollama_ops_page_body() -> str:
     .ops-help{margin:0 0 12px;color:#9fb4cc;font-size:13px;line-height:1.55;}
     .ops-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;}
     .ops-actions input,.ops-actions select{background:#040c18;color:#f8fafc;border:1px solid #33506a;border-radius:12px;padding:10px 12px;font-size:13px;}
-    .ops-actions button{appearance:none;border:0;border-radius:12px;padding:10px 14px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#03230f;font-weight:900;cursor:pointer;font-size:13px;}
+    .ops-actions button{appearance:none;border:0;border-radius:12px;padding:10px 14px;background:linear-gradient(135deg,#38bdf8,#0ea5e9);color:#041723;font-weight:900;cursor:pointer;font-size:13px;}
     .ops-actions .btn-secondary{background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;border:1px solid #315a79;}
     .ops-status{color:#9fb4cc;font-size:13px;margin-bottom:10px;}
     .ops-loaded{display:grid;gap:8px;margin-top:10px;}
@@ -17417,7 +20174,7 @@ def _users_page_body() -> str:
     .users-hero p{margin:0;color:#a8c0d8;font-size:14px;line-height:1.65;}
     .users-tabs{display:flex;gap:10px;flex-wrap:wrap;}
     .users-tab{appearance:none;border:1px solid #315a79;border-radius:14px;padding:10px 14px;background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;font-weight:800;cursor:pointer;font-size:13px;}
-    .users-tab.active{background:linear-gradient(135deg,#22c55e,#16a34a);color:#03230f;border-color:#22c55e;}
+    .users-tab.active{background:linear-gradient(135deg,#38bdf8,#0ea5e9);color:#041723;border-color:#22c55e;}
     .users-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;}
     .users-panel{border:1px solid #23445f;border-radius:18px;background:linear-gradient(180deg,#081525,#06111d);padding:18px;}
     .users-panel h2{margin:0 0 10px;font-size:18px;}
@@ -17429,7 +20186,7 @@ def _users_page_body() -> str:
     .users-row input,.users-row select{width:100%;box-sizing:border-box;background:#040c18;color:#f8fafc;border:1px solid #33506a;border-radius:14px;padding:12px 14px;font-size:14px;outline:none;}
     .users-row input:focus,.users-row select:focus{border-color:#60a5fa;box-shadow:0 0 0 3px rgba(96,165,250,.15);}
     .users-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;}
-    .users-actions button{appearance:none;border:0;border-radius:14px;padding:12px 16px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#03230f;font-weight:900;cursor:pointer;font-size:14px;}
+    .users-actions button{appearance:none;border:0;border-radius:14px;padding:12px 16px;background:linear-gradient(135deg,#38bdf8,#0ea5e9);color:#041723;font-weight:900;cursor:pointer;font-size:14px;}
     .users-actions .btn-secondary{background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;border:1px solid #315a79;}
     .users-status{color:#9fb4cc;font-size:13px;}
     .users-list{display:grid;gap:10px;}
@@ -17675,7 +20432,7 @@ def _learning_page_body() -> str:
     .learning-panel h2{margin:0 0 10px;font-size:18px;}
     .learning-help{margin:0 0 10px;color:#9fb4cc;font-size:13px;line-height:1.55;}
     .learning-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;}
-    .learning-actions button,.learning-actions a{appearance:none;border:0;border-radius:14px;padding:12px 16px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#03230f;font-weight:900;cursor:pointer;font-size:14px;text-decoration:none;}
+    .learning-actions button,.learning-actions a{appearance:none;border:0;border-radius:14px;padding:12px 16px;background:linear-gradient(135deg,#38bdf8,#0ea5e9);color:#041723;font-weight:900;cursor:pointer;font-size:14px;text-decoration:none;}
     .learning-actions .btn-secondary{background:linear-gradient(180deg,#16324a,#102435);color:#dbeafe;border:1px solid #315a79;}
     .learning-status{color:#9fb4cc;font-size:13px;}
     .learning-badges{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;}
@@ -18913,588 +21670,1319 @@ def _spl_asset_repository_page_body() -> str:
 
 
 def _mcp_page_body() -> str:
-    return """
-<div class=\"card\">
+    template = """
+
+<div class="mcp-page">
   <style>
-    .mcp-shell { display:grid; grid-template-columns: 1.02fr .98fr; gap:12px; }
-    .page-mode-banner {
-      display:grid;
-      gap:8px;
-      padding:14px 16px;
-      margin-bottom:12px;
-      border:1px solid #27415a;
-      border-radius:14px;
-      background:linear-gradient(180deg,#081729,#07111f);
-      box-shadow:0 12px 26px rgba(0,0,0,.18);
+    body:has(.mcp-page) .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 16px 28px 0;
+      min-height: calc(100vh - 32px);
+      display: flex;
+      flex-direction: column;
+      box-sizing: border-box;
     }
-    .page-mode-banner.live { border-color:#315a79; }
-    .page-mode-banner.demo {
-      border-color:#b45309;
-      background:linear-gradient(180deg,#2b1606,#160d04);
-      box-shadow:0 0 0 1px rgba(245,158,11,.16), 0 14px 32px rgba(18,8,0,.28);
+    body:has(.mcp-page) .app-main { background: radial-gradient(ellipse 120% 80% at 50% -10%, #0f1a2e 0%, #0b0f19 45%, #060c14 100%); }
+    .mcp-page {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      gap: 14px;
+    }
+    .mcp-page-header { margin-bottom: 0; flex-shrink: 0; }
+    .mcp-header-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .mcp-header-copy { flex: 1; min-width: 0; }
+    .mcp-page-header h1 { margin: 0; font-size: 24px; letter-spacing: .2px; color: #f8fafc; font-weight: 800; }
+    .mcp-page-header .muted { font-size: 13px; line-height: 1.55; max-width: 720px; margin: 6px 0 0; color: #94a3b8; }
+    .mcp-layout {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      gap: 12px;
+    }
+    .mcp-user-query-row {
+      flex-shrink: 0;
+      display: flex;
+      justify-content: flex-end;
+      padding: 0 4px;
+      min-height: 36px;
+    }
+    .mcp-composer-bottom {
+      flex-shrink: 0;
+      margin-top: auto;
+      padding: 14px 4px 4px;
+      border-top: 1px solid #1e293b;
+      background: linear-gradient(180deg, rgba(4,8,16,.72), rgba(6,12,20,.92));
+      border-radius: 12px 12px 0 0;
+    }
+    .mcp-tab-nav-shell {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+      flex-shrink: 0;
+      padding: 0 4px;
+    }
+    .mcp-tab-nav {
+      display: flex;
+      align-items: stretch;
+      flex: 1;
+      min-width: 0;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      background: rgba(11,18,32,.88);
+      overflow: hidden;
+    }
+    .mcp-tab-btn {
+      appearance: none;
+      margin: 0;
+      flex: 1;
+      padding: 11px 14px 13px;
+      border: none;
+      border-bottom: 3px solid transparent;
+      border-radius: 0;
+      background: transparent;
+      color: #64748b;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      white-space: nowrap;
+      box-shadow: none;
+      position: relative;
+      transition: color .14s ease, border-color .14s ease, background .14s ease, box-shadow .14s ease;
+    }
+    .mcp-tab-btn + .mcp-tab-btn { border-left: 1px solid #1e293b; }
+    .mcp-tab-btn:hover { color: #cbd5e1; background: rgba(15,23,42,.55); }
+    .mcp-tab-btn.active {
+      color: #3eb1ff;
+      border-bottom-color: #3eb1ff;
+      background: rgba(15,23,42,.78);
+      box-shadow: inset 0 -8px 18px rgba(62,177,255,.12);
+    }
+    .mcp-tab-overflow {
+      appearance: none;
+      margin: 0;
+      padding: 0 14px;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      background: rgba(11,18,32,.88);
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      transition: color .14s ease, border-color .14s ease, background .14s ease;
+    }
+    .mcp-tab-overflow:hover { color: #cbd5e1; border-color: #334155; }
+    .mcp-tab-overflow.active {
+      color: #3eb1ff;
+      border-color: rgba(62,177,255,.45);
+      background: rgba(15,23,42,.78);
+    }
+    .mcp-tab-icon {
+      display: inline-flex;
+      width: 16px;
+      height: 16px;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      opacity: .78;
+    }
+    .mcp-tab-btn.active .mcp-tab-icon { color: #3eb1ff; opacity: 1; }
+    .mcp-run-strip {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+      flex-shrink: 0;
+      padding: 8px 12px;
+      border-bottom: 1px solid #1e293b;
+      background: rgba(15,23,42,.65);
+    }
+    .mcp-run-strip[hidden] { display: none !important; }
+    .mcp-run-step {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #64748b;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 999px;
+      transition: color .14s ease, background .14s ease;
+    }
+    .mcp-run-step.active { color: #7dd3fc; background: rgba(34,161,227,.14); }
+    .mcp-run-step.done { color: #86efac; }
+    .mcp-run-step-icon {
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      border: 1px solid currentColor;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      line-height: 1;
+    }
+    .mcp-run-step.active .mcp-run-step-icon {
+      border-color: #22a1e3;
+      background: rgba(34,161,227,.22);
+      box-shadow: 0 0 10px rgba(34,161,227,.35);
+    }
+    .mcp-run-step.done .mcp-run-step-icon {
+      border-color: #22c55e;
+      background: rgba(34,197,94,.18);
+    }
+    .mcp-run-connector {
+      width: 28px;
+      height: 1px;
+      background: #334155;
+      flex-shrink: 0;
+    }
+    .mcp-run-connector.done { background: #22c55e; }
+    .mcp-tab-workspace {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      padding: 0 4px 8px;
+    }
+    .mcp-tab-panel {
+      display: none;
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+    }
+    .mcp-tab-panel.active { display: flex; flex-direction: column; }
+    .mcp-panel-card,
+    .mcp-card {
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      background: #0f172a;
+      padding: 16px 18px 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.18);
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .mcp-panel-role {
+      color: #94a3b8;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+    .mcp-answer-card-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .mcp-spark-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 8px;
+      background: rgba(62,177,255,.14);
+      color: #3eb1ff;
+      font-size: 14px;
+      line-height: 1;
+      box-shadow: 0 0 14px rgba(62,177,255,.22);
+    }
+    .mcp-answer-card-head h2 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 800;
+      color: #f8fafc;
+      letter-spacing: .01em;
+    }
+    .mcp-user-bubble-wrap {
+      display: flex;
+      justify-content: flex-end;
+      width: 100%;
+    }
+    .mcp-user-bubble {
+      max-width: min(720px, 100%);
+      border: 1px solid rgba(62,177,255,.28);
+      border-radius: 999px;
+      background: linear-gradient(180deg, rgba(14,116,144,.24), rgba(8,47,73,.2));
+      padding: 9px 14px 9px 18px;
+      box-shadow: 0 8px 22px rgba(0,0,0,.16);
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .mcp-user-bubble-text {
+      color: #e2e8f0;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: min(560px, 72vw);
+    }
+    .mcp-user-bubble-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #64748b;
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+    .mcp-user-bubble-check {
+      color: #3eb1ff;
+      font-size: 12px;
+      line-height: 1;
+      font-weight: 700;
+    }
+    .mcp-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .mcp-card-head .mcp-panel-role { margin-bottom: 0; }
+    .mcp-card-head h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      color: #e5eef8;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .mcp-card-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      background: rgba(56,189,248,.12);
+      color: #38bdf8;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .mcp-card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .mcp-tool-btn {
+      appearance: none;
+      margin: 0;
+      padding: 7px 12px;
+      border-radius: 10px;
+      border: 1px solid #2a445c;
+      background: linear-gradient(180deg, #102235, #0c1a2a);
+      color: #c7d8eb;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: none;
+      transition: border-color .14s ease, color .14s ease, background .14s ease;
+    }
+    .mcp-tool-btn:hover {
+      transform: none;
+      filter: none;
+      border-color: #38bdf8;
+      color: #e5eef8;
+      background: #0f2236;
+      box-shadow: 0 0 0 1px rgba(56,189,248,.12);
+    }
+    .mcp-tool-btn:focus-visible {
+      outline: none;
+      border-color: #38bdf8;
+      box-shadow: 0 0 0 2px rgba(56,189,248,.24);
+    }
+    .mcp-chip-bar,
+    .page-mode-banner {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
     }
     .page-mode-banner-head {
-      display:flex;
-      align-items:flex-start;
-      justify-content:space-between;
-      gap:10px;
-      flex-wrap:wrap;
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
-    .page-mode-banner-state {
-      display:flex;
-      align-items:center;
-      gap:8px;
-      flex-wrap:wrap;
-    }
-    .page-mode-banner-kicker {
-      color:#8fb6d9;
-      font-size:11px;
-      font-weight:900;
-      letter-spacing:.08em;
-      text-transform:uppercase;
-    }
+    .page-mode-banner-kicker { display: none; }
+    .page-mode-banner-state { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .page-mode-banner-copy {
-      color:#dbeafe;
-      font-size:13px;
-      line-height:1.55;
-    }
-    .page-mode-banner.demo .page-mode-banner-kicker,
-    .page-mode-banner.demo .page-mode-banner-copy {
-      color:#fef3c7;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+      border: 0;
     }
     .page-mode-badge {
-      display:inline-flex;
-      align-items:center;
-      padding:6px 10px;
-      border-radius:999px;
-      border:1px solid #315a79;
-      background:#0a2034;
-      color:#dbeafe;
-      font-size:12px;
-      font-weight:800;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 11px;
+      border-radius: 999px;
+      border: 1px solid #1e293b;
+      background: #0b1220;
+      color: #cbd5e1;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .02em;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
     }
-    .page-mode-badge.pipeline-assisted {
-      border-color:#0f766e;
-      background:#072b2c;
-      color:#ccfbf1;
-    }
-    .page-mode-badge.pipeline-deterministic {
-      border-color:#475569;
-      background:#111827;
-      color:#e2e8f0;
-    }
-    .page-mode-badge.mode-live {
-      border-color:#166534;
-      background:#052e16;
-      color:#bbf7d0;
+    .page-mode-badge.pipeline-assisted { border-color: #334155; background: #0f172a; color: #cbd5e1; }
+    .page-mode-badge.pipeline-deterministic { border-color: #475569; background: #111827; color: #e2e8f0; }
+    .page-mode-badge.mode-live { border-color: #166534; background: rgba(5,46,22,.55); color: #86efac; }
+    .page-mode-badge.mode-live::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: #22c55e;
+      box-shadow: 0 0 8px rgba(34,197,94,.55);
+      flex-shrink: 0;
     }
     .page-mode-badge.mode-demo,
-    .page-mode-banner.demo .page-mode-badge.mode-demo {
-      border-color:#f59e0b;
-      background:#422006;
-      color:#fef3c7;
+    .page-mode-banner.demo .page-mode-badge.mode-demo { border-color: #b45309; background: rgba(66,32,6,.72); color: #fcd34d; }
+    .mcp-planning-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid #334155;
+      background: #0b1220;
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 800;
     }
-    .mcp-pane {
-      background: linear-gradient(170deg,#081a2c,#071321);
-      border:1px solid #294560;
-      border-radius: 14px;
-      padding: 12px;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    .mcp-planning-status.complete { border-color: #166534; background: rgba(5,46,22,.55); color: #86efac; }
+    .mcp-planning-status.running { border-color: #0369a1; background: rgba(8,47,73,.55); color: #7dd3fc; }
+    .mcp-planning-hints-shell {
+      margin-top: 10px;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      background: #0b1220;
+      padding: 8px 10px;
     }
-    .mcp-pane h2 { margin:0 0 8px; font-size:18px; }
-    .mcp-sub { color:#abc1d7; font-size:12px; line-height:1.45; margin-bottom:8px; }
+    .mcp-planning-hints-shell summary {
+      cursor: pointer;
+      color: #cbd5e1;
+      font-size: 12px;
+      font-weight: 700;
+      list-style: none;
+    }
+    .mcp-planning-hints-shell summary::-webkit-details-marker { display: none; }
+    .mcp-ask-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: stretch;
+    }
     .mcp-prompt {
-      min-height: 170px;
-      border:1px solid #3b5f7f;
-      background:#051120;
-      color:#e5e7eb;
-      border-radius:10px;
-      padding:12px;
-      font-size:14px;
-      line-height:1.45;
-      resize:vertical;
-      box-sizing:border-box;
-      width:100%;
-      font-family:"Trebuchet MS","Segoe UI","Helvetica Neue",Helvetica,sans-serif;
+      min-height: 72px;
+      border: 1px solid #1e293b;
+      background: #0b1220;
+      color: #e5e7eb;
+      border-radius: 10px;
+      padding: 14px 16px;
+      font-size: 14px;
+      line-height: 1.45;
+      resize: vertical;
+      box-sizing: border-box;
+      width: 100%;
+      font-family: "Trebuchet MS","Segoe UI","Helvetica Neue",Helvetica,sans-serif;
+      transition: border-color .15s ease, box-shadow .15s ease;
     }
-    .mcp-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+    .mcp-prompt:focus {
+      outline: none;
+      border-color: #3eb1ff;
+      box-shadow: 0 0 0 2px rgba(62,177,255,.16);
+    }
+    .mcp-run-actions {
+      display: flex;
+      flex-direction: row;
+      gap: 8px;
+      align-items: stretch;
+      align-self: stretch;
+    }
+    .mcp-run-split {
+      display: inline-flex;
+      align-items: stretch;
+      align-self: stretch;
+      border-radius: 10px;
+      overflow: visible;
+      box-shadow: 0 4px 14px rgba(34,161,227,.18);
+    }
+    .mcp-run-menu-wrap {
+      position: relative;
+      display: inline-flex;
+      align-self: stretch;
+      overflow: visible;
+      z-index: 60;
+    }
+    .mcp-run-btn {
+      margin: 0;
+      align-self: stretch;
+      min-width: 118px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 16px;
+      min-height: 72px;
+      border: 1px solid rgba(62,177,255,.42);
+      border-radius: 0;
+      background: linear-gradient(180deg, #3eb1ff 0%, #22a1e3 100%);
+      color: #031018;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.24);
+      transition: filter .14s ease, background .14s ease;
+    }
+    .mcp-run-btn-main {
+      border-right: 0;
+      border-radius: 10px 0 0 10px;
+    }
+    .mcp-run-btn-chevron {
+      min-width: 0;
+      width: 34px;
+      padding: 0;
+      border-left: 1px solid rgba(3,16,24,.18);
+      border-radius: 0 10px 10px 0;
+      color: rgba(3,16,24,.78);
+      font-size: 11px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .mcp-run-btn-chevron:disabled {
+      opacity: .55;
+      cursor: not-allowed;
+      filter: none;
+    }
+    .mcp-run-btn-main:disabled { opacity: .65; cursor: wait; filter: none; }
+    .mcp-run-btn-main:hover:not(:disabled) { filter: brightness(1.04); }
+    .mcp-run-btn-chevron:not(:disabled) {
+      cursor: pointer;
+      filter: none;
+    }
+    .mcp-run-btn-chevron:hover:not(:disabled) { filter: brightness(1.04); }
+    .mcp-run-menu {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 6px);
+      z-index: 400;
+      min-width: 148px;
+      margin: 0;
+      padding: 4px;
+      list-style: none;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      background: #0f172a;
+      box-shadow: 0 10px 28px rgba(2,6,23,.48);
+    }
+    .mcp-run-menu[hidden] { display: none !important; }
+    .mcp-run-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      margin: 0;
+      padding: 10px 12px;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: #e2e8f0;
+      font-size: 13px;
+      font-weight: 700;
+      text-align: left;
+      cursor: pointer;
+      transition: background .14s ease, color .14s ease;
+    }
+    .mcp-run-menu-item:hover:not(:disabled) {
+      background: rgba(30,41,59,.72);
+    }
+    .mcp-run-menu-item:disabled { opacity: .65; cursor: not-allowed; }
+    .mcp-stop-btn {
+      color: #fecaca;
+    }
+    .mcp-stop-btn:hover:not(:disabled) {
+      background: rgba(127,29,29,.42);
+      color: #fff1f2;
+    }
+    .mcp-run-icon {
+      display: inline-flex;
+      width: 16px;
+      height: 16px;
+      align-items: center;
+      justify-content: center;
+    }
+    .mcp-input-hint { margin: 8px 0 0; color: #7ea2c1; font-size: 12px; }
     .mcp-control-grid {
-      display:grid;
-      grid-template-columns:repeat(2, minmax(0, 1fr));
-      gap:10px;
-      margin-top:10px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 20px;
+      margin-top: 8px;
     }
     .mcp-segment-shell {
-      display:flex;
-      flex-direction:column;
-      gap:6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
     }
     .mcp-segment-label {
-      display:flex;
-      align-items:center;
-      gap:8px;
-      color:#dbeafe;
-      font-size:11px;
-      font-weight:900;
-      letter-spacing:.08em;
-      text-transform:uppercase;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: #64748b;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      white-space: nowrap;
     }
     .mcp-segment-tip {
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      width:18px;
-      height:18px;
-      border-radius:999px;
-      border:1px solid #35546f;
-      background:#0a1624;
-      color:#dbeafe;
-      font-size:11px;
-      font-weight:900;
-      cursor:help;
-      user-select:none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 999px;
+      border: 1px solid #35546f;
+      background: #0a1624;
+      color: #94a3b8;
+      font-size: 9px;
+      font-weight: 800;
+      cursor: help;
+      user-select: none;
+      text-transform: none;
+      letter-spacing: 0;
     }
     .mcp-segment {
-      display:grid;
-      grid-template-columns:repeat(2, minmax(0, 1fr));
-      gap:6px;
-      padding:5px;
-      border:1px solid #27415a;
-      border-radius:999px;
-      background:linear-gradient(180deg,#071321,#091827);
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 0;
+      border: none;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
     }
     .mcp-segment-btn {
-      appearance:none;
-      position:relative;
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      gap:8px;
-      min-height:38px;
-      border:1px solid transparent;
-      border-radius:999px;
-      padding:8px 14px;
-      background:transparent;
-      color:#a7bdd4;
-      text-align:center;
-      cursor:pointer;
-      font-size:13px;
-      font-weight:800;
-      letter-spacing:.01em;
-      transition:transform .14s ease, border-color .14s ease, background .14s ease, color .14s ease, box-shadow .14s ease;
+      appearance: none;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      min-height: 0;
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: rgba(11,22,36,.72);
+      color: #64748b;
+      text-align: center;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.2;
+      margin: 0;
+      box-shadow: none;
+      transition: border-color .14s ease, background .14s ease, color .14s ease;
     }
     .mcp-segment-btn::before {
-      content:"";
-      width:11px;
-      height:11px;
-      border-radius:999px;
-      border:2px solid currentColor;
-      background:transparent;
-      opacity:.72;
-      transition:transform .14s ease, background .14s ease, border-color .14s ease, opacity .14s ease;
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      border: 1.5px solid currentColor;
+      background: transparent;
+      opacity: .75;
+      flex-shrink: 0;
     }
     .mcp-segment-btn:hover {
-      transform:translateY(-1px);
-      border-color:#365674;
-      background:rgba(12,25,41,0.78);
-      color:#eef6ff;
+      border-color: #475569;
+      background: rgba(15,28,45,.88);
+      color: #94a3b8;
+      filter: none;
+      box-shadow: none;
     }
-    .mcp-segment-btn:focus-visible {
-      outline:none;
-      border-color:#93c5fd;
-      box-shadow:0 0 0 2px rgba(147,197,253,0.28);
+    .mcp-segment-btn.active { box-shadow: none; }
+    .mcp-segment-btn[data-tone="assisted"].active,
+    .mcp-segment-btn[data-tone="live"].active {
+      border-color: #22c55e;
+      background: linear-gradient(180deg,#0a3519,#072813);
+      color: #e2e8f0;
     }
-    .mcp-segment-btn.active {
-      box-shadow:0 0 0 1px rgba(255,255,255,0.05) inset, 0 10px 20px rgba(0,0,0,.2);
-    }
-    .mcp-segment-btn.active::before {
-      opacity:1;
-      transform:scale(1.02);
-    }
-    .mcp-segment-btn-title {
-      display:inline-flex;
-      align-items:center;
-      font-size:13px;
-      font-weight:900;
-      line-height:1.1;
-    }
-    .mcp-segment-btn[data-tone="assisted"].active {
-      border-color:#14b8a6;
-      background:linear-gradient(180deg,#0d2d30,#081a22);
-      color:#dafeff;
-    }
-    .mcp-segment-btn[data-tone="assisted"].active::before {
-      border-color:#5eead4;
-      background:#5eead4;
+    .mcp-segment-btn[data-tone="assisted"].active::before,
+    .mcp-segment-btn[data-tone="live"].active::before {
+      border-color: #22c55e;
+      background: #22c55e;
+      opacity: 1;
     }
     .mcp-segment-btn[data-tone="deterministic"].active {
-      border-color:#64748b;
-      background:linear-gradient(180deg,#1f2937,#111827);
-      color:#f8fafc;
+      border-color: #64748b;
+      background: linear-gradient(180deg,#1f2937,#111827);
+      color: #e2e8f0;
     }
     .mcp-segment-btn[data-tone="deterministic"].active::before {
-      border-color:#cbd5e1;
-      background:#cbd5e1;
-    }
-    .mcp-segment-btn[data-tone="live"].active {
-      border-color:#22c55e;
-      background:linear-gradient(180deg,#0a3519,#072813);
-      color:#dcfce7;
-    }
-    .mcp-segment-btn[data-tone="live"].active::before {
-      border-color:#86efac;
-      background:#86efac;
+      border-color: #cbd5e1;
+      background: #cbd5e1;
+      opacity: 1;
     }
     .mcp-segment-btn[data-tone="demo"].active {
-      border-color:#f59e0b;
-      background:linear-gradient(180deg,#4a2404,#2d1503);
-      color:#fef3c7;
+      border-color: #f59e0b;
+      background: linear-gradient(180deg,#4a2404,#2d1503);
+      color: #fcd34d;
     }
     .mcp-segment-btn[data-tone="demo"].active::before {
-      border-color:#fcd34d;
-      background:#fcd34d;
+      border-color: #fcd34d;
+      background: #fcd34d;
+      opacity: 1;
     }
-    .mcp-mode-badge {
-      display:inline-flex;
-      align-items:center;
-      padding:4px 10px;
-      border-radius:999px;
-      border:1px solid #425a73;
-      background:#0c1726;
-      color:#dce9f7;
-      font-size:12px;
-      font-weight:800;
-    }
-    .mcp-mode-badge.assisted {
-      border-color:#0f766e;
-      background:#072b2c;
-      color:#ccfbf1;
-    }
-    .mcp-mode-badge.deterministic {
-      border-color:#64748b;
-      background:#111827;
-      color:#e2e8f0;
-    }
-    .mcp-mode-badge.live {
-      border-color:#166534;
-      background:#052e16;
-      color:#bbf7d0;
-    }
-    .mcp-mode-badge.demo {
-      border-color:#92400e;
-      background:#2a1606;
-      color:#fde68a;
-    }
-    .mcp-send {
-      margin-top:0;
-      background:#22c55e;
-      color:#04210e;
-      border:0;
-      border-radius:10px;
-      font-weight:800;
-      padding:11px 14px;
-      cursor:pointer;
-    }
+    .mcp-status-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
     .mcp-status-pill {
-      display:inline-block;
-      border:1px solid #2d4f6c;
-      border-radius:999px;
-      padding:3px 10px;
-      font-size:12px;
-      color:#dbeafe;
-      background:#0a2338;
+      display: inline-block;
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 11px;
+      color: #94a3b8;
+      background: #0b1220;
     }
-    .mcp-status-pill.ok { border-color:#166534; background:#052e16; color:#bbf7d0; }
-    .mcp-status-pill.bad { border-color:#7f1d1d; background:#2a0d0d; color:#fecaca; }
+    .mcp-status-pill.ok { border-color: #166534; background: #052e16; color: #bbf7d0; }
+    .mcp-status-pill.bad { border-color: #7f1d1d; background: #2a0d0d; color: #fecaca; }
     .mcp-progress {
-      margin-top:10px;
-      border:1px solid #2a4056;
-      border-radius:10px;
-      background:#07111f;
-      padding:8px;
-      display:none;
+      margin-top: 10px;
+      border: 1px solid #2a4056;
+      border-radius: 10px;
+      background: #07111f;
+      padding: 8px;
+      display: none;
     }
     .mcp-progress-meta {
-      display:flex; justify-content:space-between; gap:8px; align-items:center;
-      font-size:12px; color:#c7d8eb; margin-bottom:6px;
+      display: flex; justify-content: space-between; gap: 8px; align-items: center;
+      font-size: 12px; color: #c7d8eb; margin-bottom: 6px;
     }
     .mcp-progress-track {
-      width:100%; height:10px; border-radius:999px; border:1px solid #1f2937;
-      background:#0b2130; overflow:hidden;
+      width: 100%; height: 10px; border-radius: 999px; border: 1px solid #1f2937;
+      background: #0b2130; overflow: hidden;
     }
     .mcp-progress-bar {
-      width:0%; height:100%; border-radius:999px;
-      background:linear-gradient(90deg,#22c55e,#10b981);
-      transition:width .2s ease;
+      width: 0%; height: 100%; border-radius: 999px;
+      background: linear-gradient(90deg,#38bdf8,#0ea5e9);
+      transition: width .2s ease;
     }
-    .mcp-chat {
-      max-height: 360px;
-      overflow:auto;
-      white-space: pre-wrap;
-      border-radius:10px;
-      border:1px solid #26435c;
-      background:#030b17;
-      padding:10px;
-      font-family:"Consolas","SFMono-Regular",Menlo,monospace;
-      font-size:12.5px;
-      line-height:1.45;
+    .mcp-progress-bar.indeterminate {
+      width: 38% !important;
+      animation: mcp-progress-indeterminate 1.35s ease-in-out infinite;
     }
-    .mcp-summary-card {
-      border:1px solid #27415a;
-      border-radius:12px;
-      background:#07111f;
-      padding:12px;
+    .mcp-progress-track.indeterminate {
+      background: linear-gradient(90deg, rgba(56,189,248,.08), rgba(14,165,233,.16), rgba(56,189,248,.08));
     }
-    .mcp-summary-title {
-      color:#f8fafc;
-      font-size:16px;
-      font-weight:900;
-      line-height:1.3;
-      margin-bottom:6px;
+    @keyframes mcp-progress-indeterminate {
+      0% { transform: translateX(-120%); }
+      50% { transform: translateX(90%); }
+      100% { transform: translateX(220%); }
     }
-    .mcp-summary-copy {
-      color:#dbeafe;
-      font-size:13px;
-      line-height:1.55;
-      white-space:pre-wrap;
+    .mcp-layout.is-running .mcp-tab-nav { position: relative; }
+    .mcp-tab-run-progress {
+      flex-shrink: 0;
+      height: 3px;
+      background: rgba(15,23,42,.85);
+      border-bottom: 1px solid #1e293b;
+      overflow: hidden;
     }
-    .mcp-trust-strip,
-    .mcp-metrics { display:flex; gap:8px; flex-wrap:wrap; }
-    .mcp-trust-strip { margin-top:10px; }
-    .mcp-metric {
-      border:1px solid #28445f;
-      background:#071628;
-      color:#d5e6f8;
-      border-radius:999px;
-      padding:4px 10px;
-      font-size:12px;
-      font-family:"Consolas","SFMono-Regular",Menlo,monospace;
+    .mcp-tab-run-progress[hidden] { display: none !important; }
+    .mcp-tab-run-progress-bar {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg,#38bdf8,#0ea5e9,#38bdf8);
+      background-size: 200% 100%;
+      transition: width .2s ease;
+    }
+    .mcp-tab-run-progress.indeterminate .mcp-tab-run-progress-bar {
+      width: 42% !important;
+      animation: mcp-tab-progress-slide 1.25s ease-in-out infinite, mcp-progress-indeterminate 1.35s ease-in-out infinite;
+    }
+    @keyframes mcp-tab-progress-slide {
+      0% { transform: translateX(-120%); }
+      100% { transform: translateX(320%); }
+    }
+    .mcp-layout.is-running .mcp-status-pill.running {
+      border-color: #0ea5e9;
+      background: linear-gradient(90deg,#0a2338,#0c4a6e);
+      color: #e0f2fe;
+      box-shadow: 0 0 0 0 rgba(56,189,248,.45);
+      animation: mcp-status-pulse 1.5s ease-out infinite;
+    }
+    @keyframes mcp-status-pulse {
+      0% { box-shadow: 0 0 0 0 rgba(56,189,248,.45); }
+      70% { box-shadow: 0 0 0 8px rgba(56,189,248,0); }
+      100% { box-shadow: 0 0 0 0 rgba(56,189,248,0); }
+    }
+    .mcp-layout.is-running .mcp-tab-btn.active {
+      animation: mcp-tab-underline-pulse 1.35s ease-in-out infinite;
+    }
+    @keyframes mcp-tab-underline-pulse {
+      0%, 100% { border-bottom-color: #3eb1ff; box-shadow: inset 0 -8px 18px rgba(62,177,255,.12); }
+      50% { border-bottom-color: #7dd3fc; box-shadow: inset 0 -10px 22px rgba(125,211,252,.18); }
+    }
+    .mcp-layout.is-running .mcp-run-step.active {
+      animation: mcp-run-step-pulse 1.35s ease-in-out infinite;
+    }
+    @keyframes mcp-run-step-pulse {
+      0%, 100% { background: rgba(34,161,227,.14); }
+      50% { background: rgba(34,161,227,.28); }
+    }
+    .mcp-layout.is-running .mcp-composer-bottom {
+      outline: 1px solid rgba(62,177,255,.28);
+      outline-offset: -1px;
+    }
+    .mcp-stop-spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(254,202,202,.35);
+      border-top-color: #fecaca;
+      border-radius: 999px;
+      display: none;
+    }
+    .mcp-stop-btn.is-aborting .mcp-stop-spinner {
+      display: inline-block;
+      animation: mcp-stop-spin .75s linear infinite;
+    }
+    @keyframes mcp-stop-spin {
+      to { transform: rotate(360deg); }
     }
     .mcp-domain-box {
-      border:1px solid #27415a;
-      background:#061423;
-      border-radius:10px;
-      padding:8px;
-      margin-top:8px;
+      border: none;
+      background: transparent;
+      border-radius: 0;
+      padding: 0;
+      margin-top: 0;
     }
+    .mcp-sub { color: #abc1d7; font-size: 12px; line-height: 1.45; margin-bottom: 8px; }
     .mcp-domain-item {
-      border:1px solid #25435f;
-      background:#0a1b2d;
-      border-radius:8px;
-      padding:6px 8px;
-      margin-bottom:6px;
-      font-size:12px;
+      border: 1px solid #25435f;
+      background: #0a1b2d;
+      border-radius: 8px;
+      padding: 6px 8px;
+      margin-bottom: 6px;
+      font-size: 12px;
     }
-    .mcp-domain-item:last-child { margin-bottom:0; }
+    .mcp-domain-item:last-child { margin-bottom: 0; }
     .mcp-domain-item .idx {
-      color:#93c5fd; font-weight:700;
-      font-family:"Consolas","SFMono-Regular",Menlo,monospace;
+      color: #38bdf8;
+      font-weight: 700;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
     }
-    .mcp-spl-row { margin-top:8px; display:flex; justify-content:flex-end; }
-    .mcp-evidence-grid {
-      margin-top:12px;
-      display:grid;
-      grid-template-columns:1.08fr .92fr;
-      gap:12px;
-      align-items:start;
+    .mcp-summary-card {
+      border: none;
+      border-radius: 0;
+      background: transparent;
+      padding: 0;
+      flex: 1;
+      min-height: 0;
     }
-    .mcp-evidence-card {
-      border:1px solid #294560;
-      border-radius:14px;
-      background:linear-gradient(170deg,#081a2c,#071321);
-      padding:12px;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+    .mcp-summary-title {
+      color: #e2e8f0;
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.45;
+      margin-bottom: 10px;
     }
-    .mcp-evidence-head {
-      display:flex;
-      align-items:flex-start;
-      justify-content:space-between;
-      gap:10px;
-      margin-bottom:8px;
-      flex-wrap:wrap;
+    .mcp-summary-copy {
+      color: #cbd5e1;
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+    .mcp-summary-copy ul,
+    .mcp-summary-bullets {
+      margin: 8px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+    .mcp-summary-copy li,
+    .mcp-summary-bullets li {
+      position: relative;
+      padding-left: 16px;
+      margin-bottom: 6px;
+    }
+    .mcp-summary-copy li::before,
+    .mcp-summary-bullets li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: .62em;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: #3eb1ff;
+      box-shadow: 0 0 8px rgba(62,177,255,.45);
+    }
+    .mcp-answer-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid #1e293b;
+    }
+    .mcp-answer-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+    .mcp-tool-btn.btn-splunk {
+      border-color: #2563eb;
+      background: linear-gradient(180deg, #1d4ed8, #1e3a8a);
+      color: #eff6ff;
+    }
+    .mcp-tool-btn.btn-splunk:hover {
+      border-color: #60a5fa;
+      color: #ffffff;
+      background: linear-gradient(180deg, #2563eb, #1d4ed8);
+    }
+    .mcp-answer-time {
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .mcp-trust-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 0; }
+    .mcp-metric {
+      border: 1px solid #1e293b;
+      background: #0b1220;
+      color: #94a3b8;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
     }
     .mcp-transcript-shell,
     .mcp-diagnostics {
-      margin-top:12px;
-      border:1px solid #27415a;
-      border-radius:12px;
-      background:#071628;
-      padding:10px 12px;
+      margin-top: 12px;
+      border: 1px solid #27415a;
+      border-radius: 12px;
+      background: #071628;
+      padding: 10px 12px;
     }
     .mcp-transcript-shell summary,
     .mcp-diagnostics summary {
-      cursor:pointer;
-      color:#dbeafe;
-      font-size:13px;
-      font-weight:800;
-      list-style:none;
-      outline:none;
+      cursor: pointer;
+      color: #dbeafe;
+      font-size: 13px;
+      font-weight: 800;
+      list-style: none;
+      outline: none;
     }
     .mcp-transcript-shell summary::-webkit-details-marker,
-    .mcp-diagnostics summary::-webkit-details-marker { display:none; }
+    .mcp-diagnostics summary::-webkit-details-marker { display: none; }
     .mcp-transcript-shell summary::after,
     .mcp-diagnostics summary::after {
-      content:"Show";
-      float:right;
-      color:#9fb4cc;
-      font-size:12px;
-      font-weight:800;
+      content: "Show";
+      float: right;
+      color: #9fb4cc;
+      font-size: 12px;
+      font-weight: 800;
     }
     .mcp-transcript-shell[open] summary::after,
-    .mcp-diagnostics[open] summary::after { content:"Hide"; }
-    .mcp-results-shell {
-      border:1px solid #26435c;
-      border-radius:10px;
-      background:#030b17;
-      overflow:auto;
+    .mcp-diagnostics[open] summary::after { content: "Hide"; }
+    .mcp-chat {
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      border-radius: 10px;
+      border: 1px solid #26435c;
+      background: #030b17;
+      padding: 10px;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
+      font-size: 12.5px;
+      line-height: 1.45;
+      margin-top: 10px;
     }
-    .mcp-results-table { width:100%; border-collapse:collapse; font-size:12px; }
+    .mcp-spl-shell {
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      background: #040c18;
+      overflow: auto;
+      flex: 1;
+      min-height: 200px;
+      max-height: none;
+    }
+    .mcp-spl-pre {
+      margin: 0;
+      padding: 14px 16px 14px 52px;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #dbeafe;
+      white-space: pre-wrap;
+      word-break: break-word;
+      position: relative;
+      min-height: 72px;
+    }
+    .mcp-spl-pre .spl-kw { color: #86efac; }
+    .mcp-spl-pre .spl-cmd { color: #7dd3fc; }
+    .mcp-spl-pre .spl-str { color: #f9a8d4; }
+    .mcp-spl-pre .spl-op { color: #38bdf8; }
+    .mcp-spl-pre .spl-num { color: #fcd34d; }
+    .mcp-spl-pre .spl-cmt { color: #64748b; font-style: italic; }
+    .mcp-spl-pre .spl-field { color: #c4b5fd; }
+    .mcp-spl-lines {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 42px;
+      padding: 14px 8px;
+      border-right: 1px solid #1e293b;
+      background: rgba(10,22,40,.72);
+      color: #64748b;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      text-align: right;
+      user-select: none;
+      box-sizing: border-box;
+    }
+    .mcp-timing-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid #166534;
+      background: #052e16;
+      color: #bbf7d0;
+      font-size: 12px;
+      font-weight: 800;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
+    }
+    .mcp-timing-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: #22c55e;
+      box-shadow: 0 0 8px rgba(34,197,94,.65);
+    }
+    .mcp-results-shell {
+      border: 1px solid #26435c;
+      border-radius: 12px;
+      background: #030b17;
+      overflow: auto;
+      flex: 1;
+      min-height: 200px;
+      max-height: none;
+    }
+    .mcp-results-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .mcp-results-table th,
     .mcp-results-table td {
-      padding:8px 10px;
-      border-bottom:1px solid rgba(54,83,110,0.55);
-      text-align:left;
-      vertical-align:top;
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(54,83,110,0.45);
+      text-align: left;
+      vertical-align: top;
     }
     .mcp-results-table th {
-      color:#9fc3e2;
-      font-size:11px;
-      text-transform:uppercase;
-      letter-spacing:.08em;
-      background:#071628;
-      position:sticky;
-      top:0;
-      z-index:1;
+      color: #9fc3e2;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      background: #071628;
+      position: sticky;
+      top: 0;
+      z-index: 1;
     }
-    .mcp-results-table tr.mcp-row-link { cursor:pointer; }
-    .mcp-results-table tr.mcp-row-link:hover td { background:#0b1d30; }
+    .mcp-results-table tbody tr:nth-child(even) td { background: rgba(10,22,40,.35); }
+    .mcp-results-table tr.mcp-row-link { cursor: pointer; }
+    .mcp-results-table tr.mcp-row-link:hover td { background: #0b1d30; }
     .mcp-value-tag {
-      display:inline-flex;
-      align-items:center;
-      padding:2px 8px;
-      border-radius:999px;
-      border:1px solid #34597b;
-      white-space:nowrap;
-      max-width:280px;
-      overflow:hidden;
-      text-overflow:ellipsis;
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid #34597b;
+      white-space: nowrap;
+      max-width: 280px;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    @media (max-width: 1080px) {
-      .mcp-shell,.mcp-evidence-grid,.mcp-control-grid { grid-template-columns: 1fr; }
+    .mcp-metrics { display: flex; gap: 8px; flex-wrap: wrap; }
+    #mcp-json {
+      margin-top: 10px;
+      white-space: pre-wrap;
+      background: #020617;
+      border: 1px solid #26435c;
+      border-radius: 10px;
+      padding: 10px;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      flex: 1;
+      min-height: 160px;
+      max-height: none;
+      overflow: auto;
+    }
+    .mcp-diagnostics-panel .mcp-metrics { margin-top: 0; }
+    @media (max-width: 900px) {
+      .mcp-ask-row { grid-template-columns: 1fr; }
+      .mcp-run-btn { min-height: 46px; }
+      .mcp-run-split { width: 100%; }
+      .mcp-run-split .mcp-run-btn-main { flex: 1; }
+      .mcp-control-grid { flex-direction: column; align-items: flex-start; gap: 8px; }
+      body:has(.mcp-page) .wrap { padding: 12px 16px 0; }
     }
   </style>
-  <h1>Splunk MCP Chat</h1>
-  <p class=\"muted\">Ask a natural-language security question. The backend uses the same guarded multi-model + RAG + Data Domain context used by Investigation UI.</p>
-  <div id=\"mcp-mode-banner\" class=\"page-mode-banner live\">
-    <div class=\"page-mode-banner-head\">
-      <div class=\"page-mode-banner-kicker\">Execution Mode</div>
-      <div class=\"page-mode-banner-state\">
-        <span id=\"mcp-pipeline-banner-badge\" class=\"page-mode-badge pipeline-assisted\">LLM-Assisted MCP</span>
-        <span id=\"mcp-mode-banner-badge\" class=\"page-mode-badge mode-live\">Live Mode</span>
+
+  <header class="mcp-page-header">
+    <div class="mcp-header-row">
+      <div class="mcp-header-copy">
+        <h1>Splunk MCP Chat</h1>
+        <p class="muted">Ask questions, explore your Splunk data, and get LLM-assisted answers.</p>
       </div>
-    </div>
-    <div id=\"mcp-mode-banner-copy\" class=\"page-mode-banner-copy\">LLM-Assisted MCP is active. Using the discovered local environment and current time windows.</div>
-  </div>
-  <div class=\"mcp-shell\">
-    <div class=\"mcp-pane\">
-      <h2>Prompt</h2>
-      <div class=\"mcp-sub\">Single natural-language prompt input. No artifact controls.</div>
-      <textarea id=\"mcp-question\" class=\"mcp-prompt\" placeholder=\"Example: Show failed Linux and Windows login activity in the last 24 hours, then summarize suspicious sources.\">Show failed login activity in the last 24 hours</textarea>
-      <div class=\"mcp-control-grid\">
-        <div class=\"mcp-segment-shell\">
-          <div class=\"mcp-segment-label\">Query Engine <span class=\"mcp-segment-tip\" title=\"LLM-Assisted MCP uses the guarded planner, writer, reviewer, and evidence summary path. Deterministic MCP stays on bounded templates as a fallback.\">?</span></div>
-          <div class=\"mcp-segment\" id=\"mcp-pipeline-segment\">
-            <button type=\"button\" class=\"mcp-segment-btn\" data-mcp-pipeline=\"assisted\" data-tone=\"assisted\" title=\"Default analyst mode with guarded query writing.\" aria-pressed=\"false\">
-              <span class=\"mcp-segment-btn-title\">LLM-Assisted</span>
-            </button>
-            <button type=\"button\" class=\"mcp-segment-btn\" data-mcp-pipeline=\"deterministic\" data-tone=\"deterministic\" title=\"Fallback mode with fixed bounded templates.\" aria-pressed=\"false\">
-              <span class=\"mcp-segment-btn-title\">Deterministic</span>
-            </button>
-          </div>
-        </div>
-        <div class=\"mcp-segment-shell\">
-          <div class=\"mcp-segment-label\">Dataset Scope <span class=\"mcp-segment-tip\" title=\"Live Mode uses the current environment. Demo Mode pivots search-style questions to historical public BOTSv3 data and widens time to all time.\">?</span></div>
-          <div class=\"mcp-segment\" id=\"mcp-mode-segment\">
-            <button type=\"button\" class=\"mcp-segment-btn\" data-mcp-mode=\"live\" data-tone=\"live\" title=\"Current environment and current time windows.\" aria-pressed=\"false\">
-              <span class=\"mcp-segment-btn-title\">Live Mode</span>
-            </button>
-            <button type=\"button\" class=\"mcp-segment-btn\" data-mcp-mode=\"demo\" data-tone=\"demo\" title=\"Historical BOTSv3 data across all time.\" aria-pressed=\"false\">
-              <span class=\"mcp-segment-btn-title\">Demo Mode</span>
-            </button>
+      <div id="mcp-mode-banner" class="mcp-chip-bar page-mode-banner live">
+        <div class="page-mode-banner-head">
+          <div class="page-mode-banner-kicker">Execution Mode</div>
+          <div class="page-mode-banner-state">
+            <span id="mcp-pipeline-banner-badge" class="page-mode-badge pipeline-assisted">pipeline=llm_assisted</span>
+            <span id="mcp-mode-banner-badge" class="page-mode-badge mode-live">Live Mode</span>
           </div>
         </div>
       </div>
-      <div class=\"mcp-actions\">
-        <button id=\"mcp-send\" class=\"mcp-send\">Ask Splunk MCP</button>
-        <span id=\"mcp-status-pill\" class=\"mcp-status-pill\">idle</span>
-      </div>
-      <div id=\"mcp-progress\" class=\"mcp-progress\">
-        <div class=\"mcp-progress-meta\">
-          <span id=\"mcp-progress-label\">Preparing MCP query...</span>
-          <span id=\"mcp-progress-pct\">0%</span>
+    </div>
+    <div id="mcp-mode-banner-copy" class="page-mode-banner-copy">LLM-Assisted MCP is active. Using the discovered local environment and current time windows.</div>
+  </header>
+
+  <div class="mcp-layout" id="mcp-layout">
+    <div class="mcp-user-query-row">
+      <div class="mcp-user-bubble-wrap">
+        <div id="mcp-user-bubble" class="mcp-user-bubble" hidden>
+          <div id="mcp-user-bubble-text" class="mcp-user-bubble-text"></div>
+          <div class="mcp-user-bubble-meta">
+            <span id="mcp-user-bubble-time"></span>
+            <span class="mcp-user-bubble-check" aria-hidden="true">&#9992;</span>
+          </div>
         </div>
-        <div class=\"mcp-progress-track\"><div id=\"mcp-progress-bar\" class=\"mcp-progress-bar\"></div></div>
-      </div>
-      <p id=\"mcp-status\" class=\"muted\"></p>
-      <div class=\"mcp-domain-box\">
-        <div class=\"mcp-sub\" style=\"margin:0 0 6px;\">Planning Hints | Likely Data Sources</div>
-        <div id=\"mcp-domain-hints\" class=\"muted\">Run a question to view likely index/sourcetype targets.</div>
       </div>
     </div>
-    <div class=\"mcp-pane\">
-      <h2>Analyst Answer</h2>
-      <div class=\"mcp-sub\">Short answer first. Evidence, SPL, and transcript stay below.</div>
-      <div id=\"mcp-summary-card\" class=\"mcp-summary-card\">
-        <div id=\"mcp-summary-title\" class=\"mcp-summary-title\">Ready for a question</div>
-        <div id=\"mcp-summary-copy\" class=\"mcp-summary-copy\">Run a question to see the analyst-facing answer, evidence summary, and next action.</div>
+
+    <div class="mcp-tab-nav-shell">
+      <nav class="mcp-tab-nav" aria-label="MCP workspace tabs">
+        <button type="button" class="mcp-tab-btn active" data-mcp-tab="answer" aria-selected="true"><span class="mcp-tab-icon" aria-hidden="true">&#128172;</span>Answer</button>
+        <button type="button" class="mcp-tab-btn" data-mcp-tab="spl" aria-selected="false"><span class="mcp-tab-icon" aria-hidden="true">&#60;/&#62;</span>SPL</button>
+        <button type="button" class="mcp-tab-btn" data-mcp-tab="results" aria-selected="false"><span class="mcp-tab-icon" aria-hidden="true">&#8862;</span>Results</button>
+        <button type="button" class="mcp-tab-btn" data-mcp-tab="planning" aria-selected="false"><span class="mcp-tab-icon" aria-hidden="true">&#128161;</span>Planning</button>
+      </nav>
+      <button type="button" class="mcp-tab-overflow" data-mcp-tab="diagnostics" aria-selected="false" title="Diagnostics and raw JSON">
+        <span class="mcp-tab-icon" aria-hidden="true">&#9881;</span>Diagnostics
+      </button>
+    </div>
+
+    <div id="mcp-tab-run-progress" class="mcp-tab-run-progress" hidden>
+      <div id="mcp-tab-run-progress-bar" class="mcp-tab-run-progress-bar"></div>
+    </div>
+
+    <div id="mcp-run-strip" class="mcp-run-strip" hidden>
+      <div class="mcp-run-step" data-run-step="planning"><span class="mcp-run-step-icon">1</span>Planning</div>
+      <span class="mcp-run-connector"></span>
+      <div class="mcp-run-step" data-run-step="answer"><span class="mcp-run-step-icon">2</span>Answer</div>
+      <span class="mcp-run-connector"></span>
+      <div class="mcp-run-step" data-run-step="spl"><span class="mcp-run-step-icon">3</span>SPL</div>
+      <span class="mcp-run-connector"></span>
+      <div class="mcp-run-step" data-run-step="results"><span class="mcp-run-step-icon">4</span>Results</div>
+    </div>
+
+    <div class="mcp-tab-workspace">
+      <section class="mcp-tab-panel active" data-mcp-panel="answer" aria-labelledby="mcp-tab-answer">
+        <div class="mcp-panel-card">
+          <div class="mcp-answer-card-head">
+            <span class="mcp-spark-icon" aria-hidden="true">&#10022;</span>
+            <h2>Analyst Answer</h2>
+          </div>
+          <div id="mcp-summary-card" class="mcp-summary-card">
+            <div id="mcp-summary-title" class="mcp-summary-title">Ready for a question</div>
+            <div id="mcp-summary-copy" class="mcp-summary-copy">Run a question to see the analyst-facing answer, evidence summary, and next action.</div>
+          </div>
+          <div class="mcp-answer-footer">
+            <div class="mcp-trust-strip">
+              <span id="mcp-pipeline" class="mcp-metric">pipeline=llm_assisted</span>
+              <span id="mcp-intent" class="mcp-metric">intent=n/a</span>
+              <span id="mcp-tool" class="mcp-metric">tool=n/a</span>
+              <span id="mcp-rows" class="mcp-metric">rows=0</span>
+            </div>
+            <div class="mcp-answer-actions">
+              <a id="mcp-answer-splunk-link" class="mcp-tool-btn btn-splunk" href="#" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;">View in Splunk</a>
+              <span id="mcp-answer-time" class="mcp-answer-time"></span>
+            </div>
+          </div>
+          <details class="mcp-transcript-shell">
+            <summary>Conversation Transcript</summary>
+            <pre id="mcp-chat" class="mcp-chat"></pre>
+          </details>
+        </div>
+      </section>
+
+      <section class="mcp-tab-panel" data-mcp-panel="spl" hidden>
+        <div class="mcp-panel-card">
+          <div class="mcp-card-head">
+            <div class="mcp-panel-role">SPL Query</div>
+            <div class="mcp-card-actions">
+              <button id="mcp-spl-format" class="mcp-tool-btn" type="button">Format</button>
+              <button id="mcp-spl-history" class="mcp-tool-btn" type="button">History</button>
+              <button id="mcp-spl-copy" class="mcp-tool-btn" type="button">Copy</button>
+              <a id="mcp-spl-link" class="mcp-tool-btn btn-splunk" href="#" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;">View in Splunk</a>
+            </div>
+          </div>
+          <div id="mcp-spl-shell" class="mcp-spl-shell">
+            <pre id="mcp-spl" class="mcp-spl-pre"><span class="muted">(no SPL yet)</span></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="mcp-tab-panel" data-mcp-panel="results" hidden>
+        <div class="mcp-panel-card">
+          <div class="mcp-card-head">
+            <div class="mcp-panel-role">Results (<span id="mcp-results-count">0</span>)</div>
+            <div class="mcp-card-actions">
+              <button id="mcp-download-csv" class="mcp-tool-btn" type="button">Download CSV</button>
+              <span id="mcp-timing-badge" class="mcp-timing-badge"><span class="mcp-timing-dot"></span><span id="mcp-timing-value">—</span></span>
+            </div>
+          </div>
+          <div id="mcp-results" class="mcp-results-shell"><div class="muted" style="padding:12px;">No sample rows yet.</div></div>
+        </div>
+      </section>
+
+      <section class="mcp-tab-panel" data-mcp-panel="planning" hidden>
+        <div class="mcp-panel-card">
+          <div class="mcp-card-head">
+            <div class="mcp-panel-role">Planning</div>
+            <span id="mcp-planning-status" class="mcp-planning-status">Idle</span>
+          </div>
+          <div id="mcp-progress" class="mcp-progress">
+            <div class="mcp-progress-meta">
+              <span id="mcp-progress-label">Preparing MCP query...</span>
+              <span id="mcp-progress-pct">0%</span>
+            </div>
+            <div class="mcp-progress-track"><div id="mcp-progress-bar" class="mcp-progress-bar"></div></div>
+          </div>
+          <details id="mcp-planning-hints-shell" class="mcp-planning-hints-shell" open>
+            <summary>Planning Hints | Likely Data Sources</summary>
+            <div class="mcp-domain-box">
+              <div id="mcp-domain-hints" class="muted">Run a question to view likely index/sourcetype targets.</div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="mcp-tab-panel mcp-diagnostics-panel" data-mcp-panel="diagnostics" hidden>
+        <div class="mcp-panel-card">
+          <div class="mcp-panel-role">Diagnostics</div>
+          <div class="mcp-metrics">
+            <span id="mcp-writer" class="mcp-metric">writer_model=unknown</span>
+            <span id="mcp-runtime" class="mcp-metric">spl_run_ms=unknown</span>
+            <span id="mcp-rag" class="mcp-metric">rag=unknown</span>
+          </div>
+          <pre id="mcp-json"></pre>
+        </div>
+      </section>
+    </div>
+
+    <div class="mcp-composer-bottom">
+      <div class="mcp-ask-row">
+        <textarea id="mcp-question" class="mcp-prompt" placeholder="Ask a question about your Splunk data...">__MCP_DEFAULT_QUESTION__</textarea>
+        <div class="mcp-run-actions">
+          <div class="mcp-run-split" id="mcp-run-split">
+            <button id="mcp-send" class="mcp-run-btn mcp-run-btn-main" type="button">
+              <span class="mcp-run-icon" aria-hidden="true">&#9654;</span>
+              Run Query
+            </button>
+            <div class="mcp-run-menu-wrap">
+              <button id="mcp-run-chevron" class="mcp-run-btn mcp-run-btn-chevron" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="mcp-run-menu" aria-label="Run query options" disabled>&#9662;</button>
+              <div id="mcp-run-menu" class="mcp-run-menu" role="menu" hidden>
+                <button id="mcp-stop" class="mcp-run-menu-item mcp-stop-btn" type="button" role="menuitem" hidden data-testid="mcp-stop">
+                  <span class="mcp-stop-spinner" aria-hidden="true"></span>
+                  Stop run
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class=\"mcp-trust-strip\">
-        <span id=\"mcp-pipeline\" class=\"mcp-metric\">pipeline=llm_assisted</span>
-        <span id=\"mcp-intent\" class=\"mcp-metric\">intent=n/a</span>
-        <span id=\"mcp-tool\" class=\"mcp-metric\">tool=n/a</span>
-        <span id=\"mcp-rows\" class=\"mcp-metric\">rows=0</span>
+      <p class="mcp-input-hint">Enter to run &bull; Shift+Enter for new line &bull; Esc to stop while running</p>
+      <div class="mcp-control-grid">
+        <div class="mcp-segment-shell">
+          <div class="mcp-segment-label">Query Engine <span class="mcp-segment-tip" title="LLM-Assisted MCP uses the guarded planner, writer, reviewer, and evidence summary path. Deterministic MCP stays on bounded templates as a fallback.">?</span></div>
+          <div class="mcp-segment" id="mcp-pipeline-segment">
+            <button type="button" class="mcp-segment-btn" data-mcp-pipeline="assisted" data-tone="assisted" title="Default analyst mode with guarded query writing." aria-pressed="false">
+              <span class="mcp-segment-btn-title">LLM-Assisted</span>
+            </button>
+            <button type="button" class="mcp-segment-btn" data-mcp-pipeline="deterministic" data-tone="deterministic" title="Fallback mode with fixed bounded templates." aria-pressed="false">
+              <span class="mcp-segment-btn-title">Deterministic</span>
+            </button>
+          </div>
+        </div>
+        <div class="mcp-segment-shell">
+          <div class="mcp-segment-label">Dataset Scope <span class="mcp-segment-tip" title="Live Mode uses the current environment. Demo Mode pivots search-style questions to historical public BOTSv3 data and widens time to all time.">?</span></div>
+          <div class="mcp-segment" id="mcp-mode-segment">
+            <button type="button" class="mcp-segment-btn" data-mcp-mode="live" data-tone="live" title="Current environment and current time windows." aria-pressed="false">
+              <span class="mcp-segment-btn-title">Live Mode</span>
+            </button>
+            <button type="button" class="mcp-segment-btn" data-mcp-mode="demo" data-tone="demo" title="Historical BOTSv3 data across all time." aria-pressed="false">
+              <span class="mcp-segment-btn-title">Demo Mode</span>
+            </button>
+          </div>
+        </div>
       </div>
-      <details class=\"mcp-transcript-shell\">
-        <summary>Conversation Transcript</summary>
-        <pre id=\"mcp-chat\" class=\"mcp-chat\"></pre>
-      </details>
+      <div class="mcp-status-row">
+        <span id="mcp-status-pill" class="mcp-status-pill">idle</span>
+        <span id="mcp-status" class="muted"></span>
+      </div>
     </div>
   </div>
-  <div class=\"mcp-evidence-grid\">
-    <section class=\"mcp-evidence-card\">
-      <div class=\"mcp-evidence-head\">
-        <div>
-          <h2>Result Rows</h2>
-          <div class=\"mcp-sub\">Sample evidence rows from the last run.</div>
-        </div>
-      </div>
-      <div id=\"mcp-results\" class=\"mcp-results-shell\"><div class=\"muted\" style=\"padding:10px;\">No sample rows yet.</div></div>
-    </section>
-    <section class=\"mcp-evidence-card\">
-      <div class=\"mcp-evidence-head\">
-        <div>
-          <h2>Executed SPL</h2>
-          <div class=\"mcp-sub\">Inspect the exact search used for this MCP result.</div>
-        </div>
-        <a id=\"mcp-spl-link\" class=\"btn-splunk\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none; text-decoration:none; align-items:center; justify-content:center;\">Open In Splunk</a>
-      </div>
-      <pre id=\"mcp-spl\"></pre>
-    </section>
-  </div>
-  <details class=\"mcp-diagnostics\">
-    <summary>Diagnostics</summary>
-    <div class=\"mcp-metrics\" style=\"margin-top:10px;\">
-      <span id=\"mcp-writer\" class=\"mcp-metric\">writer_model=unknown</span>
-      <span id=\"mcp-runtime\" class=\"mcp-metric\">spl_run_ms=unknown</span>
-      <span id=\"mcp-rag\" class=\"mcp-metric\">rag=unknown</span>
-    </div>
-    <pre id=\"mcp-json\"></pre>
-  </details>
 </div>
 <script>
   const q = document.getElementById('mcp-question');
+  const MCP_DEFAULT_QUESTION = __MCP_DEFAULT_QUESTION_JS__;
   const send = document.getElementById('mcp-send');
+  const runChevron = document.getElementById('mcp-run-chevron');
+  const runMenu = document.getElementById('mcp-run-menu');
+  const stopBtn = document.getElementById('mcp-stop');
+  const MCP_RUN_QUERY_LABEL = '<span class="mcp-run-icon" aria-hidden="true">&#9654;</span> Run Query';
+  const MCP_RUN_RUNNING_LABEL = '<span class="mcp-run-icon" aria-hidden="true">&#8987;</span> Running...';
   const pipelineButtons = Array.from(document.querySelectorAll('[data-mcp-pipeline]'));
   const modeButtons = Array.from(document.querySelectorAll('[data-mcp-mode]'));
   const modeBanner = document.getElementById('mcp-mode-banner');
@@ -19515,21 +23003,168 @@ def _mcp_page_body() -> str:
   const statusPill = document.getElementById('mcp-status-pill');
   const spl = document.getElementById('mcp-spl');
   const splLink = document.getElementById('mcp-spl-link');
+  const answerSplLink = document.getElementById('mcp-answer-splunk-link');
+  const splFormat = document.getElementById('mcp-spl-format');
+  const splHistoryBtn = document.getElementById('mcp-spl-history');
+  const splCopy = document.getElementById('mcp-spl-copy');
   const results = document.getElementById('mcp-results');
+  const resultsCount = document.getElementById('mcp-results-count');
+  const downloadCsv = document.getElementById('mcp-download-csv');
+  const timingValue = document.getElementById('mcp-timing-value');
   const raw = document.getElementById('mcp-json');
   const domainHints = document.getElementById('mcp-domain-hints');
   const progressWrap = document.getElementById('mcp-progress');
   const progressBar = document.getElementById('mcp-progress-bar');
   const progressPct = document.getElementById('mcp-progress-pct');
   const progressLabel = document.getElementById('mcp-progress-label');
+  const userBubble = document.getElementById('mcp-user-bubble');
+  const userBubbleText = document.getElementById('mcp-user-bubble-text');
+  const userBubbleTime = document.getElementById('mcp-user-bubble-time');
+  const answerTime = document.getElementById('mcp-answer-time');
+  const mcpTabButtons = Array.from(document.querySelectorAll('[data-mcp-tab]'));
+  const mcpTabPanels = Array.from(document.querySelectorAll('.mcp-tab-panel'));
+  const mcpRunStrip = document.getElementById('mcp-run-strip');
+  const mcpRunSteps = Array.from(document.querySelectorAll('[data-run-step]'));
+  const mcpRunConnectors = Array.from(document.querySelectorAll('.mcp-run-connector'));
+  const mcpTabWorkspace = document.querySelector('.mcp-tab-workspace');
+  const mcpLayout = document.getElementById('mcp-layout');
+  const mcpTabRunProgress = document.getElementById('mcp-tab-run-progress');
+  const mcpTabRunProgressBar = document.getElementById('mcp-tab-run-progress-bar');
+  const planningStatus = document.getElementById('mcp-planning-status');
+  const planningHintsShell = document.getElementById('mcp-planning-hints-shell');
+  let activeMcpTab = 'answer';
+  let mcpRunStripStep = '';
+  const MCP_RUN_STEP_ORDER = ['planning', 'answer', 'spl', 'results'];
+  const MCP_STAGE_TO_RUN_STEP = {
+    ingest_question: 'planning',
+    guardrail: 'planning',
+    planner: 'planning',
+    query_planner: 'planning',
+    plan: 'planning',
+    spl_writer: 'spl',
+    query_writer: 'spl',
+    writer: 'spl',
+    security_review: 'spl',
+    reviewer: 'spl',
+    peer_review: 'spl',
+    peer_review_1: 'spl',
+    peer_review_2: 'spl',
+    run_tool: 'results',
+    execution: 'results',
+    validation: 'results',
+    validate_final_plan: 'results',
+    summarize: 'answer',
+    summary: 'answer',
+    finalize: 'answer',
+    package_response: 'answer',
+  };
   let progressTimer = null;
   let progressValue = 0;
+  let progressIndeterminate = false;
+  let currentSplText = '';
+  let lastMcpRows = [];
+  let lastMcpColumns = [];
   const datasetStorageKey = 'agtsmith_mcp_dataset_mode';
   const pipelineStorageKey = 'agtsmith_mcp_pipeline_mode';
+  const splHistoryStorageKey = 'agtsmith_mcp_spl_history';
   let currentDatasetMode = window.localStorage.getItem(datasetStorageKey) === 'demo' ? 'demo' : 'live';
   let currentPipelineMode = window.localStorage.getItem(pipelineStorageKey) === 'deterministic' ? 'deterministic' : 'assisted';
   let effectiveDatasetMode = currentDatasetMode;
   let effectivePipelineMode = currentPipelineMode;
+  let mcpAbortController = null;
+  let mcpRunActive = false;
+  let mcpStreamPreview = null;
+
+  function closeMcpRunMenu() {
+    if (runMenu) runMenu.hidden = true;
+    if (runChevron) runChevron.setAttribute('aria-expanded', 'false');
+  }
+
+  function toggleMcpRunMenu() {
+    if (!mcpRunActive || !runMenu) return;
+    const opening = runMenu.hidden;
+    runMenu.hidden = !opening;
+    if (runChevron) runChevron.setAttribute('aria-expanded', opening ? 'true' : 'false');
+  }
+
+  function syncMcpRunButtons(running) {
+    mcpRunActive = Boolean(running);
+    if (mcpLayout) mcpLayout.classList.toggle('is-running', mcpRunActive);
+    if (mcpTabRunProgress) mcpTabRunProgress.hidden = !mcpRunActive;
+    closeMcpRunMenu();
+    if (send) {
+      send.disabled = mcpRunActive;
+      send.innerHTML = mcpRunActive ? MCP_RUN_RUNNING_LABEL : MCP_RUN_QUERY_LABEL;
+    }
+    if (runChevron) {
+      runChevron.disabled = !mcpRunActive;
+    }
+    if (stopBtn) {
+      stopBtn.hidden = !mcpRunActive;
+      stopBtn.disabled = false;
+      stopBtn.classList.remove('is-aborting');
+      stopBtn.setAttribute('aria-busy', 'false');
+    }
+    mcpTabButtons.forEach((btn) => {
+      btn.classList.toggle('run-locked', mcpRunActive && !btn.classList.contains('active'));
+    });
+  }
+
+  function syncMcpTabRunProgress(v, indeterminate=false) {
+    if (!mcpTabRunProgress || !mcpTabRunProgressBar) return;
+    mcpTabRunProgress.classList.toggle('indeterminate', Boolean(indeterminate));
+    if (!indeterminate) {
+      const pct = Math.max(0, Math.min(100, Number(v || 0)));
+      mcpTabRunProgressBar.style.width = `${pct}%`;
+    }
+  }
+
+  function cancelMcpRun() {
+    if (!mcpAbortController || (stopBtn && stopBtn.classList.contains('is-aborting'))) return;
+    if (stopBtn) {
+      stopBtn.disabled = true;
+      stopBtn.classList.add('is-aborting');
+      stopBtn.setAttribute('aria-busy', 'true');
+    }
+    mcpAbortController.abort();
+  }
+
+  function pipelineBadgeText(mode = effectivePipelineMode) {
+    return mode === 'deterministic' ? 'pipeline=deterministic' : 'pipeline=llm_assisted';
+  }
+
+  function formatSummaryCopy(text) {
+    const raw = String(text || '').trim();
+    if (!summaryCopy || !raw) return raw;
+    const lines = raw.split('\\n').map((line) => line.trim()).filter(Boolean);
+    const bulletLines = lines.filter((line) => /^[-*•][ ]+/.test(line));
+    if (bulletLines.length >= 2) {
+      const intro = lines.find((line) => !/^[-*•][ ]+/.test(line)) || '';
+      const items = bulletLines.map((line) => line.replace(/^[-*•][ ]+/, ''));
+      summaryCopy.innerHTML = '';
+      if (intro) {
+        const lead = document.createElement('div');
+        lead.textContent = intro;
+        summaryCopy.appendChild(lead);
+      }
+      const list = document.createElement('ul');
+      list.className = 'mcp-summary-bullets';
+      items.forEach((item) => {
+        const li = document.createElement('li');
+        li.textContent = item;
+        list.appendChild(li);
+      });
+      summaryCopy.appendChild(list);
+      return raw;
+    }
+    summaryCopy.textContent = raw;
+    return raw;
+  }
+
+  function setAnswerTimestamp(date = new Date()) {
+    if (!answerTime) return;
+    answerTime.textContent = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
 
   function activeDatasetMode() {
     return currentDatasetMode === 'demo' ? 'demo' : 'live';
@@ -19569,9 +23204,9 @@ def _mcp_page_body() -> str:
     const demo = effectiveDatasetMode === 'demo';
     const deterministic = effectivePipelineMode === 'deterministic';
     syncSegmentButtons();
-    if (modeBanner) modeBanner.className = `page-mode-banner ${demo ? 'demo' : 'live'}`;
+    if (modeBanner) modeBanner.className = `mcp-chip-bar page-mode-banner ${demo ? 'demo' : 'live'}`;
     if (pipelineBannerBadge) {
-      pipelineBannerBadge.textContent = pipelineModeLabel();
+      pipelineBannerBadge.textContent = pipelineBadgeText(effectivePipelineMode);
       pipelineBannerBadge.className = `page-mode-badge ${deterministic ? 'pipeline-deterministic' : 'pipeline-assisted'}`;
     }
     if (modeBannerBadge) {
@@ -19610,30 +23245,207 @@ def _mcp_page_body() -> str:
   });
   renderMcpExecutionProfile();
 
+  q.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      send.click();
+    }
+  });
+
+  function switchMcpTab(tabName, options = {}) {
+    const next = String(tabName || 'answer').trim() || 'answer';
+    activeMcpTab = next;
+    mcpTabButtons.forEach((btn) => {
+      const active = String(btn.getAttribute('data-mcp-tab') || '') === next;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    mcpTabPanels.forEach((panel) => {
+      const active = String(panel.getAttribute('data-mcp-panel') || '') === next;
+      panel.classList.toggle('active', active);
+      panel.hidden = !active;
+    });
+    if (!options.silent) scrollMcpWorkspace();
+  }
+
+  function resolveMcpRunStep(event = {}) {
+    const raw = String(event.node || event.stage || '').trim().toLowerCase();
+    if (!raw) return '';
+    if (MCP_STAGE_TO_RUN_STEP[raw]) return MCP_STAGE_TO_RUN_STEP[raw];
+    if (raw.includes('plan') || raw.includes('guard') || raw.includes('intent')) return 'planning';
+    if (raw.includes('writer') || raw.includes('review') || raw.includes('spl')) return 'spl';
+    if (raw.includes('run') || raw.includes('exec') || raw.includes('query') || raw.includes('tool')) return 'results';
+    if (raw.includes('summ') || raw.includes('answer') || raw.includes('final')) return 'answer';
+    return '';
+  }
+
+  function setMcpRunStripVisible(visible) {
+    if (!mcpRunStrip) return;
+    mcpRunStrip.hidden = !visible;
+  }
+
+  function updateMcpRunStrip(stepName = '') {
+    const step = String(stepName || '').trim();
+    if (step) mcpRunStripStep = step;
+    const activeIdx = MCP_RUN_STEP_ORDER.indexOf(mcpRunStripStep);
+    mcpRunSteps.forEach((el) => {
+      const key = String(el.getAttribute('data-run-step') || '');
+      const idx = MCP_RUN_STEP_ORDER.indexOf(key);
+      el.classList.remove('active', 'done');
+      if (activeIdx >= 0 && idx < activeIdx) el.classList.add('done');
+      else if (key === mcpRunStripStep) el.classList.add('active');
+    });
+    mcpRunConnectors.forEach((connector, index) => {
+      connector.classList.toggle('done', activeIdx >= 0 && index < activeIdx);
+    });
+  }
+
+  function resetMcpRunStrip() {
+    mcpRunStripStep = '';
+    mcpRunSteps.forEach((el) => el.classList.remove('active', 'done'));
+    mcpRunConnectors.forEach((connector) => connector.classList.remove('done'));
+    setMcpRunStripVisible(false);
+  }
+
+  function mapMcpRunStepToTab(stepName = '') {
+    const step = String(stepName || '').trim();
+    if (step === 'planning') return 'planning';
+    if (step === 'spl') return 'spl';
+    if (step === 'results') return 'results';
+    if (step === 'answer') return 'answer';
+    return 'planning';
+  }
+
+  mcpTabButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      switchMcpTab(String(btn.getAttribute('data-mcp-tab') || 'answer'));
+    });
+  });
+  switchMcpTab('answer', { silent: true });
+
+  function scrollMcpWorkspace() {
+    const panel = mcpTabPanels.find((el) => String(el.getAttribute('data-mcp-panel') || '') === activeMcpTab);
+    if (!panel) return;
+    requestAnimationFrame(() => {
+      panel.scrollTop = panel.scrollHeight;
+    });
+  }
+
+  function showUserBubble(question) {
+    if (userBubbleText) userBubbleText.textContent = question;
+    if (userBubbleTime) {
+      userBubbleTime.textContent = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    }
+    if (userBubble) userBubble.hidden = false;
+    scrollMcpWorkspace();
+  }
+
+  if (q && !String(q.value || '').trim()) q.value = MCP_DEFAULT_QUESTION;
+  showUserBubble(MCP_DEFAULT_QUESTION);
+
+  function setPlanningStatus(label, tone = '') {
+    if (!planningStatus) return;
+    planningStatus.textContent = label;
+    planningStatus.className = 'mcp-planning-status';
+    if (tone) planningStatus.classList.add(tone);
+  }
+
   function setStatus(label, cls='') {
     statusPill.textContent = label;
     statusPill.className = 'mcp-status-pill';
     if (cls) statusPill.classList.add(cls);
+    if (label === 'running') {
+      statusPill.classList.add('running');
+      setPlanningStatus('Running', 'running');
+    } else if (label === 'complete') setPlanningStatus('Complete', 'complete');
+    else if (label === 'cancelled') setPlanningStatus('Cancelled');
+    else if (label === 'error') setPlanningStatus('Failed');
+    else setPlanningStatus('Idle');
   }
 
   function appendChat(role, text) {
     const ts = new Date().toISOString();
-    chat.textContent += `[${ts}] ${role}: ${text}\\n\\n`;
+    chat.textContent += `[${ts}] ${role}: ${text}\n\n`;
     chat.scrollTop = chat.scrollHeight;
   }
 
-  function setProgress(v, label='') {
-    progressValue = Math.max(0, Math.min(100, Number(v || 0)));
+  function setProgress(v, label='', options={}) {
+    progressIndeterminate = Boolean(options.indeterminate);
+    if (!progressIndeterminate) {
+      progressValue = Math.max(progressValue || 0, Math.max(0, Math.min(100, Number(v || 0))));
+    }
     progressWrap.style.display = 'block';
-    progressBar.style.width = `${progressValue}%`;
-    progressPct.textContent = `${Math.round(progressValue)}%`;
+    const track = progressWrap.querySelector('.mcp-progress-track');
+    progressBar.classList.toggle('indeterminate', progressIndeterminate);
+    if (track) track.classList.toggle('indeterminate', progressIndeterminate);
+    if (!progressIndeterminate) {
+      progressBar.style.width = `${progressValue}%`;
+      progressPct.textContent = `${Math.round(progressValue)}%`;
+      syncMcpTabRunProgress(progressValue, false);
+    } else {
+      progressPct.textContent = '…';
+      syncMcpTabRunProgress(0, true);
+    }
     if (label) progressLabel.textContent = label;
+    scrollMcpWorkspace();
+  }
+
+  function mcpStageHandler(event = {}) {
+    if (typeof window.handleAskStreamStage === 'function') {
+      window.handleAskStreamStage(event);
+    }
+    const runStep = resolveMcpRunStep(event);
+    if (runStep) {
+      updateMcpRunStrip(runStep);
+      switchMcpTab(mapMcpRunStepToTab(runStep), { silent: true });
+    }
+    if (progressTimer) {
+      clearInterval(progressTimer);
+      progressTimer = null;
+    }
+    if (event.indeterminate || event.progress_pct === null || event.progress_pct === undefined) {
+      setProgress(progressValue, event.label || '', { indeterminate: true });
+    } else if (event.progress_pct != null && event.progress_pct !== undefined) {
+      setProgress(event.progress_pct, event.label || '');
+    } else if (event.label) {
+      progressLabel.textContent = event.label;
+    }
+  }
+
+  function finalizeMcpRuntimeRail(data) {
+    const workflow = data?.result?.model_workflow;
+    const resultPayload = data?.result && typeof data.result === 'object' ? { ...data.result } : {};
+    if (data?.packaging_duration_ms != null && resultPayload.packaging_duration_ms == null) {
+      resultPayload.packaging_duration_ms = data.packaging_duration_ms;
+    }
+    if (data?.packaging_skipped != null && resultPayload.packaging_skipped == null) {
+      resultPayload.packaging_skipped = data.packaging_skipped;
+    }
+    if (data?.packaging_skip_reason && !resultPayload.packaging_skip_reason) {
+      resultPayload.packaging_skip_reason = data.packaging_skip_reason;
+    }
+    if (typeof window.completeRuntimeRailJourneyFromWorkflow === 'function') {
+      window.completeRuntimeRailJourneyFromWorkflow(workflow, resultPayload);
+    } else if (typeof window.notifyRuntimeRailRunEnd === 'function') {
+      window.notifyRuntimeRailRunEnd();
+    }
   }
 
   function startProgress() {
     const deterministic = activePipelineMode() === 'deterministic';
+    setMcpRunStripVisible(true);
+    updateMcpRunStrip('planning');
+    switchMcpTab('planning', { silent: true });
+    if (typeof window.notifyRuntimeRailRunStart === 'function') {
+      window.notifyRuntimeRailRunStart();
+    }
     if (progressTimer) clearInterval(progressTimer);
-    setProgress(3, deterministic ? 'Preparing deterministic MCP query...' : 'Planning LLM-assisted MCP query...');
+    progressTimer = null;
+    if (!deterministic) {
+      setProgress(0, 'Waiting for pipeline stages...', { indeterminate: true });
+      return;
+    }
+    setProgress(3, 'Preparing deterministic MCP query...');
     progressTimer = setInterval(() => {
       if (progressValue < 40) {
         setProgress(
@@ -19652,13 +23464,24 @@ def _mcp_page_body() -> str:
     }, 350);
   }
 
-  function stopProgress(ok) {
+  function stopProgress(ok, cancelled=false) {
     if (progressTimer) {
       clearInterval(progressTimer);
       progressTimer = null;
     }
-    setProgress(100, ok ? 'MCP query complete.' : 'MCP query failed.');
-    setTimeout(() => { progressWrap.style.display = 'none'; }, 700);
+    progressIndeterminate = false;
+    progressBar.classList.remove('indeterminate');
+    const track = progressWrap.querySelector('.mcp-progress-track');
+    if (track) track.classList.remove('indeterminate');
+    const label = cancelled ? 'MCP query cancelled in browser.' : (ok ? 'MCP query complete.' : 'MCP query failed.');
+    setProgress(ok ? 100 : Math.max(progressValue || 0, 8), label);
+    syncMcpTabRunProgress(ok ? 100 : Math.max(progressValue || 0, 8), false);
+    scrollMcpWorkspace();
+    window.setTimeout(() => {
+      progressWrap.style.display = 'none';
+      if (!mcpRunActive && mcpTabRunProgress) mcpTabRunProgress.hidden = true;
+      resetMcpRunStrip();
+    }, ok ? 900 : 700);
   }
 
   function escHtml(text) {
@@ -19666,8 +23489,177 @@ def _mcp_page_body() -> str:
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/\"/g, '&quot;')
+      .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  }
+
+  function highlightSpl(text) {
+    const rawText = String(text || '').trim();
+    if (!rawText) return '<span class="muted">(no SPL yet)</span>';
+    const keywords = new Set([
+      'search', 'index', 'sourcetype', 'source', 'host', 'earliest', 'latest', 'where', 'eval', 'stats', 'sort',
+      'dedup', 'rename', 'fields', 'table', 'head', 'tail', 'top', 'rare', 'join', 'lookup', 'rex', 'regex',
+      'transaction', 'timechart', 'chart', 'bucket', 'fillnull', 'append', 'appendcols', 'return', 'from', 'into'
+    ]);
+    const commands = new Set([
+      'stats', 'sort', 'eval', 'where', 'rename', 'fields', 'table', 'head', 'tail', 'dedup', 'top', 'rare',
+      'timechart', 'chart', 'transaction', 'rex', 'join', 'lookup', 'bucket', 'fillnull', 'append', 'appendcols'
+    ]);
+    const lines = rawText.split('\\n');
+    const lineNums = lines.map((_, idx) => `<span>${idx + 1}</span>`).join('');
+    const body = lines.map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return '';
+      if (trimmed.startsWith('```')) return `<span class="spl-cmt">${escHtml(line)}</span>`;
+      const tokens = line.split(/(\s+|\||=|,|\(|\))/).filter((part) => part !== '');
+      return tokens.map((token, idx) => {
+        if (token === '|') return `<span class="spl-op">${escHtml(token)}</span>`;
+        if (token === '=') return `<span class="spl-op">${escHtml(token)}</span>`;
+        if (/^".*"$/.test(token) || /^'.*'$/.test(token)) return `<span class="spl-str">${escHtml(token)}</span>`;
+        if (/^\d+(?:\.\d+)?$/.test(token)) return `<span class="spl-num">${escHtml(token)}</span>`;
+        const lower = token.toLowerCase();
+        if (idx === 0 && lower === 'search') return `<span class="spl-kw">${escHtml(token)}</span>`;
+        if (keywords.has(lower)) return `<span class="spl-kw">${escHtml(token)}</span>`;
+        if (commands.has(lower)) return `<span class="spl-cmd">${escHtml(token)}</span>`;
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(token) && token.includes('_')) return `<span class="spl-field">${escHtml(token)}</span>`;
+        return escHtml(token);
+      }).join('');
+    }).join('\\n');
+    return `<span class="mcp-spl-lines" aria-hidden="true">${lineNums}</span>${body}`;
+  }
+
+  function formatSplText(text) {
+    const rawText = String(text || '').trim();
+    if (!rawText) return rawText;
+    return rawText
+      .split('|')
+      .map((part, idx) => (idx === 0 ? part.trim() : `| ${part.trim()}`))
+      .join('\\n');
+  }
+
+  function renderSplBlock(text) {
+    currentSplText = String(text || '').trim();
+    if (!spl) return;
+    spl.innerHTML = highlightSpl(currentSplText || '(no SPL yet)');
+  }
+
+  function loadSplHistory() {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(splHistoryStorageKey) || '[]');
+      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string' && item.trim()) : [];
+    } catch (_err) {
+      return [];
+    }
+  }
+
+  function pushSplHistory(text) {
+    const query = String(text || '').trim();
+    if (!query) return;
+    const history = loadSplHistory().filter((item) => item !== query);
+    history.unshift(query);
+    window.localStorage.setItem(splHistoryStorageKey, JSON.stringify(history.slice(0, 12)));
+  }
+
+  function updateTimingBadge(msValue) {
+    const ms = Number(msValue);
+    if (!Number.isFinite(ms) || ms <= 0) {
+      timingValue.textContent = '—';
+      return;
+    }
+    timingValue.textContent = ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`;
+  }
+
+  function buildMcpSplunkUrl(data) {
+    const qArgs = data?.query_args && typeof data.query_args === 'object' ? data.query_args : {};
+    const splQuery = String(qArgs.query || data?.generated_spl || '').trim();
+    const splunkBase = String(data?.splunk_search_url_base || '').trim();
+    if (!splQuery || !splunkBase) return '';
+    const params = new URLSearchParams({
+      q: splQuery,
+      'display.page.search.mode': 'smart',
+      'dispatch.sample_ratio': '1',
+      workload_pool: '',
+      earliest: String(qArgs.earliest_time || '-7d'),
+      latest: String(qArgs.latest_time || 'now'),
+      'display.page.search.tab': 'statistics',
+      'display.general.type': 'statistics',
+    });
+    return `${splunkBase}?${params.toString()}`;
+  }
+
+  function updateMcpSplunkLinks(data) {
+    const href = buildMcpSplunkUrl(data);
+    [splLink, answerSplLink].forEach((link) => {
+      if (!link) return;
+      if (href) {
+        link.href = href;
+        link.style.display = 'inline-flex';
+      } else {
+        link.href = '#';
+        link.style.display = 'none';
+      }
+    });
+  }
+
+  function applyMcpChatResult(data) {
+    if (!data || typeof data !== 'object') return;
+    setStatus('complete', 'ok');
+    statusEl.textContent = 'Complete';
+    effectiveDatasetMode = String(data?.mode?.effective_mode || activeDatasetMode()) === 'demo' ? 'demo' : 'live';
+    effectivePipelineMode = String(data?.pipeline?.effective_pipeline || activePipelineMode()) === 'deterministic' ? 'deterministic' : 'assisted';
+    if (summaryTitle) summaryTitle.textContent = `${pipelineModeLabel()} answer ready`;
+    formatSummaryCopy(data.summary || '(no summary)');
+    setAnswerTimestamp();
+    appendChat('Assistant', data.summary || '(no summary)');
+    if (data.pipeline && data.pipeline.label) {
+      appendChat('System', `${data.pipeline.label}: ${data.pipeline.detail || 'guarded query execution path selected.'}`);
+    }
+    if (data.mode && data.mode.detail) {
+      appendChat('System', `${data.mode.label}: ${data.mode.detail}`);
+    }
+    const bannerDetail = [data?.pipeline?.detail, data?.mode?.detail].filter(Boolean).join(' ');
+    renderMcpExecutionProfile(bannerDetail);
+    if (pipelineMetric) {
+      pipelineMetric.textContent = `pipeline=${String(data?.pipeline?.effective_pipeline || 'assisted').replace('assisted', 'llm_assisted')}`;
+    }
+    intent.textContent = `intent=${data.intent || 'unknown'}`;
+    tool.textContent = `tool=${data.selected_tool || 'n/a'}`;
+    rows.textContent = `rows=${String(data.rows_returned ?? 0)} total=${String(data.total_rows ?? 0)}`;
+    writer.textContent = `writer_model=${String(data.spl_writer_model || 'unknown')}`;
+    runtime.textContent = `spl_run_ms=${String(data.spl_run_time_ms ?? 'unknown')}`;
+    rag.textContent = `rag=${data.rag_enabled ? 'enabled' : 'disabled'} max_chars=${String(data.rag_max_chars ?? 'n/a')}`;
+    updateTimingBadge(data.spl_run_time_ms);
+    const qArgs = data.query_args && typeof data.query_args === 'object' ? data.query_args : {};
+    const splQuery = String(data.generated_spl || qArgs.query || '').trim() || '(no query executed)';
+    renderSplBlock(splQuery);
+    pushSplHistory(splQuery);
+    updateMcpSplunkLinks(data);
+    renderMcpResultsTable(data);
+    const rowCount = Array.isArray(data?.sample_rows) ? data.sample_rows.length : Number(data?.rows_returned ?? 0);
+    switchMcpTab(rowCount > 0 ? 'results' : 'answer');
+    updateMcpRunStrip('results');
+    const hints = Array.isArray(data.domain_hints) ? data.domain_hints : [];
+    if (!hints.length) {
+      domainHints.innerHTML = '<div class="muted">No strong domain hints were returned for this question.</div>';
+    } else {
+      domainHints.innerHTML = hints.slice(0, 4).map((h) => {
+        const idx = String(h.index || '');
+        const sts = Array.isArray(h.sourcetypes) ? h.sourcetypes : [];
+        const why = Array.isArray(h.reasons) ? h.reasons.join('; ') : '';
+        return (
+          `<div class="mcp-domain-item">` +
+          `<div><span class="idx">index=${idx}</span> <span class="badge">score=${String(h.score ?? '')}</span></div>` +
+          `<div class="muted">sourcetypes: ${sts.join(', ')}</div>` +
+          `<div class="muted">why: ${why || 'keyword/domain match'}</div>` +
+          `</div>`
+        );
+      }).join('');
+    }
+    raw.textContent = JSON.stringify(data, null, 2);
+    finalizeMcpRuntimeRail(data);
+    if (planningHintsShell) planningHintsShell.open = false;
+    stopProgress(true);
+    scrollMcpWorkspace();
   }
 
   function buildMcpRowUrl(data, row) {
@@ -19689,7 +23681,7 @@ def _mcp_page_body() -> str:
       'display.page.search.mode': 'smart',
       'dispatch.sample_ratio': '1',
       workload_pool: '',
-      earliest: String(qArgs.earliest_time || '-24h@h'),
+      earliest: String(qArgs.earliest_time || '-7d'),
       latest: String(qArgs.latest_time || 'now'),
       'display.page.search.tab': 'statistics',
       'display.general.type': 'statistics',
@@ -19699,11 +23691,15 @@ def _mcp_page_body() -> str:
 
   function renderMcpResultsTable(data) {
     const sample = Array.isArray(data?.sample_rows) ? data.sample_rows : [];
+    lastMcpRows = sample;
+    if (resultsCount) resultsCount.textContent = String(Array.isArray(data?.sample_rows) ? data.sample_rows.length : 0);
     if (!sample.length) {
-      results.innerHTML = '<div class=\"muted\" style=\"padding:10px;\">No sample rows.</div>';
+      lastMcpColumns = [];
+      results.innerHTML = '<div class="muted" style="padding:12px;">No sample rows.</div>';
       return;
     }
     const columns = Array.from(new Set(sample.flatMap((row) => Object.keys(row || {})))).slice(0, 6);
+    lastMcpColumns = columns;
     const colorForValue = (column, value) => {
       const text = String(value || '').trim();
       if (!text) return '&mdash;';
@@ -19714,16 +23710,16 @@ def _mcp_page_body() -> str:
       const bg = `hsla(${hue}, 64%, 16%, 0.92)`;
       const border = `hsla(${hue}, 72%, 42%, 0.82)`;
       const fg = `hsla(${hue}, 85%, 86%, 1)`;
-      return `<span class=\"mcp-value-tag\" style=\"background:${bg};border-color:${border};color:${fg};\">${escHtml(text)}</span>`;
+      return `<span class="mcp-value-tag" style="background:${bg};border-color:${border};color:${fg};">${escHtml(text)}</span>`;
     };
     const head = columns.map((col) => `<th>${escHtml(col)}</th>`).join('');
     const body = sample.map((row) => {
       const href = buildMcpRowUrl(data, row);
-      return `<tr class=\"${href !== '#' ? 'mcp-row-link' : ''}\"${href !== '#' ? ` data-row-href=\"${escHtml(href)}\"` : ''}>${
+      return `<tr class="${href !== '#' ? 'mcp-row-link' : ''}"${href !== '#' ? ` data-row-href="${escHtml(href)}"` : ''}>${
         columns.map((col) => `<td>${colorForValue(col, row[col])}</td>`).join('')
       }</tr>`;
     }).join('');
-    results.innerHTML = `<table class=\"mcp-results-table\"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+    results.innerHTML = `<table class="mcp-results-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
     results.querySelectorAll('.mcp-row-link').forEach((rowEl) => {
       rowEl.addEventListener('click', () => {
         const href = rowEl.getAttribute('data-row-href') || '#';
@@ -19732,126 +23728,191 @@ def _mcp_page_body() -> str:
     });
   }
 
+  splFormat.addEventListener('click', () => {
+    renderSplBlock(formatSplText(currentSplText));
+  });
+
+  splCopy.addEventListener('click', async () => {
+    const text = currentSplText || '';
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      statusEl.textContent = 'SPL copied to clipboard.';
+    } catch (_err) {
+      statusEl.textContent = 'Unable to copy SPL in this browser context.';
+    }
+  });
+
+  splHistoryBtn.addEventListener('click', () => {
+    const history = loadSplHistory();
+    if (!history.length) {
+      statusEl.textContent = 'No SPL history yet.';
+      return;
+    }
+    const pick = history[0];
+    renderSplBlock(pick);
+    statusEl.textContent = 'Loaded most recent SPL from history.';
+  });
+
+  downloadCsv.addEventListener('click', () => {
+    if (!lastMcpRows.length || !lastMcpColumns.length) {
+      statusEl.textContent = 'No result rows available to export.';
+      return;
+    }
+    const escapeCsv = (value) => {
+      const text = String(value ?? '');
+      if (/[",\\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+      return text;
+    };
+    const lines = [
+      lastMcpColumns.map(escapeCsv).join(','),
+      ...lastMcpRows.map((row) => lastMcpColumns.map((col) => escapeCsv(row[col])).join(',')),
+    ];
+    const blob = new Blob([lines.join('\\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `mcp-results-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    statusEl.textContent = 'CSV download started.';
+  });
+
+  if (runChevron) {
+    runChevron.onclick = (event) => {
+      event.stopPropagation();
+      toggleMcpRunMenu();
+    };
+  }
+  if (stopBtn) {
+    stopBtn.onclick = () => {
+      closeMcpRunMenu();
+      cancelMcpRun();
+    };
+  }
+  document.addEventListener('click', (event) => {
+    if (!runMenu || runMenu.hidden) return;
+    const menuWrap = runChevron ? runChevron.closest('.mcp-run-menu-wrap') : null;
+    if (menuWrap && !menuWrap.contains(event.target)) {
+      closeMcpRunMenu();
+    }
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && mcpRunActive) {
+      event.preventDefault();
+      cancelMcpRun();
+    }
+  });
+
   send.onclick = async () => {
     const question = (q.value || '').trim();
     if (!question) return;
-    send.disabled = true;
+    syncMcpRunButtons(true);
+    mcpAbortController = new AbortController();
+    mcpStreamPreview = null;
+    updateMcpSplunkLinks({});
     setStatus('running');
     statusEl.textContent = 'Running MCP query...';
     effectiveDatasetMode = activeDatasetMode();
     effectivePipelineMode = activePipelineMode();
     renderMcpExecutionProfile();
+    showUserBubble(question);
     if (summaryTitle) summaryTitle.textContent = `Running ${pipelineModeLabel(activePipelineMode())}`;
     if (summaryCopy) {
       summaryCopy.textContent = activePipelineMode() === 'deterministic'
         ? 'Selecting a bounded deterministic MCP template, executing it, and preparing the analyst-facing answer.'
         : 'Running the guarded planner, writer, reviewer, and evidence summary path before Splunk MCP execution.';
     }
+    if (answerTime) answerTime.textContent = '';
     startProgress();
+    if (planningHintsShell) planningHintsShell.open = true;
     appendChat('You', question);
     try {
-      const resp = await fetch('/api/mcp/chat', {
+      const useStream = activePipelineMode() !== 'deterministic' && typeof window.consumeAskStream === 'function';
+      const chatEndpoint = useStream ? '/api/mcp/chat/stream' : '/api/mcp/chat';
+      const resp = await fetch(chatEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: question,
           mode: activeDatasetMode(),
           pipeline: activePipelineMode(),
-        })
+        }),
+        signal: mcpAbortController.signal,
       });
-      setProgress(95, 'Finalizing MCP output...');
-      const data = await resp.json();
-      if (!resp.ok) {
-        statusEl.textContent = `error: ${data.error || `http_${resp.status}`}`;
+      let data;
+      if (useStream) {
+        if (!resp.ok) {
+          let errPayload = null;
+          try { errPayload = await resp.json(); } catch (_e) {}
+          throw new Error(String(errPayload?.error || errPayload?.message || `http_${resp.status}`));
+        }
+        data = await window.consumeAskStream(resp, mcpStageHandler, {
+          context: 'MCP',
+          onSplReady: (preview) => {
+            mcpStreamPreview = preview && typeof preview === 'object' ? { ...preview } : null;
+            const qArgs = preview?.query_args && typeof preview.query_args === 'object' ? preview.query_args : {};
+            const splQuery = String(qArgs.query || preview?.generated_spl || '').trim();
+            if (!splQuery) return;
+            renderSplBlock(splQuery);
+            if (preview?.spl_run_time_ms != null) updateTimingBadge(preview.spl_run_time_ms);
+            updateMcpSplunkLinks(preview);
+            switchMcpTab('spl', { silent: true });
+          },
+        });
+      } else {
+        setProgress(95, 'Finalizing MCP output...');
+        data = await resp.json();
+        if (!resp.ok) {
+          statusEl.textContent = `error: ${data.error || `http_${resp.status}`}`;
+          setStatus('error', 'bad');
+          if (summaryTitle) summaryTitle.textContent = 'MCP query failed';
+          if (summaryCopy) summaryCopy.textContent = statusEl.textContent;
+          appendChat('System', statusEl.textContent);
+          stopProgress(false);
+          return;
+        }
+      }
+      if (!data || typeof data !== 'object') {
+        throw new Error('MCP query returned an empty response payload.');
+      }
+      applyMcpChatResult(data);
+    } catch (err) {
+      const aborted = err && err.name === 'AbortError';
+      if (aborted) {
+        setStatus('cancelled');
+        statusEl.textContent = 'Cancelled in browser. The server may still finish the current request.';
+        if (summaryTitle) summaryTitle.textContent = 'MCP query cancelled';
+        if (summaryCopy) summaryCopy.textContent = statusEl.textContent;
+        appendChat('System', statusEl.textContent);
+        if (typeof window.notifyRuntimeRailRunEnd === 'function') {
+          window.notifyRuntimeRailRunEnd();
+        }
+        stopProgress(false, true);
+        resetMcpRunStrip();
+      } else {
         setStatus('error', 'bad');
-        if (summaryTitle) summaryTitle.textContent = 'MCP query failed';
+        statusEl.textContent = `request failed: ${String(err)}`;
+        if (summaryTitle) summaryTitle.textContent = 'MCP request failed';
         if (summaryCopy) summaryCopy.textContent = statusEl.textContent;
         appendChat('System', statusEl.textContent);
         stopProgress(false);
-        return;
+        resetMcpRunStrip();
       }
-      setStatus('complete', 'ok');
-      statusEl.textContent = 'Complete';
-      effectiveDatasetMode = String(data?.mode?.effective_mode || activeDatasetMode()) === 'demo' ? 'demo' : 'live';
-      effectivePipelineMode = String(data?.pipeline?.effective_pipeline || activePipelineMode()) === 'deterministic' ? 'deterministic' : 'assisted';
-      if (summaryTitle) summaryTitle.textContent = `${pipelineModeLabel()} answer ready`;
-      if (summaryCopy) summaryCopy.textContent = data.summary || '(no summary)';
-      appendChat('Assistant', data.summary || '(no summary)');
-      if (data.pipeline && data.pipeline.label) {
-        appendChat('System', `${data.pipeline.label}: ${data.pipeline.detail || 'guarded query execution path selected.'}`);
-      }
-      if (data.mode && data.mode.detail) {
-        appendChat('System', `${data.mode.label}: ${data.mode.detail}`);
-      }
-      const bannerDetail = [data?.pipeline?.detail, data?.mode?.detail].filter(Boolean).join(' ');
-      renderMcpExecutionProfile(bannerDetail);
-      if (pipelineMetric) {
-        pipelineMetric.textContent = `pipeline=${String(data?.pipeline?.effective_pipeline || 'assisted').replace('assisted', 'llm_assisted')}`;
-      }
-      intent.textContent = `intent=${data.intent || 'unknown'}`;
-      tool.textContent = `tool=${data.selected_tool || 'n/a'}`;
-      rows.textContent = `rows=${String(data.rows_returned ?? 0)} total=${String(data.total_rows ?? 0)}`;
-      writer.textContent = `writer_model=${String(data.spl_writer_model || 'unknown')}`;
-      runtime.textContent = `spl_run_ms=${String(data.spl_run_time_ms ?? 'unknown')}`;
-      rag.textContent = `rag=${data.rag_enabled ? 'enabled' : 'disabled'} max_chars=${String(data.rag_max_chars ?? 'n/a')}`;
-      const qArgs = data.query_args && typeof data.query_args === 'object' ? data.query_args : {};
-      spl.textContent = qArgs.query || '(no splunk_run_query selected for this request)';
-      if (qArgs.query) {
-        const params = new URLSearchParams({
-          q: String(qArgs.query),
-          'display.page.search.mode': 'smart',
-          'dispatch.sample_ratio': '1',
-          workload_pool: '',
-          earliest: String(qArgs.earliest_time || '-24h@h'),
-          latest: String(qArgs.latest_time || 'now'),
-          'display.page.search.tab': 'statistics',
-          'display.general.type': 'statistics',
-        });
-        const splunkBase = String(data.splunk_search_url_base || '');
-        if (splunkBase) {
-          splLink.href = `${splunkBase}?${params.toString()}`;
-          splLink.style.display = 'inline';
-        } else {
-          splLink.href = '#';
-          splLink.style.display = 'none';
-        }
-      } else {
-        splLink.href = '#';
-        splLink.style.display = 'none';
-      }
-      renderMcpResultsTable(data);
-      const hints = Array.isArray(data.domain_hints) ? data.domain_hints : [];
-      if (!hints.length) {
-        domainHints.innerHTML = '<div class=\"muted\">No strong domain hints were returned for this question.</div>';
-      } else {
-        domainHints.innerHTML = hints.slice(0, 4).map((h) => {
-          const idx = String(h.index || '');
-          const sts = Array.isArray(h.sourcetypes) ? h.sourcetypes : [];
-          const why = Array.isArray(h.reasons) ? h.reasons.join('; ') : '';
-          return (
-            `<div class=\"mcp-domain-item\">` +
-            `<div><span class=\"idx\">index=${idx}</span> <span class=\"badge\">score=${String(h.score ?? '')}</span></div>` +
-            `<div class=\"muted\">sourcetypes: ${sts.join(', ')}</div>` +
-            `<div class=\"muted\">why: ${why || 'keyword/domain match'}</div>` +
-            `</div>`
-          );
-        }).join('');
-      }
-      raw.textContent = JSON.stringify(data, null, 2);
-      stopProgress(true);
-    } catch (err) {
-      setStatus('error', 'bad');
-      statusEl.textContent = `request failed: ${String(err)}`;
-      if (summaryTitle) summaryTitle.textContent = 'MCP request failed';
-      if (summaryCopy) summaryCopy.textContent = statusEl.textContent;
-      appendChat('System', statusEl.textContent);
-      stopProgress(false);
     } finally {
-      send.disabled = false;
+      mcpAbortController = null;
+      syncMcpRunButtons(false);
     }
   };
+
+  renderSplBlock('');
 </script>
 """
+    return (
+        template.replace("__MCP_DEFAULT_QUESTION__", html.escape(MCP_DEFAULT_QUESTION)).replace(
+            "__MCP_DEFAULT_QUESTION_JS__", json.dumps(MCP_DEFAULT_QUESTION)
+        )
+    )
 
 
 def _summarize_mcp_rows(
@@ -19864,7 +23925,7 @@ def _summarize_mcp_rows(
     selected_tool: str = "splunk_run_query",
     mode_label: str = "",
 ) -> str:
-    earliest = str(query_args.get("earliest_time", "") or "-24h").strip()
+    earliest = str(query_args.get("earliest_time", "") or DEFAULT_UNBOUNDED_EARLIEST).strip()
     latest = str(query_args.get("latest_time", "") or "now").strip()
     mode_prefix = f"[{mode_label}] " if mode_label else ""
     if not rows:
@@ -20010,7 +24071,12 @@ def _run_mcp_chat_query_deterministic(question: str, *, mode_payload: dict[str, 
     return {"result": result, "meta": {"pipeline": "mcp_direct"}}
 
 
-def _run_mcp_chat_query_assisted(question: str, *, mode_payload: dict[str, Any]) -> dict[str, Any]:
+def _run_mcp_chat_query_assisted(
+    question: str,
+    *,
+    mode_payload: dict[str, Any],
+    progress_cb: Any | None = None,
+) -> dict[str, Any]:
     from langgraph_minimal_flow import determine_splunk_tool
 
     template = map_question_to_template(question)
@@ -20021,7 +24087,7 @@ def _run_mcp_chat_query_assisted(question: str, *, mode_payload: dict[str, Any])
         effective_question = _demo_mode_question(question)
         demo_search_effective = True
 
-    payload = run_multi_model_soc(effective_question, write_artifact=False)
+    payload = run_multi_model_soc(effective_question, write_artifact=False, progress_cb=progress_cb)
     result = payload.get("result", {}) if isinstance(payload, dict) else {}
     if not isinstance(result, dict):
         result = {}
@@ -20047,21 +24113,511 @@ def _run_mcp_chat_query_assisted(question: str, *, mode_payload: dict[str, Any])
     return {"result": result, "meta": meta_payload}
 
 
+def _release_ollama_vram_after_run() -> None:
+    """Unload Ollama models so GPU VRAM is free between lab runs (non-blocking)."""
+
+    def _run() -> None:
+        try:
+            from ollama_client import release_ollama_vram
+
+            release_ollama_vram()
+        except Exception:
+            return
+
+    threading.Thread(target=_run, daemon=True, name="ollama-vram-release").start()
+
+
 def _run_mcp_chat_query(
     question: str,
     *,
     mode: str = MCP_CHAT_MODE_LIVE,
     pipeline: str = MCP_CHAT_PIPELINE_ASSISTED,
+    progress_cb: Any | None = None,
 ) -> dict[str, Any]:
     mode_payload = _mcp_chat_mode_payload(mode)
     pipeline_payload = _mcp_chat_pipeline_payload(pipeline)
     if pipeline_payload.get("effective_pipeline") == MCP_CHAT_PIPELINE_DETERMINISTIC:
         return _run_mcp_chat_query_deterministic(question, mode_payload=mode_payload)
-    return _run_mcp_chat_query_assisted(question, mode_payload=mode_payload)
+    return _run_mcp_chat_query_assisted(question, mode_payload=mode_payload, progress_cb=progress_cb)
+
+
+def _fast_mcp_domain_hints(
+    question: str,
+    result: dict[str, Any],
+    *,
+    allow_profile_fallback: bool = True,
+) -> list[dict[str, Any]]:
+    """Prefer lightweight hints from returned rows before scanning the full environment profile."""
+    intent = str(result.get("intent", "")).strip()
+    if intent not in METADATA_REVIEW_INTENTS and not is_inventory_question(question):
+        if not allow_profile_fallback:
+            return []
+        return suggest_domains_for_question(
+            question,
+            intent=intent,
+            max_indexes=4,
+            max_sourcetypes_per_index=4,
+        )
+
+    hints: list[dict[str, Any]] = []
+    seen_indexes: set[str] = set()
+    preview_rows = result.get("spl_results_preview", [])
+    row_sources: list[Any] = []
+    if isinstance(preview_rows, list):
+        row_sources.extend(preview_rows)
+    evidence = result.get("evidence", {}) if isinstance(result.get("evidence"), dict) else {}
+    top_entities = evidence.get("top_entities", []) if isinstance(evidence.get("top_entities"), list) else []
+    row_sources.extend(top_entities)
+    for row in row_sources:
+        if not isinstance(row, dict):
+            continue
+        index_name = str(row.get("index", "")).strip()
+        if not index_name or index_name in seen_indexes:
+            continue
+        seen_indexes.add(index_name)
+        hint: dict[str, Any] = {
+            "index": index_name,
+            "why": "returned by inventory query",
+        }
+        count = row.get("count")
+        if count is not None:
+            hint["count"] = count
+        hints.append(hint)
+        if len(hints) >= 4:
+            return hints
+    if hints:
+        return hints
+    if not allow_profile_fallback:
+        return []
+    return suggest_domains_for_question(
+        question,
+        intent=intent,
+        max_indexes=4,
+        max_sourcetypes_per_index=4,
+    )
+
+
+def _mcp_spl_preview_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract SPL preview fields from a LangGraph MCP payload before response packaging."""
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    if not isinstance(result, dict):
+        return {}
+    query_args = result.get("query_args", {}) if isinstance(result.get("query_args"), dict) else {}
+    generated_spl = str(result.get("generated_spl", "") or query_args.get("query", "")).strip()
+    selected_tool = str(result.get("selected_tool", "")).strip()
+    node_timings = result.get("node_timings_ms", {}) if isinstance(result.get("node_timings_ms"), dict) else {}
+    selected_spl_details = result.get("selected_spl_details", [])
+    spl_run_time_ms = node_timings.get("run_tool")
+    if spl_run_time_ms is None and isinstance(selected_spl_details, list) and selected_spl_details:
+        latest = selected_spl_details[-1]
+        if isinstance(latest, dict):
+            spl_run_time_ms = latest.get("execution_ms")
+    preview: dict[str, Any] = {
+        "selected_tool": selected_tool,
+        "query_args": query_args,
+        "generated_spl": generated_spl,
+    }
+    if spl_run_time_ms is not None:
+        preview["spl_run_time_ms"] = spl_run_time_ms
+    return preview
+
+
+def _mcp_has_sample_rows(result: dict[str, Any]) -> bool:
+    preview_rows = result.get("spl_results_preview", [])
+    if isinstance(preview_rows, list) and any(isinstance(row, dict) for row in preview_rows):
+        return True
+    evidence = result.get("evidence", {}) if isinstance(result.get("evidence"), dict) else {}
+    top_entities = evidence.get("top_entities", []) if isinstance(evidence.get("top_entities"), list) else []
+    return any(isinstance(row, dict) for row in top_entities)
+
+
+def _mcp_would_rerun_splunk(result: dict[str, Any]) -> bool:
+    if _mcp_has_sample_rows(result):
+        return False
+    selected_tool = str(result.get("selected_tool", "")).strip()
+    query_args = result.get("query_args", {}) if isinstance(result.get("query_args"), dict) else {}
+    return selected_tool == "splunk_run_query" and bool(str(query_args.get("query", "")).strip())
+
+
+def _mcp_should_skip_packaging_ui(question: str, payload: dict[str, Any]) -> tuple[bool, str]:
+    """Return whether the Packaging journey step can be skipped (pipeline output is already UI-ready)."""
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    if not isinstance(result, dict) or not result:
+        return False, "missing_result"
+    if _mcp_would_rerun_splunk(result):
+        return False, "needs_splunk_rerun"
+    intent = str(result.get("intent", "")).strip()
+    if intent in METADATA_REVIEW_INTENTS or is_inventory_question(question):
+        return True, "metadata_pipeline_complete"
+    if _mcp_has_sample_rows(result) and str(result.get("summary", "")).strip():
+        return True, "pipeline_rows_and_summary_ready"
+    if _mcp_has_sample_rows(result):
+        return True, "pipeline_rows_ready"
+    return False, "needs_assembly"
+
+
+def _build_mcp_chat_response(question: str, payload: dict[str, Any], *, lightweight: bool = False) -> dict[str, Any]:
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    if not isinstance(result, dict):
+        result = {}
+    mitre_bundle = _mitre_attack_bundle(result) if not lightweight else {"mappings": [], "next_pivots": [], "progression": [], "frame": ""}
+    result["mitre_attack"] = mitre_bundle
+    result_compact = dict(result)
+    result_compact.pop("tdir_case", None)
+
+    selected_tool = str(result.get("selected_tool", "")).strip()
+    query_args = result.get("query_args", {}) if isinstance(result.get("query_args"), dict) else {}
+    selected_spl_details = result.get("selected_spl_details", [])
+    if not isinstance(selected_spl_details, list):
+        selected_spl_details = []
+    latest_spl = selected_spl_details[-1] if selected_spl_details and isinstance(selected_spl_details[-1], dict) else {}
+    spl_writer_model = str(latest_spl.get("writer_model", "")).strip() or "unknown"
+    spl_run_time_ms = latest_spl.get("execution_ms", None)
+    if spl_run_time_ms is None:
+        spl_run_time_ms = result.get("node_timings_ms", {}).get("run_tool") if isinstance(result.get("node_timings_ms"), dict) else None
+    sample_rows: list[dict[str, Any]] = []
+    sample_source = "none"
+    sample_error = ""
+    preview_rows = result.get("spl_results_preview", [])
+    if isinstance(preview_rows, list):
+        cached_rows = [row for row in preview_rows if isinstance(row, dict)]
+        if cached_rows:
+            sample_rows = cached_rows[:25]
+            sample_source = "pipeline_spl_results_preview"
+    if not sample_rows:
+        evidence = result.get("evidence", {}) if isinstance(result.get("evidence"), dict) else {}
+        top = evidence.get("top_entities", []) if isinstance(evidence.get("top_entities"), list) else []
+        sample_rows = [r for r in top if isinstance(r, dict)][:25]
+        if sample_rows:
+            sample_source = "pipeline_evidence_top_entities"
+    if (
+        not lightweight
+        and not sample_rows
+        and selected_tool == "splunk_run_query"
+        and str(query_args.get("query", "")).strip()
+    ):
+        rerun_args = dict(query_args)
+        try:
+            row_limit = int(rerun_args.get("row_limit", 25))
+        except Exception:
+            row_limit = 25
+        rerun_args["row_limit"] = max(1, min(50, row_limit))
+        try:
+            rerun = run_splunk_query_args(
+                rerun_args,
+                intent=str(result.get("intent", "mcp_chat")).strip() or "mcp_chat",
+                summary_hint="mcp chat sample rows",
+            )
+            rows = rerun.get("structured", {}).get("results", []) if isinstance(rerun, dict) else []
+            if isinstance(rows, list):
+                sample_rows = [r for r in rows if isinstance(r, dict)][:25]
+                sample_source = "splunk_run_query_rerun"
+        except Exception as exc:
+            sample_error = f"{type(exc).__name__}: {exc}"
+    mode_payload = result.get("mode", {}) if isinstance(result.get("mode"), dict) else {}
+    pipeline_payload = result.get("pipeline", {}) if isinstance(result.get("pipeline"), dict) else {}
+    if bool(mode_payload.get("demo_effective")) and selected_tool == "splunk_run_query":
+        domain_hints = _demo_mode_domain_hints(str(result.get("intent", "")).strip())
+    elif lightweight:
+        domain_hints = _fast_mcp_domain_hints(question, result, allow_profile_fallback=False)
+    else:
+        hint_question = str(result.get("effective_question", question)).strip() or question
+        domain_hints = _fast_mcp_domain_hints(hint_question, result)
+
+    return {
+        "question": question,
+        "effective_question": result.get("effective_question", question),
+        "summary": str(result.get("summary", "")),
+        "intent": result.get("intent"),
+        "supported": result.get("supported"),
+        "selected_tool": selected_tool,
+        "query_args": query_args,
+        "generated_spl": str(result.get("generated_spl", "") or query_args.get("query", "")).strip(),
+        "rows_returned": result.get("rows_returned"),
+        "total_rows": result.get("total_rows"),
+        "spl_writer_model": spl_writer_model,
+        "spl_run_time_ms": spl_run_time_ms,
+        "rag_enabled": bool(result.get("rag_enabled", False)),
+        "rag_max_chars": result.get("rag_max_chars"),
+        "domain_hints": domain_hints,
+        "sample_rows": sample_rows,
+        "sample_rows_source": sample_source,
+        "sample_rows_error": sample_error,
+        "splunk_search_url_base": _splunk_search_url_base(),
+        "mode": mode_payload,
+        "pipeline": pipeline_payload,
+        "selected_spl_details": selected_spl_details,
+        "result": result_compact,
+        "meta": payload.get("meta", {}) if isinstance(payload, dict) else {},
+    }
+
+
+def _parse_ask_request_data(data: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    question = str(data.get("question", "")).strip()
+    if not question:
+        return {}, "question is required"
+    mode = str(data.get("mode", MCP_CHAT_MODE_LIVE)).strip().lower()
+    mode_payload = _mcp_chat_mode_payload(mode)
+    effective_question = _demo_mode_question(question) if mode_payload.get("demo_effective") else question
+    session_id = str(data.get("session_id", "")).strip()
+    case_id = str(data.get("case_id", "")).strip()
+    parent_node_id = str(data.get("parent_node_id", "")).strip()
+    max_steps = data.get("max_steps", 3)
+    if not isinstance(max_steps, int):
+        try:
+            max_steps = int(max_steps)
+        except Exception:
+            max_steps = 3
+    pivot_context = data.get("pivot_context", None)
+    pivot_candidate = data.get("pivot_candidate", None)
+    if isinstance(pivot_context, dict):
+        case_id = case_id or str(pivot_context.get("case_id", "")).strip()
+        parent_node_id = parent_node_id or str(pivot_context.get("current_node_id", "")).strip()
+    pipeline = str(data.get("pipeline", "multi_model")).strip().lower()
+    return {
+        "question": question,
+        "effective_question": effective_question,
+        "mode": mode,
+        "mode_payload": mode_payload,
+        "session_id": session_id,
+        "case_id": case_id,
+        "parent_node_id": parent_node_id,
+        "max_steps": max_steps,
+        "write_artifact": bool(data.get("write_artifact", True)),
+        "approved_deeper_investigation": bool(data.get("approved_deeper_investigation", False)),
+        "continuation_state": data.get("continuation_state", None),
+        "pivot_context": pivot_context,
+        "pivot_candidate": pivot_candidate,
+        "pipeline": pipeline,
+    }, None
+
+
+def _run_parsed_ask_investigation(parsed: dict[str, Any], progress_cb: Any | None = None) -> dict[str, Any]:
+    pivot_context = parsed.get("pivot_context")
+    pivot_candidate = parsed.get("pivot_candidate")
+    effective_question = str(parsed.get("effective_question", "")).strip()
+    session_id = str(parsed.get("session_id", "")).strip()
+    write_artifact = bool(parsed.get("write_artifact", True))
+    pipeline = str(parsed.get("pipeline", "multi_model")).strip().lower()
+    if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict):
+        return _run_structured_pivot_investigation(
+            question=effective_question,
+            pivot_context=pivot_context,
+            pivot_candidate=pivot_candidate,
+            session_id=session_id,
+            write_artifact=write_artifact,
+        )
+    if pipeline == "agentic":
+        continuation_state = parsed.get("continuation_state")
+        return run_agentic_investigation(
+            effective_question,
+            max_steps=int(parsed.get("max_steps", 3) or 3),
+            session_id=session_id,
+            write_artifact=write_artifact,
+            approved_deeper_investigation=bool(parsed.get("approved_deeper_investigation", False)),
+            continuation_state=continuation_state if isinstance(continuation_state, dict) else None,
+        )
+    return run_multi_model_soc(
+        effective_question,
+        session_id=session_id,
+        write_artifact=write_artifact,
+        progress_cb=progress_cb,
+    )
+
+
+def _finalize_ask_response(result: dict[str, Any], parsed: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+    result_body = result.get("result", {}) if isinstance(result, dict) else {}
+    if not isinstance(result_body, dict):
+        result_body = {}
+    question = str(parsed.get("question", "")).strip()
+    effective_question = str(parsed.get("effective_question", "")).strip()
+    mode_payload = parsed.get("mode_payload", {}) if isinstance(parsed.get("mode_payload"), dict) else {}
+    pipeline = str(parsed.get("pipeline", "multi_model")).strip().lower()
+    session_id = str(parsed.get("session_id", "")).strip()
+    case_id = str(parsed.get("case_id", "")).strip()
+    parent_node_id = str(parsed.get("parent_node_id", "")).strip()
+    pivot_context = parsed.get("pivot_context")
+    pivot_candidate = parsed.get("pivot_candidate")
+    selected_tool = str(result_body.get("selected_tool", "")).strip()
+    selected_spl_details = result_body.get("selected_spl_details", [])
+    if not isinstance(selected_spl_details, list):
+        selected_spl_details = []
+    latest_spl = selected_spl_details[-1] if selected_spl_details and isinstance(selected_spl_details[-1], dict) else {}
+    executed_query = ""
+    query_args = result_body.get("query_args", {}) if isinstance(result_body.get("query_args"), dict) else {}
+    if str(latest_spl.get("query", "")).strip():
+        executed_query = str(latest_spl.get("query", "")).strip()
+    elif str(query_args.get("query", "")).strip():
+        executed_query = str(query_args.get("query", "")).strip()
+    sample_rows: list[dict[str, Any]] = []
+    sample_source = "none"
+    sample_error = ""
+    if selected_tool == "splunk_run_query" and str(query_args.get("query", "")).strip():
+        rerun_args = dict(query_args)
+        try:
+            row_limit = int(rerun_args.get("row_limit", 25))
+        except Exception:
+            row_limit = 25
+        rerun_args["row_limit"] = max(1, min(50, row_limit))
+        try:
+            rerun = run_splunk_query_args(
+                rerun_args,
+                intent=str(result_body.get("intent", "investigation_ui")).strip() or "investigation_ui",
+                summary_hint="investigation ui sample rows",
+            )
+            rows = rerun.get("structured", {}).get("results", []) if isinstance(rerun, dict) else []
+            if isinstance(rows, list):
+                sample_rows = [r for r in rows if isinstance(r, dict)][:25]
+                sample_source = "splunk_run_query_rerun"
+        except Exception as exc:
+            sample_error = f"{type(exc).__name__}: {exc}"
+
+    if not sample_rows:
+        evidence = result_body.get("evidence", {}) if isinstance(result_body.get("evidence"), dict) else {}
+        top = evidence.get("top_entities", []) if isinstance(evidence.get("top_entities"), list) else []
+        sample_rows = [r for r in top if isinstance(r, dict)]
+        if sample_rows:
+            sample_source = "pipeline_evidence_top_entities"
+    _append_query_audit(
+        {
+            "ts_epoch": int(time.time()),
+            "username": str(user.get("username", "unknown")),
+            "role": str(user.get("role", "unknown")),
+            "pipeline": pipeline,
+            "question": question,
+            "effective_question": effective_question,
+            "mode": mode_payload.get("effective_mode"),
+            "selected_tool": selected_tool,
+            "intent": result_body.get("intent"),
+            "rows_returned": result_body.get("rows_returned"),
+            "total_rows": result_body.get("total_rows"),
+            "query": executed_query,
+            "session_id": session_id,
+        }
+    )
+    if not isinstance(result, dict):
+        return {
+            "result": result_body,
+            "sample_rows": sample_rows,
+            "sample_rows_source": sample_source,
+            "sample_rows_error": sample_error,
+            "splunk_search_url_base": _splunk_search_url_base(),
+            "mode": mode_payload,
+            "effective_question": effective_question,
+            "platform_coverage": {},
+        }
+
+    result = dict(result)
+    result_body = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+    if isinstance(result_body, dict):
+        result_body = dict(result_body)
+        result_warnings = result.get("warnings", []) if isinstance(result.get("warnings"), list) else []
+        try:
+            mitre_bundle = _mitre_attack_bundle(result_body)
+            mitre_bundle["validation"] = _mitre_attack_validate(result_body, mitre_bundle)
+            result_body["mitre_attack"] = mitre_bundle
+            result_body["matching_active_spl_assets"] = _active_spl_asset_matches_for_intent(result_body.get("intent", ""))
+            result["result"] = result_body
+            meta = result.get("meta", {}) if isinstance(result.get("meta"), dict) else {}
+            artifact_path = str(meta.get("artifact", "")).strip()
+            if artifact_path:
+                _persist_mitre_bundle_to_artifact(artifact_path, mitre_bundle)
+            previous_graph_state = (
+                pivot_context.get("graph_case_state")
+                if isinstance(pivot_context, dict) and isinstance(pivot_context.get("graph_case_state"), dict)
+                else None
+            )
+            pivot_context_payload = _build_structured_pivot_context(
+                result_body,
+                sample_rows,
+                prior_graph_state=previous_graph_state,
+            )
+            result_body["pivot_context"] = pivot_context_payload
+            result_body["sample_rows"] = sample_rows
+            result_body["sample_rows_source"] = sample_source
+            result_body["splunk_search_url_base"] = _splunk_search_url_base()
+            result_body["mode"] = mode_payload
+            result_body["effective_question"] = effective_question
+            if mode_payload.get("demo_effective"):
+                current_summary = str(result_body.get("summary", "")).strip()
+                if current_summary and not current_summary.startswith("[Demo Mode]"):
+                    result_body["summary"] = f"[Demo Mode] {current_summary}"
+            graph_case_state_payload = _build_graph_case_state_payload(
+                question=effective_question,
+                result_body=result_body,
+                sample_rows=sample_rows,
+                case_id=case_id or "",
+                parent_node_id=parent_node_id or "",
+                node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
+                previous_state=previous_graph_state,
+            )
+            result_body["graph_case_state"] = graph_case_state_payload
+            case_context_payload = persist_case_result(
+                session_id=session_id,
+                question=effective_question,
+                result_body=result_body,
+                graph_case_state=graph_case_state_payload,
+                case_id=case_id or None,
+                parent_node_id=parent_node_id or None,
+                node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
+            )
+            result_body["case_context"] = case_context_payload
+            result_body["graph_case_state"]["case_id"] = case_context_payload.get("case_id", "")
+            result_body["graph_case_state"]["current_node_id"] = case_context_payload.get("node_id", "")
+            result_body["graph_case_state"]["parent_node_id"] = case_context_payload.get("parent_node_id", "")
+            if isinstance(result_body.get("pivot_context"), dict):
+                result_body["pivot_context"]["case_id"] = case_context_payload.get("case_id", "")
+                result_body["pivot_context"]["current_node_id"] = case_context_payload.get("node_id", "")
+                result_body["pivot_context"]["graph_case_state"] = result_body.get("graph_case_state", {})
+            artifact_path = str(meta.get("artifact", "")).strip()
+            if artifact_path:
+                _persist_result_updates_to_artifact(
+                    artifact_path,
+                    {
+                        "pivot_context": result_body.get("pivot_context", {}),
+                        "case_context": case_context_payload,
+                        "graph_case_state": result_body.get("graph_case_state", {}),
+                    },
+                )
+        except Exception as post_exc:
+            warning = {
+                "stage": "api_post_processing",
+                "error": f"{type(post_exc).__name__}: {post_exc}",
+            }
+            result_warnings.append(warning)
+            result["warnings"] = result_warnings
+            result_body["post_processing_warning"] = warning
+            result_body["sample_rows"] = sample_rows
+            result_body["sample_rows_source"] = sample_source
+            result_body["splunk_search_url_base"] = _splunk_search_url_base()
+            result_body["mode"] = mode_payload
+            result_body["effective_question"] = effective_question
+        result["result"] = result_body
+    result["sample_rows"] = sample_rows
+    result["sample_rows_source"] = sample_source
+    result["sample_rows_error"] = sample_error
+    result["splunk_search_url_base"] = _splunk_search_url_base()
+    result["mode"] = mode_payload
+    result["effective_question"] = effective_question
+    if isinstance(result_body, dict):
+        coverage = result_body.get("platform_coverage")
+        if not isinstance(coverage, dict):
+            evidence = result_body.get("evidence", {})
+            coverage = evidence.get("platform_coverage") if isinstance(evidence, dict) else {}
+        result["platform_coverage"] = coverage if isinstance(coverage, dict) else {}
+    return result
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"SOCWebUI/{APP_VERSION}"
+    _session_cookie_refresh: tuple[str, int] | None = None
+
+    def end_headers(self) -> None:
+        refresh = getattr(self, "_session_cookie_refresh", None)
+        if refresh:
+            token, ttl = refresh
+            self._set_session_cookie(token, max_age=ttl)
+        super().end_headers()
 
     def _json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -20082,14 +24638,20 @@ class Handler(BaseHTTPRequestHandler):
     ) -> None:
         user = self._authenticated_user()
         rendered_body = _control_center_layout(control_active, body_html) if control_active else body_html
+        role = str((user or {}).get("role", "")).strip().lower()
+        show_ops_link = role in {"admin", "ops"}
+        include_rail = show_nav and user is not None
         body = DOCS_SHELL_HTML.format(
             title=html.escape(title),
             body=rendered_body,
-            nav=_global_nav(nav_active) if show_nav else "",
+            nav=_global_nav(nav_active) if include_rail else "",
             onboarding_user=html.escape(str((user or {}).get("username", ""))),
-            onboarding_role=html.escape(str((user or {}).get("role", ""))),
+            onboarding_role=html.escape(role),
             onboarding_modal=_admin_onboarding_modal(user),
             app_version=html.escape(APP_VERSION_LABEL),
+            runtime_rail_styles=_runtime_rail_stylesheet(),
+            runtime_rail=_runtime_rail_html(),
+            runtime_rail_script=_runtime_rail_script(show_ops_link=show_ops_link),
         ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -20115,18 +24677,28 @@ class Handler(BaseHTTPRequestHandler):
         if not _auth_enabled():
             return {"username": "auth_disabled", "role": "admin"}
         token = self._session_token_from_cookie()
-        return _get_session(token)
+        if not token:
+            return None
+        session = _get_session(token, touch=True)
+        if not session:
+            return None
+        remember = bool(session.get("remember"))
+        self._session_cookie_refresh = (token, _session_timeout_seconds(remember=remember))
+        return session
 
-    def _set_session_cookie(self, token: str) -> None:
+    def _set_session_cookie(self, token: str, *, max_age: int | None = None, remember: bool = False) -> None:
+        ttl = max_age if max_age is not None else _session_timeout_seconds(remember=remember)
+        secure = "; Secure" if getattr(self.server, "tls_enabled", False) else ""
         self.send_header(
             "Set-Cookie",
-            f"{SESSION_COOKIE_NAME}={token}; Max-Age={SESSION_TTL_SECONDS}; Path=/; HttpOnly; SameSite=Lax",
+            f"{SESSION_COOKIE_NAME}={token}; Max-Age={ttl}; Path=/; HttpOnly; SameSite=Lax{secure}",
         )
 
     def _clear_session_cookie(self) -> None:
+        secure = "; Secure" if getattr(self.server, "tls_enabled", False) else ""
         self.send_header(
             "Set-Cookie",
-            f"{SESSION_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
+            f"{SESSION_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax{secure}",
         )
 
     def _redirect(self, location: str) -> None:
@@ -20149,46 +24721,93 @@ class Handler(BaseHTTPRequestHandler):
             error_html = f"<div class=\"login-error\">{html.escape(error)}</div>"
         return (
             "<style>"
-            ".login-shell{min-height:78vh;display:grid;place-items:center;padding:20px;}"
-            ".login-card{width:min(520px,92vw);border:1px solid #284154;background:linear-gradient(165deg,#091727,#07111f);"
-            "border-radius:18px;padding:22px;box-shadow:0 20px 44px rgba(0,0,0,.45);}"
-            ".login-brand{display:flex;align-items:center;gap:10px;margin-bottom:8px;}"
-            ".login-brand-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;}"
-            ".login-dot{width:11px;height:11px;border-radius:999px;background:#22c55e;box-shadow:0 0 14px rgba(34,197,94,.7);}"
-            ".login-version{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;border:1px solid #294560;background:#0b2130;color:#bde6ff;font-size:12px;font-weight:800;}"
-            ".login-title{margin:0;font-size:27px;line-height:1.15;letter-spacing:.2px;}"
-            ".login-sub{margin:4px 0 14px;color:#9fb4cc;font-size:13px;line-height:1.45;}"
-            ".login-form label{display:block;font-size:13px;color:#d7e6f5;margin:10px 0 6px;}"
-            ".login-form input{width:100%;box-sizing:border-box;background:#040c18;color:#e5e7eb;border:1px solid #33506a;"
-            "border-radius:10px;padding:11px 12px;font-size:14px;outline:none;transition:border-color .15s ease;}"
-            ".login-form input:focus{border-color:#58a6d9;}"
+            "body:has(.login-shell) .app-shell{grid-template-columns:1fr;}"
+            "body:has(.login-shell) .wrap{max-width:none;margin:0;padding:0;min-height:100vh;}"
+            "body:has(.login-shell) .shell-footer{display:none;}"
+            ".login-shell{"
+            "min-height:100vh;display:grid;place-items:center;padding:32px 20px;"
+            "background:"
+            "radial-gradient(circle at 18% 12%, rgba(56,189,248,.10), transparent 34%),"
+            "radial-gradient(circle at 82% 88%, rgba(56,189,248,.06), transparent 36%),"
+            "radial-gradient(ellipse at center, #0d1b2a 0%, #050a14 100%);"
+            "box-sizing:border-box;"
+            "}"
+            ".login-card{"
+            "width:min(440px,92vw);border:1px solid #1e293b;"
+            "background:#0f172a;"
+            "border-radius:20px;padding:28px 28px 24px;"
+            "box-shadow:0 24px 48px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.04);"
+            "}"
+            ".login-mark{"
+            "display:flex;align-items:center;justify-content:center;width:52px;height:52px;"
+            "margin:0 auto 16px;border-radius:14px;border:1px solid rgba(56,189,248,.28);"
+            "background:linear-gradient(180deg,rgba(56,189,248,.16),rgba(56,189,248,.06));"
+            "box-shadow:0 0 24px rgba(56,189,248,.14);"
+            "}"
+            ".login-brand-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px;}"
+            ".login-badge{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;"
+            "border:1px solid rgba(56,189,248,.28);background:rgba(56,189,248,.06);color:#94a3b8;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;}"
+            ".login-version{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;"
+            "border:1px solid rgba(56,189,248,.24);background:rgba(56,189,248,.08);color:#7dd3fc;font-size:12px;font-weight:800;}"
+            ".login-title{margin:0 0 8px;font-size:26px;line-height:1.15;letter-spacing:.2px;text-align:center;color:#ffffff;}"
+            ".login-sub{margin:0 0 20px;color:#94a3b8;font-size:14px;line-height:1.55;text-align:center;}"
+            ".login-form label{display:block;font-size:13px;font-weight:700;color:#94a3b8;margin:12px 0 6px;}"
+            ".login-form input:not([type=checkbox]){width:100%;box-sizing:border-box;background:#050a14;color:#ffffff;border:1px solid #1e293b;"
+            "border-radius:12px;padding:12px 14px;font-size:14px;outline:none;transition:border-color .15s ease,box-shadow .15s ease;}"
+            ".login-form input:not([type=checkbox]):focus{border-color:#38bdf8;box-shadow:0 0 0 2px rgba(56,189,248,.18);}"
             ".login-error{margin:0 0 12px;padding:10px 12px;border-radius:10px;border:1px solid #7f1d1d;"
             "background:#2a0d0d;color:#fecaca;font-size:13px;}"
-            ".login-actions{display:flex;gap:10px;align-items:center;margin-top:16px;}"
-            ".login-btn{appearance:none;border:0;border-radius:10px;padding:11px 14px;background:#22c55e;color:#03230f;"
-            "font-weight:800;cursor:pointer;font-size:14px;}"
-            ".login-note{color:#9ca3af;font-size:12px;line-height:1.4;}"
+            ".login-actions{display:grid;gap:10px;margin-top:24px;}"
+            ".login-btn{appearance:none;border:1px solid rgba(125,211,252,.28);border-radius:12px;padding:12px 16px;"
+            "background:linear-gradient(135deg,#38bdf8,#0ea5e9);color:#041723;font-weight:900;cursor:pointer;font-size:14px;"
+            "box-shadow:0 12px 24px rgba(56,189,248,.24), inset 0 1px 0 rgba(255,255,255,.22);"
+            "transition:transform .16s ease,box-shadow .16s ease,filter .16s ease;}"
+            ".login-btn:hover{transform:translateY(-1px);filter:brightness(1.03);"
+            "box-shadow:0 16px 28px rgba(56,189,248,.30), inset 0 1px 0 rgba(255,255,255,.24);}"
+            ".login-note{color:#94a3b8;font-size:12px;line-height:1.45;text-align:center;}"
+            ".login-form label.login-remember{position:relative;display:flex;align-items:center;gap:12px;margin:20px 0 0;"
+            "color:#cbd5e1;font-size:13px;font-weight:600;cursor:pointer;user-select:none;}"
+            ".login-form .login-remember-input{position:absolute;opacity:0;width:0;height:0;margin:0;padding:0;border:0;"
+            "clip:rect(0,0,0,0);overflow:hidden;white-space:nowrap;}"
+            ".login-form .login-remember-input:focus-visible+.login-toggle-track{outline:2px solid rgba(56,189,248,.55);outline-offset:3px;}"
+            ".login-toggle-track{position:relative;flex-shrink:0;width:44px;height:24px;border-radius:999px;background:#1e293b;"
+            "border:1px solid #334155;overflow:hidden;transition:background .2s ease,border-color .2s ease,box-shadow .2s ease;}"
+            ".login-toggle-knob{position:absolute;top:2px;left:2px;width:18px;height:18px;max-width:18px;max-height:18px;"
+            "border-radius:50%;background:#94a3b8;box-shadow:0 1px 3px rgba(0,0,0,.35);"
+            "transition:transform .2s ease,background .2s ease;}"
+            ".login-form .login-remember-input:checked+.login-toggle-track{background:linear-gradient(135deg,#38bdf8,#0ea5e9);"
+            "border-color:rgba(125,211,252,.45);box-shadow:0 0 14px rgba(56,189,248,.35);}"
+            ".login-form .login-remember-input:checked+.login-toggle-track .login-toggle-knob{transform:translateX(20px);background:#ffffff;}"
+            ".login-remember-label{flex:1;line-height:1.35;}"
             "</style>"
             "<div class=\"login-shell\">"
             "<div class=\"login-card\">"
+            f"<div class=\"login-mark\" aria-hidden=\"true\">{_rail_brand_logo_svg(size=40)}</div>"
             "<div class=\"login-brand-row\">"
-            "<div class=\"login-brand\"><span class=\"login-dot\"></span><span class=\"badge\">Lab-Only</span></div>"
+            "<span class=\"login-badge\">Lab-Only</span>"
             f"<span class=\"login-version\">{html.escape(APP_VERSION_LABEL)}</span>"
             "</div>"
-            "<h1 class=\"login-title\">A.G.E.N.T. Smith Login</h1>"
-            "<p class=\"login-sub\">Sign in to access A.G.E.N.T. Smith investigation tools, analyst documentation, and guarded Splunk-connected workflows on this LAN host.</p>"
+            "<h1 class=\"login-title\">A.G.E.N.T. Smith</h1>"
+            "<p class=\"login-sub\">Sign in to access investigation tools, Splunk MCP chat, and guarded analyst workflows on this LAN host.</p>"
             f"{error_html}"
             "<form class=\"login-form\" method=\"post\" action=\"/login\">"
-            "<label>Username</label><input name=\"username\" autocomplete=\"username\" required />"
-            "<label>Password</label><input type=\"password\" name=\"password\" autocomplete=\"current-password\" required />"
+            "<label for=\"login-username\">Username</label>"
+            "<input id=\"login-username\" name=\"username\" autocomplete=\"username\" required />"
+            "<label for=\"login-password\">Password</label>"
+            "<input id=\"login-password\" type=\"password\" name=\"password\" autocomplete=\"current-password\" required />"
+            "<label class=\"login-remember\">"
+            "<input id=\"login-remember\" class=\"login-remember-input\" type=\"checkbox\" name=\"remember\" value=\"1\" />"
+            "<span class=\"login-toggle-track\" aria-hidden=\"true\"><span class=\"login-toggle-knob\"></span></span>"
+            "<span class=\"login-remember-label\">Remain logged in</span>"
+            "</label>"
             "<div class=\"login-actions\">"
             "<button class=\"login-btn\" type=\"submit\">Sign In</button>"
-            "<span class=\"login-note\">Session expires automatically for safety.</span>"
+            "<span class=\"login-note\">Sessions extend while you work and expire after configured idle time.</span>"
             "</div>"
             "</form>"
             "</div>"
             "</div>"
-    )
+        )
 
 
     def _cases_workspace_page_body(self) -> str:
@@ -20205,7 +24824,7 @@ class Handler(BaseHTTPRequestHandler):
         ".cases-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;border:1px solid #284154;background:#0b2130;color:#cfe8ff;font-size:12px;font-weight:800;}"
         ".cases-list{display:grid;gap:10px;max-height:72vh;overflow:auto;padding-right:4px;}"
         ".case-list-item{width:100%;text-align:left;border:1px solid #203448;border-radius:14px;background:#081523;padding:12px;cursor:pointer;color:#e5eef8;display:grid;gap:6px;}"
-        ".case-list-item.active{border-color:#45b8ff;background:#0d2234;box-shadow:0 0 0 1px rgba(69,184,255,.2) inset;}"
+        ".case-list-item.active{border-color:#38bdf8;background:#0d2234;box-shadow:0 0 0 1px rgba(56,189,248,.2) inset;}"
         ".case-list-title{font-size:13px;font-weight:800;line-height:1.45;}"
         ".case-list-meta{display:flex;gap:8px;flex-wrap:wrap;color:#9fb4cc;font-size:11px;font-weight:700;}"
         ".cases-main{display:grid;gap:18px;min-width:0;}"
@@ -20310,7 +24929,13 @@ class Handler(BaseHTTPRequestHandler):
             error_html = f"<div class=\"login-error\">{html.escape(error)}</div>"
         return (
             "<style>"
+            "body:has(.setup-shell) .app-shell{grid-template-columns:1fr;}"
+            "body:has(.setup-shell) .wrap{max-width:none;margin:0;padding:0;min-height:100vh;}"
+            "body:has(.setup-shell) .shell-footer{display:none;}"
             ".setup-shell{min-height:82vh;display:grid;place-items:center;padding:24px;}"
+            ".setup-mark{display:flex;align-items:center;justify-content:center;width:44px;height:44px;margin-bottom:12px;"
+            "border-radius:12px;border:1px solid rgba(56,189,248,.24);background:rgba(56,189,248,.08);"
+            "box-shadow:0 0 18px rgba(56,189,248,.12);}"
             ".setup-card{width:min(860px,96vw);display:grid;grid-template-columns:minmax(280px,.95fr) minmax(320px,1.05fr);gap:18px;"
             "border:1px solid #284154;background:linear-gradient(160deg,#081525,#07111f 52%,#0b1d17);border-radius:22px;padding:24px;"
             "box-shadow:0 24px 50px rgba(0,0,0,.46);}"
@@ -20331,13 +24956,14 @@ class Handler(BaseHTTPRequestHandler):
             "padding:12px 14px;font-size:14px;outline:none;appearance:none;}"
             ".setup-form input:focus,.setup-form select:focus{border-color:#60a5fa;box-shadow:0 0 0 3px rgba(96,165,250,.15);}"
             ".setup-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:16px;}"
-            ".setup-btn{appearance:none;border:0;border-radius:14px;padding:12px 16px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#03230f;font-weight:900;cursor:pointer;font-size:14px;}"
+            ".setup-btn{appearance:none;border:0;border-radius:14px;padding:12px 16px;background:linear-gradient(135deg,#38bdf8,#0ea5e9);color:#041723;font-weight:900;cursor:pointer;font-size:14px;}"
             ".setup-note{color:#9ca3af;font-size:12px;line-height:1.45;}"
             "@media (max-width: 860px){.setup-card{grid-template-columns:1fr;}.setup-grid{grid-template-columns:1fr;}}"
             "</style>"
             "<div class=\"setup-shell\">"
             "<div class=\"setup-card\">"
             "<div class=\"setup-hero\">"
+            f"<div class=\"setup-mark\" aria-hidden=\"true\">{_rail_brand_logo_svg(size=32)}</div>"
             "<div class=\"setup-kicker\">First-Run Setup</div>"
             "<h1 class=\"setup-title\">Finish securing A.G.E.N.T. Smith before first use</h1>"
             "<p class=\"setup-copy\">Set the first login, choose the operator role, and lock in credentials before the rest of the platform becomes available.</p>"
@@ -20400,10 +25026,9 @@ class Handler(BaseHTTPRequestHandler):
         if password != confirm_password:
             self._html(HTTPStatus.BAD_REQUEST, self._first_run_page_body("Password and confirmation do not match."), title="A.G.E.N.T. Smith First-Run Setup", show_nav=False)
             return
-        if password in DEFAULT_UI_PASSWORDS:
-            self._html(HTTPStatus.BAD_REQUEST, self._first_run_page_body("Choose a password that is not one of the default placeholders."), title="A.G.E.N.T. Smith First-Run Setup", show_nav=False)
+        if password in PLACEHOLDER_UI_PASSWORDS:
+            self._html(HTTPStatus.BAD_REQUEST, self._first_run_page_body("Choose a password that is not one of the example placeholders."), title="A.G.E.N.T. Smith First-Run Setup", show_nav=False)
             return
-
         hashed = _hash_password(password)
         write_env_file(
             {
@@ -20479,9 +25104,10 @@ class Handler(BaseHTTPRequestHandler):
         role = str(user.get("role", "analyst")).strip().lower()
         if role not in ALLOWED_APP_ROLES:
             role = "analyst"
-        token = _create_session(username, role)
+        remember = (parsed.get("remember", [""])[0] or "").strip().lower() in {"1", "on", "true", "yes"}
+        token = _create_session(username, role, remember=remember)
         self.send_response(HTTPStatus.FOUND)
-        self._set_session_cookie(token)
+        self._set_session_cookie(token, remember=remember)
         self.send_header("Location", "/")
         self.end_headers()
 
@@ -20548,6 +25174,13 @@ class Handler(BaseHTTPRequestHandler):
             nav_active="control",
         )
         return False
+
+    def _api_session_status_get(self) -> None:
+        user = self._authenticated_user()
+        if user is None:
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized", "detail": "login required"})
+            return
+        self._json(HTTPStatus.OK, _session_status_payload(user))
 
     def _api_config_runtime_get(self) -> None:
         if not self._require_ops_role({}):
@@ -20931,6 +25564,105 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(format_sse("error", payload))
         self.wfile.flush()
 
+    def _sse_emit(self, event: str, payload: dict[str, Any]) -> bool:
+        try:
+            self.wfile.write(format_sse(event, payload))
+            self.wfile.flush()
+            return True
+        except (TypeError, ValueError) as exc:
+            try:
+                self.wfile.write(
+                    format_sse(
+                        "error",
+                        {
+                            "type": "error",
+                            "code": "sse_serialization_failed",
+                            "message": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                )
+                self.wfile.flush()
+            except Exception:
+                pass
+            return False
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
+    def _stream_ask_investigation(self, data: dict[str, Any]) -> None:
+        parsed, err = _parse_ask_request_data(data)
+        if err:
+            self._write_sse_error("bad_request", err)
+            return
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        def _write_stage(node: str, pct: int, label: str, title: str, skipped: bool = False) -> None:
+            info = progress_for_multi_model_node(node)
+            if int(info.get("pct") or 0) <= 0:
+                info = progress_for_stage_log(node)
+            payload = {
+                "type": "stage",
+                "source": "multi_model",
+                "node": node,
+                "progress_pct": pct,
+                "title": title or info.get("title", ""),
+                "label": label or info.get("label", ""),
+                "note": info.get("note", ""),
+                "indeterminate": False,
+                "skipped": bool(skipped),
+                "status": "skipped" if skipped else "active",
+            }
+            if not self._sse_emit("stage", payload):
+                raise BrokenPipeError("client disconnected")
+
+        pipeline = str(parsed.get("pipeline", "multi_model")).strip().lower()
+        pivot_context = parsed.get("pivot_context")
+        pivot_candidate = parsed.get("pivot_candidate")
+        uses_multi_model_graph = (
+            pipeline != "agentic"
+            and not (isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict))
+        )
+
+        try:
+            waiting = dict(INDETERMINATE_WAITING_PROGRESS)
+            if not self._sse_emit(
+                "stage",
+                {
+                    "type": "stage",
+                    "source": pipeline,
+                    "progress_pct": None,
+                    "title": waiting.get("title", ""),
+                    "label": waiting.get("label", ""),
+                    "note": waiting.get("note", ""),
+                    "indeterminate": True,
+                },
+            ):
+                return
+
+            progress_cb = _write_stage if uses_multi_model_graph else None
+            result = _run_parsed_ask_investigation(parsed, progress_cb=progress_cb)
+            user = self._authenticated_user() or {}
+            payload = _finalize_ask_response(result if isinstance(result, dict) else {}, parsed, user)
+            self._sse_emit("complete", {"type": "complete", **payload})
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as exc:
+            self._sse_emit(
+                "error",
+                {
+                    "type": "error",
+                    "code": "investigation_failed",
+                    "message": f"{type(exc).__name__}: {exc}",
+                },
+            )
+        finally:
+            _release_ollama_vram_after_run()
+
     def _stream_ollama_logs(self, parsed: Any) -> None:
         query = parse_qs(parsed.query)
         if not self._require_ops_role(query):
@@ -21076,6 +25808,10 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def _api_runtime_ops_summary(self) -> None:
+        payload = collect_analyst_ops_summary(get_ollama_host())
+        self._json(HTTPStatus.OK, payload)
+
     def _api_ops_ollama_metrics(self) -> None:
         if not self._require_ops_role({}):
             return
@@ -21206,94 +25942,190 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         payload = _run_mcp_chat_query(question, mode=mode, pipeline=pipeline)
-        result = payload.get("result", {}) if isinstance(payload, dict) else {}
-        if not isinstance(result, dict):
-            result = {}
-        mitre_bundle = _mitre_attack_bundle(result)
-        result["mitre_attack"] = mitre_bundle
-        result_compact = dict(result)
-        result_compact.pop("tdir_case", None)
+        try:
+            self._json(HTTPStatus.OK, _build_mcp_chat_response(question, payload))
+        finally:
+            _release_ollama_vram_after_run()
 
-        selected_tool = str(result.get("selected_tool", "")).strip()
-        query_args = result.get("query_args", {}) if isinstance(result.get("query_args"), dict) else {}
-        selected_spl_details = result.get("selected_spl_details", [])
-        if not isinstance(selected_spl_details, list):
-            selected_spl_details = []
-        latest_spl = selected_spl_details[-1] if selected_spl_details and isinstance(selected_spl_details[-1], dict) else {}
-        spl_writer_model = str(latest_spl.get("writer_model", "")).strip() or "unknown"
-        spl_run_time_ms = latest_spl.get("execution_ms", None)
-        if spl_run_time_ms is None:
-            spl_run_time_ms = result.get("node_timings_ms", {}).get("run_tool") if isinstance(result.get("node_timings_ms"), dict) else None
-        sample_rows: list[dict[str, Any]] = []
-        sample_source = "none"
-        sample_error = ""
-        if selected_tool == "splunk_run_query" and str(query_args.get("query", "")).strip():
-            rerun_args = dict(query_args)
-            try:
-                row_limit = int(rerun_args.get("row_limit", 25))
-            except Exception:
-                row_limit = 25
-            rerun_args["row_limit"] = max(1, min(50, row_limit))
-            try:
-                rerun = run_splunk_query_args(
-                    rerun_args,
-                    intent=str(result.get("intent", "mcp_chat")).strip() or "mcp_chat",
-                    summary_hint="mcp chat sample rows",
-                )
-                rows = rerun.get("structured", {}).get("results", []) if isinstance(rerun, dict) else []
-                if isinstance(rows, list):
-                    sample_rows = [r for r in rows if isinstance(r, dict)][:25]
-                    sample_source = "splunk_run_query_rerun"
-            except Exception as exc:
-                sample_error = f"{type(exc).__name__}: {exc}"
+    def _stream_mcp_chat(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except Exception:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        data = json.loads(raw.decode("utf-8")) if raw else {}
+        question = str(data.get("message", "")).strip()
+        mode = str(data.get("mode", MCP_CHAT_MODE_LIVE)).strip().lower()
+        pipeline = str(data.get("pipeline", MCP_CHAT_PIPELINE_ASSISTED)).strip().lower()
+        if not question:
+            self._write_sse_error("bad_request", "message is required")
+            return
 
-        if not sample_rows:
-            evidence = result.get("evidence", {}) if isinstance(result.get("evidence"), dict) else {}
-            top = evidence.get("top_entities", []) if isinstance(evidence.get("top_entities"), list) else []
-            sample_rows = [r for r in top if isinstance(r, dict)]
-            if sample_rows:
-                sample_source = "pipeline_evidence_top_entities"
-        mode_payload = result.get("mode", {}) if isinstance(result.get("mode"), dict) else {}
-        pipeline_payload = result.get("pipeline", {}) if isinstance(result.get("pipeline"), dict) else {}
-        if bool(mode_payload.get("demo_effective")) and selected_tool == "splunk_run_query":
-            domain_hints = _demo_mode_domain_hints(str(result.get("intent", "")).strip())
-        else:
-            hint_question = str(result.get("effective_question", question)).strip() or question
-            domain_hints = suggest_domains_for_question(
-                hint_question,
-                intent=str(result.get("intent", "")).strip(),
-                max_indexes=4,
-                max_sourcetypes_per_index=4,
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        pipeline_payload = _mcp_chat_pipeline_payload(pipeline)
+        source = "llm_assisted" if pipeline_payload.get("effective_pipeline") != MCP_CHAT_PIPELINE_DETERMINISTIC else "deterministic"
+
+        def _write_stage(node: str, pct: int, label: str, title: str, skipped: bool = False) -> None:
+            info = progress_for_multi_model_node(node)
+            if int(info.get("pct") or 0) <= 0:
+                info = progress_for_stage_log(node)
+            payload = {
+                "type": "stage",
+                "source": source,
+                "node": node,
+                "progress_pct": pct,
+                "title": title or info.get("title", ""),
+                "label": label or info.get("label", ""),
+                "note": info.get("note", ""),
+                "indeterminate": False,
+                "skipped": bool(skipped),
+                "status": "skipped" if skipped else "active",
+            }
+            if not self._sse_emit("stage", payload):
+                raise BrokenPipeError("client disconnected")
+
+        try:
+            waiting = dict(INDETERMINATE_WAITING_PROGRESS)
+            if not self._sse_emit(
+                "stage",
+                {
+                    "type": "stage",
+                    "source": source,
+                    "progress_pct": None,
+                    "title": waiting.get("title", ""),
+                    "label": waiting.get("label", ""),
+                    "note": waiting.get("note", ""),
+                    "indeterminate": True,
+                },
+            ):
+                return
+
+            progress_cb = None
+            if pipeline_payload.get("effective_pipeline") != MCP_CHAT_PIPELINE_DETERMINISTIC:
+                progress_cb = _write_stage
+
+            payload = _run_mcp_chat_query(question, mode=mode, pipeline=pipeline, progress_cb=progress_cb)
+            spl_preview = _mcp_spl_preview_from_payload(payload if isinstance(payload, dict) else {})
+            if spl_preview.get("generated_spl") or spl_preview.get("selected_tool"):
+                if not self._sse_emit(
+                    "spl_ready",
+                    {
+                        "type": "spl_ready",
+                        "splunk_search_url_base": _splunk_search_url_base(),
+                        **spl_preview,
+                    },
+                ):
+                    return
+            skip_packaging, skip_reason = _mcp_should_skip_packaging_ui(
+                question,
+                payload if isinstance(payload, dict) else {},
             )
-
-        self._json(
-            HTTPStatus.OK,
-            {
-                "question": question,
-                "effective_question": result.get("effective_question", question),
-                "summary": str(result.get("summary", "")),
-                "intent": result.get("intent"),
-                "supported": result.get("supported"),
-                "selected_tool": selected_tool,
-                "query_args": query_args,
-                "rows_returned": result.get("rows_returned"),
-                "total_rows": result.get("total_rows"),
-                "spl_writer_model": spl_writer_model,
-                "spl_run_time_ms": spl_run_time_ms,
-                "rag_enabled": bool(result.get("rag_enabled", False)),
-                "rag_max_chars": result.get("rag_max_chars"),
-                "domain_hints": domain_hints,
-                "sample_rows": sample_rows,
-                "sample_rows_source": sample_source,
-                "sample_rows_error": sample_error,
-                "splunk_search_url_base": _splunk_search_url_base(),
-                "mode": mode_payload,
-                "pipeline": pipeline_payload,
-                "selected_spl_details": selected_spl_details,
-                "result": result_compact,
-                "meta": payload.get("meta", {}) if isinstance(payload, dict) else {},
-            },
-        )
+            packaging = progress_for_multi_model_node("package_response")
+            if skip_packaging:
+                skip_stage = skipped_stage_event_payload(
+                    "package_response",
+                    reason="Pipeline output already includes SPL, rows, and summary; no extra assembly required.",
+                    source=source,
+                )
+                skip_stage["type"] = "stage"
+                skip_stage["skip_reason"] = skip_reason
+                if not self._sse_emit("stage", skip_stage):
+                    return
+                pack_started = time.monotonic()
+                try:
+                    response = _build_mcp_chat_response(question, payload, lightweight=True)
+                except Exception as exc:
+                    self._sse_emit(
+                        "error",
+                        {
+                            "type": "error",
+                            "code": "mcp_packaging_failed",
+                            "message": f"Failed to package MCP response: {type(exc).__name__}: {exc}",
+                        },
+                    )
+                    return
+                pack_ms = int((time.monotonic() - pack_started) * 1000)
+            else:
+                if not self._sse_emit(
+                    "stage",
+                    {
+                        "type": "stage",
+                        "source": source,
+                        "node": "package_response",
+                        "progress_pct": int(packaging.get("pct") or 99),
+                        "title": packaging.get("title", ""),
+                        "label": packaging.get("label", ""),
+                        "note": packaging.get("note", ""),
+                        "indeterminate": False,
+                    },
+                ):
+                    return
+                pack_started = time.monotonic()
+                try:
+                    response = _build_mcp_chat_response(question, payload, lightweight=False)
+                except Exception as exc:
+                    self._sse_emit(
+                        "error",
+                        {
+                            "type": "error",
+                            "code": "mcp_packaging_failed",
+                            "message": f"Failed to package MCP response: {type(exc).__name__}: {exc}",
+                        },
+                    )
+                    return
+                pack_ms = int((time.monotonic() - pack_started) * 1000)
+            response["packaging_duration_ms"] = pack_ms
+            response["packaging_skipped"] = skip_packaging
+            response["packaging_skip_reason"] = skip_reason if skip_packaging else ""
+            result_obj = response.get("result")
+            if skip_packaging and isinstance(result_obj, dict):
+                skipped_nodes = [
+                    str(item).strip()
+                    for item in (result_obj.get("skipped_nodes") or [])
+                    if str(item).strip()
+                ]
+                if "package_response" not in skipped_nodes:
+                    skipped_nodes.append("package_response")
+                result_obj["skipped_nodes"] = skipped_nodes
+            meta_payload = response.get("meta", {}) if isinstance(response.get("meta"), dict) else {}
+            meta_payload = dict(meta_payload)
+            meta_payload["packaging_duration_ms"] = pack_ms
+            response["meta"] = meta_payload
+            if not self._sse_emit(
+                "stage",
+                {
+                    "type": "stage",
+                    "source": source,
+                    "node": "finalize",
+                    "progress_pct": 99,
+                    "title": "Complete",
+                    "label": "MCP query complete.",
+                    "note": "The MCP response is ready.",
+                    "indeterminate": False,
+                },
+            ):
+                return
+            if not self._sse_emit("complete", {"type": "complete", **response}):
+                return
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as exc:
+            self._sse_emit(
+                "error",
+                {
+                    "type": "error",
+                    "code": "mcp_chat_failed",
+                    "message": f"{type(exc).__name__}: {exc}",
+                },
+            )
+        finally:
+            _release_ollama_vram_after_run()
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -21334,6 +26166,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/ops/ollama/logs/health":
             self._ops_ollama_logs_health(parsed)
             return
+        if parsed.path == "/api/runtime/ops-summary":
+            self._api_runtime_ops_summary()
+            return
         if parsed.path == "/api/ops/ollama/metrics":
             self._api_ops_ollama_metrics()
             return
@@ -21354,6 +26189,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/case":
             self._api_case(parsed)
+            return
+        if parsed.path == "/api/session/status":
+            self._api_session_status_get()
             return
         if parsed.path == "/api/config/runtime":
             self._api_config_runtime_get()
@@ -21399,7 +26237,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/investigation":
-            body = APP_HTML.encode("utf-8")
+            user = self._authenticated_user()
+            body = _investigation_page_html(user).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
@@ -21560,6 +26399,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
             return
+        if parsed.path == "/api/mcp/chat/stream":
+            if not self._require_auth(api_mode=True):
+                return
+            try:
+                self._stream_mcp_chat()
+            except Exception as exc:
+                self._write_sse_error("mcp_chat_failed", f"{type(exc).__name__}: {exc}")
+            return
         if parsed.path == "/api/config/runtime":
             if not self._require_auth(api_mode=True):
                 return
@@ -21641,6 +26488,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
             return
 
+        if parsed.path == "/api/ask/stream":
+            if not self._require_auth(api_mode=True):
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            try:
+                raw = self.rfile.read(length)
+                data = json.loads(raw.decode("utf-8")) if raw else {}
+                self._stream_ask_investigation(data if isinstance(data, dict) else {})
+            except Exception as exc:
+                self._write_sse_error("stream_failed", f"{type(exc).__name__}: {exc}")
+            return
+
         if parsed.path != "/api/ask":
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
             return
@@ -21653,212 +26515,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             data = json.loads(raw.decode("utf-8")) if raw else {}
-            question = str(data.get("question", "")).strip()
-            if not question:
-                self._json(400, {"error": "question is required"})
+            parsed_request, err = _parse_ask_request_data(data if isinstance(data, dict) else {})
+            if err:
+                self._json(400, {"error": err})
                 return
-            mode = str(data.get("mode", MCP_CHAT_MODE_LIVE)).strip().lower()
-            mode_payload = _mcp_chat_mode_payload(mode)
-            effective_question = _demo_mode_question(question) if mode_payload.get("demo_effective") else question
-            session_id = str(data.get("session_id", "")).strip()
-            case_id = str(data.get("case_id", "")).strip()
-            parent_node_id = str(data.get("parent_node_id", "")).strip()
-            max_steps = data.get("max_steps", 3)
-            if not isinstance(max_steps, int):
-                try:
-                    max_steps = int(max_steps)
-                except Exception:
-                    max_steps = 3
-            write_artifact = bool(data.get("write_artifact", True))
-            approved_deeper_investigation = bool(data.get("approved_deeper_investigation", False))
-            continuation_state = data.get("continuation_state", None)
-            pivot_context = data.get("pivot_context", None)
-            pivot_candidate = data.get("pivot_candidate", None)
-            if isinstance(pivot_context, dict):
-                case_id = case_id or str(pivot_context.get("case_id", "")).strip()
-                parent_node_id = parent_node_id or str(pivot_context.get("current_node_id", "")).strip()
-
-            pipeline = str(data.get("pipeline", "multi_model")).strip().lower()
-            if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict):
-                result = _run_structured_pivot_investigation(
-                    question=effective_question,
-                    pivot_context=pivot_context,
-                    pivot_candidate=pivot_candidate,
-                    session_id=session_id,
-                    write_artifact=write_artifact,
-                )
-            elif pipeline == "agentic":
-                result = run_agentic_investigation(
-                    effective_question,
-                    max_steps=max_steps,
-                    session_id=session_id,
-                    write_artifact=write_artifact,
-                    approved_deeper_investigation=approved_deeper_investigation,
-                    continuation_state=continuation_state if isinstance(continuation_state, dict) else None,
-                )
-            else:
-                result = run_multi_model_soc(
-                    effective_question,
-                    session_id=session_id,
-                    write_artifact=write_artifact,
-                )
-            result_body = result.get("result", {}) if isinstance(result, dict) else {}
-            if not isinstance(result_body, dict):
-                result_body = {}
+            result = _run_parsed_ask_investigation(parsed_request)
             user = self._authenticated_user() or {}
-            selected_tool = str(result_body.get("selected_tool", "")).strip()
-            selected_spl_details = result_body.get("selected_spl_details", [])
-            if not isinstance(selected_spl_details, list):
-                selected_spl_details = []
-            latest_spl = selected_spl_details[-1] if selected_spl_details and isinstance(selected_spl_details[-1], dict) else {}
-            executed_query = ""
-            query_args = result_body.get("query_args", {}) if isinstance(result_body.get("query_args"), dict) else {}
-            if str(latest_spl.get("query", "")).strip():
-                executed_query = str(latest_spl.get("query", "")).strip()
-            elif str(query_args.get("query", "")).strip():
-                executed_query = str(query_args.get("query", "")).strip()
-            sample_rows: list[dict[str, Any]] = []
-            sample_source = "none"
-            sample_error = ""
-            if selected_tool == "splunk_run_query" and str(query_args.get("query", "")).strip():
-                rerun_args = dict(query_args)
-                try:
-                    row_limit = int(rerun_args.get("row_limit", 25))
-                except Exception:
-                    row_limit = 25
-                rerun_args["row_limit"] = max(1, min(50, row_limit))
-                try:
-                    rerun = run_splunk_query_args(
-                        rerun_args,
-                        intent=str(result_body.get("intent", "investigation_ui")).strip() or "investigation_ui",
-                        summary_hint="investigation ui sample rows",
-                    )
-                    rows = rerun.get("structured", {}).get("results", []) if isinstance(rerun, dict) else []
-                    if isinstance(rows, list):
-                        sample_rows = [r for r in rows if isinstance(r, dict)][:25]
-                        sample_source = "splunk_run_query_rerun"
-                except Exception as exc:
-                    sample_error = f"{type(exc).__name__}: {exc}"
-
-            if not sample_rows:
-                evidence = result_body.get("evidence", {}) if isinstance(result_body.get("evidence"), dict) else {}
-                top = evidence.get("top_entities", []) if isinstance(evidence.get("top_entities"), list) else []
-                sample_rows = [r for r in top if isinstance(r, dict)]
-                if sample_rows:
-                    sample_source = "pipeline_evidence_top_entities"
-            _append_query_audit(
-                {
-                    "ts_epoch": int(time.time()),
-                    "username": str(user.get("username", "unknown")),
-                    "role": str(user.get("role", "unknown")),
-                    "pipeline": pipeline,
-                    "question": question,
-                    "effective_question": effective_question,
-                    "mode": mode_payload.get("effective_mode"),
-                    "selected_tool": selected_tool,
-                    "intent": result_body.get("intent"),
-                    "rows_returned": result_body.get("rows_returned"),
-                    "total_rows": result_body.get("total_rows"),
-                    "query": executed_query,
-                    "session_id": session_id,
-                }
-            )
-            if isinstance(result, dict):
-                result = dict(result)
-                result_body = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
-                if isinstance(result_body, dict):
-                    result_body = dict(result_body)
-                    result_warnings = result.get("warnings", []) if isinstance(result.get("warnings"), list) else []
-                    try:
-                        mitre_bundle = _mitre_attack_bundle(result_body)
-                        mitre_bundle["validation"] = _mitre_attack_validate(result_body, mitre_bundle)
-                        result_body["mitre_attack"] = mitre_bundle
-                        result_body["matching_active_spl_assets"] = _active_spl_asset_matches_for_intent(result_body.get("intent", ""))
-                        result["result"] = result_body
-                        meta = result.get("meta", {}) if isinstance(result.get("meta"), dict) else {}
-                        artifact_path = str(meta.get("artifact", "")).strip()
-                        if artifact_path:
-                            _persist_mitre_bundle_to_artifact(artifact_path, mitre_bundle)
-                        previous_graph_state = pivot_context.get("graph_case_state") if isinstance(pivot_context, dict) and isinstance(pivot_context.get("graph_case_state"), dict) else None
-                        pivot_context_payload = _build_structured_pivot_context(
-                            result_body,
-                            sample_rows,
-                            prior_graph_state=previous_graph_state,
-                        )
-                        result_body["pivot_context"] = pivot_context_payload
-                        result_body["sample_rows"] = sample_rows
-                        result_body["sample_rows_source"] = sample_source
-                        result_body["splunk_search_url_base"] = _splunk_search_url_base()
-                        result_body["mode"] = mode_payload
-                        result_body["effective_question"] = effective_question
-                        if mode_payload.get("demo_effective"):
-                            current_summary = str(result_body.get("summary", "")).strip()
-                            if current_summary and not current_summary.startswith("[Demo Mode]"):
-                                result_body["summary"] = f"[Demo Mode] {current_summary}"
-                        graph_case_state_payload = _build_graph_case_state_payload(
-                            question=effective_question,
-                            result_body=result_body,
-                            sample_rows=sample_rows,
-                            case_id=case_id or "",
-                            parent_node_id=parent_node_id or "",
-                            node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
-                            previous_state=previous_graph_state,
-                        )
-                        result_body["graph_case_state"] = graph_case_state_payload
-                        case_context_payload = persist_case_result(
-                            session_id=session_id,
-                            question=effective_question,
-                            result_body=result_body,
-                            graph_case_state=graph_case_state_payload,
-                            case_id=case_id or None,
-                            parent_node_id=parent_node_id or None,
-                            node_type="pivot" if isinstance(pivot_context, dict) and isinstance(pivot_candidate, dict) else "investigation",
-                        )
-                        result_body["case_context"] = case_context_payload
-                        result_body["graph_case_state"]["case_id"] = case_context_payload.get("case_id", "")
-                        result_body["graph_case_state"]["current_node_id"] = case_context_payload.get("node_id", "")
-                        result_body["graph_case_state"]["parent_node_id"] = case_context_payload.get("parent_node_id", "")
-                        if isinstance(result_body.get("pivot_context"), dict):
-                            result_body["pivot_context"]["case_id"] = case_context_payload.get("case_id", "")
-                            result_body["pivot_context"]["current_node_id"] = case_context_payload.get("node_id", "")
-                            result_body["pivot_context"]["graph_case_state"] = result_body.get("graph_case_state", {})
-                        artifact_path = str(meta.get("artifact", "")).strip()
-                        if artifact_path:
-                            _persist_result_updates_to_artifact(
-                                artifact_path,
-                                {
-                                    "pivot_context": result_body.get("pivot_context", {}),
-                                    "case_context": case_context_payload,
-                                    "graph_case_state": result_body.get("graph_case_state", {}),
-                                },
-                            )
-                    except Exception as post_exc:
-                        warning = {
-                            "stage": "api_post_processing",
-                            "error": f"{type(post_exc).__name__}: {post_exc}",
-                        }
-                        result_warnings.append(warning)
-                        result["warnings"] = result_warnings
-                        result_body["post_processing_warning"] = warning
-                        result_body["sample_rows"] = sample_rows
-                        result_body["sample_rows_source"] = sample_source
-                        result_body["splunk_search_url_base"] = _splunk_search_url_base()
-                        result_body["mode"] = mode_payload
-                        result_body["effective_question"] = effective_question
-                    result["result"] = result_body
-                result["sample_rows"] = sample_rows
-                result["sample_rows_source"] = sample_source
-                result["sample_rows_error"] = sample_error
-                result["splunk_search_url_base"] = _splunk_search_url_base()
-                result["mode"] = mode_payload
-                result["effective_question"] = effective_question
-                if isinstance(result_body, dict):
-                    coverage = result_body.get("platform_coverage")
-                    if not isinstance(coverage, dict):
-                        evidence = result_body.get("evidence", {})
-                        coverage = evidence.get("platform_coverage") if isinstance(evidence, dict) else {}
-                    result["platform_coverage"] = coverage if isinstance(coverage, dict) else {}
-            self._json(200, result)
+            payload = _finalize_ask_response(result if isinstance(result, dict) else {}, parsed_request, user)
+            self._json(200, payload)
         except Exception as exc:
             self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
 
@@ -21873,6 +26537,15 @@ def main() -> int:
 
     if _auth_enabled():
         if _first_run_setup_required():
+            try:
+                from ui_auth_docker import dev_seed_auth_enabled, seed_dev_auth
+
+                if dev_seed_auth_enabled():
+                    seed_dev_auth()
+                    print("Seeded developer UI auth from explicit environment credentials.")
+            except Exception as exc:
+                print(f"WARNING: dev auth seed skipped: {type(exc).__name__}: {exc}")
+        if _first_run_setup_required():
             print("First-run setup required.")
             print("Open /setup/first-run to create the initial UI user.")
         else:
@@ -21881,16 +26554,15 @@ def main() -> int:
                 print("Startup validation failed for UI auth.")
                 print("No auth users configured. Set SOC_UI_AUTH_USERS_JSON or complete first-run setup.")
                 return 2
-            if "analyst" in users and users["analyst"].get("password") == "changeme123!":
-                print("WARNING: default UI auth credential detected (analyst/changeme123!). Change it in config/ui.env.")
-
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     scheme = "http"
+    ssl_context = None
     if args.tls_cert_file and args.tls_key_file:
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(certfile=args.tls_cert_file, keyfile=args.tls_key_file)
         httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
         scheme = "https"
+    httpd.tls_enabled = bool(ssl_context)
     print(f"Web UI running at {scheme}://{args.host}:{args.port}")
     if scheme == "https":
         print(f"TLS cert: {args.tls_cert_file}")

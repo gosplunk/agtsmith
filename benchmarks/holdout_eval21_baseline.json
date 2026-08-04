@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "holdout": "eval21",
+  "recorded_at": "2026-08-03",
+  "aggregate": {
+    "average": 26.4,
+    "pass": 0,
+    "partial": 2,
+    "fail": 19
+  },
+  "rubric": {
+    "dataset_scope": 20,
+    "logic_and_filters": 25,
+    "field_fidelity": 15,
+    "aggregation_and_shape": 15,
+    "live_execution_validity": 15,
+    "result_similarity": 10,
+    "classification": {
+      "pass": "85-100",
+      "partial": "60-84",
+      "fail": "0-59"
+    }
+  },
+  "execution": {
+    "planner_model": "TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M",
+    "writer_model": "granite4:3b",
+    "validator_model": "TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M",
+    "profile_hash": null,
+    "profile_hash_status": "not_recorded_by_original_ad_hoc_eval",
+    "reference_live_result_records": 21,
+    "generated_live_result_records": 19,
+    "generated_query_absent": 2,
+    "generation_complete": 21,
+    "row_count_matches": 1
+  },
+  "cases": [
+    {"id":"linux_secure_1","score":15,"classification":"fail","generated_rows":0,"reference_rows":3,"finding":"Wrong index and sourcetypes; parsed the requested word counts as user=\"counts\"; zero rows while reference returned 3."},
+    {"id":"linux_secure_2","score":0,"classification":"fail","generated_rows":null,"reference_rows":4,"finding":"Full pipeline ended in an MCP read timeout before yielding SPL; reference returned 4."},
+    {"id":"linux_secure_3","score":15,"classification":"fail","generated_rows":0,"reference_rows":8,"finding":"Wrong index and sourcetypes; parsed values as user=\"values\" and omitted action comparison; zero rows versus 8."},
+    {"id":"access_combined_1","score":30,"classification":"fail","generated_rows":12,"reference_rows":3,"finding":"Routed to suspicious-user-agent template, broadened scope to botsv3, and omitted both-path condition, hosts, bytes; 12 unrelated rows versus 3."},
+    {"id":"access_combined_2","score":35,"classification":"fail","generated_rows":12,"reference_rows":5,"finding":"Correct sourcetype but wrong suspicious-UA analysis; omitted host grouping, bytes, URI cardinality, and referrer metric; 12 versus 5."},
+    {"id":"access_combined_3","score":20,"classification":"fail","generated_rows":1,"reference_rows":21,"finding":"Reduced request to a global count; omitted URI, 15-minute bins, average bytes, and anomaly threshold; 1 row versus 21."},
+    {"id":"apache_error_1","score":10,"classification":"fail","generated_rows":6,"reference_rows":4,"finding":"Queried access_combined instead of apache:error and produced top clients rather than normalized signatures; 6 unrelated rows versus 4."},
+    {"id":"apache_error_2","score":10,"classification":"fail","generated_rows":6,"reference_rows":6,"finding":"Queried access_combined instead of apache:error and omitted phrase shares; 6 unrelated rows versus 6 reference rows."},
+    {"id":"apache_error_3","score":10,"classification":"fail","generated_rows":6,"reference_rows":3,"finding":"Queried access_combined and omitted time binning and per-host maximum; 6 unrelated rows versus 3."},
+    {"id":"windows_1","score":0,"classification":"fail","generated_rows":null,"reference_rows":3,"finding":"Routed to source metadata inventory and emitted no SPL; reference returned 3 qualifying source IPs."},
+    {"id":"windows_2","score":65,"classification":"partial","generated_rows":20,"reference_rows":8,"finding":"Correct Event 3 dataset and fields, but no PowerShell-versus-svchost filter/aggregation; returned 20 raw events versus 8 grouped rows."},
+    {"id":"windows_3","score":35,"classification":"fail","generated_rows":20,"reference_rows":0,"finding":"Queried only Sysmon Event 3 and omitted failed-logon intersection and aggregation; returned 20 rows while valid reference returned zero."},
+    {"id":"aws_1","score":40,"classification":"fail","generated_rows":0,"reference_rows":3,"finding":"Correct dataset, but no non-read-only/error filters and used nonexistent occurrence fields as grouping keys; zero rows versus 3."},
+    {"id":"aws_2","score":50,"classification":"fail","generated_rows":10,"reference_rows":9,"finding":"Correct dataset and general CloudTrail fields, but no S3/PutObject filter or bucket/key/encryption fields; 10 broad rows versus 9."},
+    {"id":"aws_3","score":35,"classification":"fail","generated_rows":0,"reference_rows":9,"finding":"Correct dataset but omitted readOnly, region, split counts, and percentage; malformed stats alias yielded zero versus 9."},
+    {"id":"o365_1","score":5,"classification":"fail","generated_rows":0,"reference_rows":19,"finding":"Misrouted O365 activity to Linux/Windows failed logons; zero unrelated rows versus 19."},
+    {"id":"o365_2","score":5,"classification":"fail","generated_rows":52,"reference_rows":3,"finding":"Misrouted SharePoint downloads to cross-platform failed logons; 52 unrelated rows versus 3."},
+    {"id":"o365_3","score":5,"classification":"fail","generated_rows":79,"reference_rows":6,"finding":"Misrouted O365 administrative operations to failed logons; 79 unrelated rows versus 6."},
+    {"id":"dns_1","score":55,"classification":"fail","generated_rows":20,"reference_rows":42,"finding":"Correct dataset and useful DNS tuple counts, but omitted NXDomain aggregation, total events, failure percentage, and resolver rollup; 20 rows versus 42."},
+    {"id":"dns_2","score":60,"classification":"partial","generated_rows":20,"reference_rows":32,"finding":"Correct dataset and constituent fields, but grouped by individual query/client instead of resolver and omitted distinct counts; 20 rows versus 32."},
+    {"id":"dns_3","score":55,"classification":"fail","generated_rows":20,"reference_rows":3,"finding":"Correct dataset and query names, but omitted answer data, TTL, distinct-answer condition, and client rollup; 20 rows versus 3."}
+  ]
+}

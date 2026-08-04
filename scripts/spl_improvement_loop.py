@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from holdout_firewall import holdout_leak_reasons
 from local_learning import BROAD_INTENTS, _candidate, _upsert_candidates, load_environment_profile
 from minimal_question_to_answer import map_question_to_template, template_to_query_args
 
@@ -49,6 +50,8 @@ def _failure_has_live_mcp_evidence(row: dict[str, Any]) -> bool:
 
 
 def propose_candidate_from_failure(row: dict[str, Any], *, min_pass_score: int = DEFAULT_MIN_PASS_SCORE) -> dict[str, Any] | None:
+    if holdout_leak_reasons(row):
+        return None
     try:
         score = int(row.get("score", 0))
     except Exception:
@@ -138,8 +141,12 @@ def process_benchmark_report(report_path: Path, *, min_pass_score: int = DEFAULT
 
     candidates: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    holdout_rejected = 0
     for row in results:
         if not isinstance(row, dict):
+            continue
+        if holdout_leak_reasons(row):
+            holdout_rejected += 1
             continue
         candidate = propose_candidate_from_failure(row, min_pass_score=min_pass_score)
         if not candidate:
@@ -155,6 +162,7 @@ def process_benchmark_report(report_path: Path, *, min_pass_score: int = DEFAULT
     return {
         "source_report": str(report_path),
         "candidates_proposed": len(candidates),
+        "holdout_rejected_count": holdout_rejected,
         "candidate_ids": [str(item.get("id", "")) for item in candidates],
         "upsert": upsert,
     }

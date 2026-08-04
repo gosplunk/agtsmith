@@ -9,81 +9,21 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from evaluate_spl_writer_models import TEST_CASES, score_candidate
-from minimal_question_to_answer import OLLAMA_HOST, OLLAMA_MODEL
-from query_policy import validate_query_args
+from evaluate_spl_writer_models import TEST_CASES, generate_candidate as shared_generate_candidate, score_candidate
+from minimal_question_to_answer import OLLAMA_MODEL
 from spl_rag_context import RAG_SOURCES, build_spl_rag_context
 
 
-def _extract_json(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        obj = json.loads(cleaned)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
-    m = re.search(r"\{[\s\S]*\}", cleaned)
-    if not m:
-        return {}
-    try:
-        obj = json.loads(m.group(0))
-    except Exception:
-        return {}
-    return obj if isinstance(obj, dict) else {}
-
-
 def generate_candidate(model: str, question: str, *, rag_context: str = "", timeout: float = 120.0) -> dict[str, Any]:
-    system = (
-        "You are a Splunk SPL writer for a read-only SOC lab. "
-        "Return strict JSON only with keys: query, earliest_time, latest_time, row_limit. "
-        "Rules: query starts with 'search ', earliest_time and latest_time required, row_limit <= 200."
-    )
-    if rag_context:
-        prompt = (
-            f"{system}\n\n"
-            "Use the retrieval context as guidance, but keep output minimal and policy-safe.\n\n"
-            f"RETRIEVAL_CONTEXT:\n{rag_context}\n\n"
-            f"TASK:\n{question}"
-        )
-    else:
-        prompt = f"{system}\n\nTASK:\n{question}"
-
-    payload = {"model": model, "prompt": prompt, "stream": False, "think": False}
-    with httpx.Client(timeout=timeout) as client:
-        resp = client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
-        resp.raise_for_status()
-        body = resp.json()
-    raw = str(body.get("response", "")).strip()
-    parsed = _extract_json(raw)
-    return {
-        "query": str(parsed.get("query", "")).strip(),
-        "earliest_time": str(parsed.get("earliest_time", "")).strip(),
-        "latest_time": str(parsed.get("latest_time", "")).strip(),
-        "row_limit": parsed.get("row_limit", 10),
-        "raw_preview": raw[:500],
-    }
+    return shared_generate_candidate(model, question, rag_context=rag_context, timeout=timeout)
 
 
-def score_with_policy(candidate: dict[str, Any], required_terms: list[str], *, question: str = "") -> tuple[int, dict[str, Any]]:
-    base_score, base_notes = score_candidate(candidate, required_terms)
-    query_args = {
-        "query": candidate.get("query", ""),
-        "earliest_time": candidate.get("earliest_time", ""),
-        "latest_time": candidate.get("latest_time", ""),
-        "row_limit": candidate.get("row_limit", 10) if isinstance(candidate.get("row_limit"), int) else 10,
-    }
-    policy_ok, policy_reason = validate_query_args(query_args, question=question)
+def score_with_policy(candidate: dict[str, Any], case: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    base_score, base_notes = score_candidate(candidate, case)
 
     mcp_ok = True
     mcp_reason = "mcp_compatible"
@@ -94,17 +34,14 @@ def score_with_policy(candidate: dict[str, Any], required_terms: list[str], *, q
 
     final = base_score
     notes = list(base_notes)
-    if policy_ok:
-        final += 10
-    else:
-        notes.append(f"policy_fail:{policy_reason}")
-        final -= 20
+    policy_ok = not any(str(n).startswith("policy_fail:") for n in notes)
+    policy_reason = next((str(n).split(":", 1)[1] for n in notes if str(n).startswith("policy_fail:")), "policy_ok")
 
     if mcp_ok:
-        final += 5
+        final = min(100, final + 3)
     else:
         notes.append(mcp_reason)
-        final -= 15
+        final = max(0, final - 10)
 
     return max(0, min(100, final)), {
         "base_score": base_score,
@@ -135,8 +72,8 @@ def main() -> int:
         for run_idx in range(1, max(1, args.runs) + 1):
             vanilla = generate_candidate(args.model, question, rag_context="")
             rag = generate_candidate(args.model, question, rag_context=rag_ctx)
-            v_score, v_meta = score_with_policy(vanilla, terms, question=question)
-            r_score, r_meta = score_with_policy(rag, terms, question=question)
+            v_score, v_meta = score_with_policy(vanilla, case)
+            r_score, r_meta = score_with_policy(rag, case)
             rows.append(
                 {
                     "case_id": cid,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mint Splunk MCP bearer token for user mcp and persist to config/ui.env."""
+"""Ensure Splunk MCP bearer token in config/ui.env — reuse when valid, rotate only when needed."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from lab_data.config import DEFAULT_UI_ENV, load_ui_env  # noqa: E402
 
 MCP_TOKEN_USER_DEFAULT = "mcp"
 MCP_TOKEN_PATH = "/servicesNS/nobody/Splunk_MCP_Server/mcp_token?output_mode=json"
+MIN_TOKEN_LEN = 100
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -40,7 +41,28 @@ def _splunk_basic_auth(ui_env: dict[str, str]) -> str:
     return f"Basic {cred}"
 
 
-def mint_mcp_token(*, ui_env: dict[str, str], token_user: str) -> str:
+def fetch_mcp_token(*, ui_env: dict[str, str], token_user: str) -> str:
+    """Read the current encrypted MCP token from Splunk without rotating it."""
+    base = str(ui_env.get("SPLUNK_BASE_URL", "https://127.0.0.1:8089")).rstrip("/")
+    auth = _splunk_basic_auth(ui_env)
+    fetch_url = f"{base}{MCP_TOKEN_PATH}&username={urllib.parse.quote(token_user)}"
+    fetch_req = urllib.request.Request(fetch_url, method="GET", headers={"Authorization": auth})
+    try:
+        with urllib.request.urlopen(fetch_req, timeout=30, context=_ssl_context()) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"mcp_fetch_error:{exc.code}:{detail}") from exc
+
+    payload = json.loads(body)
+    token = str(payload.get("token", "")).strip()
+    if len(token) < MIN_TOKEN_LEN:
+        raise RuntimeError("mcp_token_missing_or_truncated")
+    return token
+
+
+def rotate_mcp_token(*, ui_env: dict[str, str], token_user: str) -> str:
+    """Rotate Splunk MCP token (invalidates the previous token) and return the new value."""
     base = str(ui_env.get("SPLUNK_BASE_URL", "https://127.0.0.1:8089")).rstrip("/")
     auth = _splunk_basic_auth(ui_env)
     rotate_url = f"{base}{MCP_TOKEN_PATH}"
@@ -59,20 +81,11 @@ def mint_mcp_token(*, ui_env: dict[str, str], token_user: str) -> str:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"mcp_rotate_error:{exc.code}:{detail}") from exc
 
-    fetch_url = f"{base}{MCP_TOKEN_PATH}&username={urllib.parse.quote(token_user)}"
-    fetch_req = urllib.request.Request(fetch_url, method="GET", headers={"Authorization": auth})
-    try:
-        with urllib.request.urlopen(fetch_req, timeout=30, context=_ssl_context()) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"mcp_fetch_error:{exc.code}:{detail}") from exc
+    return fetch_mcp_token(ui_env=ui_env, token_user=token_user)
 
-    payload = json.loads(body)
-    token = str(payload.get("token", "")).strip()
-    if len(token) < 100:
-        raise RuntimeError("mcp_token_missing_or_truncated")
-    return token
+
+# Backward-compatible alias used by older call sites/tests.
+mint_mcp_token = rotate_mcp_token
 
 
 def verify_mcp_token(token: str, *, ui_env: dict[str, str]) -> None:
@@ -120,34 +133,74 @@ def upsert_ui_env(path: Path, key: str, value: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def refresh(*, ui_env_path: Path, token_user: str, verify: bool = True) -> str:
+def ensure_mcp_token(
+    *,
+    ui_env_path: Path,
+    token_user: str,
+    verify: bool = True,
+    force_rotate: bool = False,
+) -> tuple[str, str]:
+    """Return (token, action) where action is reused|rotated|fetched."""
     ui_env = load_ui_env(ui_env_path)
-    token = mint_mcp_token(ui_env=ui_env, token_user=token_user)
+    existing = str(ui_env.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
+
+    if not force_rotate and len(existing) >= MIN_TOKEN_LEN:
+        try:
+            if verify:
+                verify_mcp_token(existing, ui_env=ui_env)
+            return existing, "reused"
+        except Exception:
+            pass
+
+    if not force_rotate:
+        try:
+            fetched = fetch_mcp_token(ui_env=ui_env, token_user=token_user)
+            if verify:
+                verify_mcp_token(fetched, ui_env=ui_env)
+            if fetched != existing:
+                upsert_ui_env(ui_env_path, "SPLUNK_LAB_BEARER_TOKEN", fetched)
+            return fetched, "fetched"
+        except Exception:
+            pass
+
+    token = rotate_mcp_token(ui_env=ui_env, token_user=token_user)
     if verify:
         verify_mcp_token(token, ui_env=ui_env)
     upsert_ui_env(ui_env_path, "SPLUNK_LAB_BEARER_TOKEN", token)
+    return token, "rotated"
+
+
+def refresh(*, ui_env_path: Path, token_user: str, verify: bool = True, force_rotate: bool = False) -> str:
+    token, _action = ensure_mcp_token(
+        ui_env_path=ui_env_path,
+        token_user=token_user,
+        verify=verify,
+        force_rotate=force_rotate,
+    )
     return token
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Refresh Splunk MCP token into config/ui.env")
+    parser = argparse.ArgumentParser(description="Ensure Splunk MCP token in config/ui.env (reuse when valid)")
     parser.add_argument("--ui-env", default=str(DEFAULT_UI_ENV))
     parser.add_argument("--token-user", default=MCP_TOKEN_USER_DEFAULT)
     parser.add_argument("--no-verify", action="store_true")
+    parser.add_argument("--force-rotate", action="store_true", help="Always rotate (invalidates the previous token)")
     parser.add_argument("--print-token", action="store_true", help="Print token to stdout (avoid in CI logs)")
     args = parser.parse_args()
 
     try:
-        token = refresh(
+        token, action = ensure_mcp_token(
             ui_env_path=Path(args.ui_env),
             token_user=args.token_user,
             verify=not args.no_verify,
+            force_rotate=bool(args.force_rotate),
         )
     except Exception as exc:
         print(f"ERROR refresh_mcp_token: {exc}", file=sys.stderr)
         return 1
 
-    print(f"OK mcp_token_user={args.token_user} token_len={len(token)}")
+    print(f"OK mcp_token_user={args.token_user} action={action} token_len={len(token)}")
     if args.print_token:
         print(token)
     return 0

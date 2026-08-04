@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from environment_profile import PROFILE_PATH_DEFAULT, load_environment_profile
+from holdout_firewall import assert_no_holdout_leakage, filter_holdout_records
 from query_templates import TEMPLATES
 
 OUT_DEFAULT = Path("artifacts/knowledge/spl_skillpack_latest.json")
@@ -229,12 +230,16 @@ def main() -> int:
     args = parser.parse_args()
 
     profile = load_environment_profile(args.profile)
+    intent_skills, rejected_intents = filter_holdout_records(_build_intent_skills())
+    domain_skills, rejected_domains = filter_holdout_records(_build_domain_skills(profile))
+    authoring_guidance, rejected_guidance = filter_holdout_records(list(AUTHORING_GUIDANCE))
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "source_profile": str(args.profile),
-        "gold_intent_skills": _build_intent_skills(),
-        "domain_skills": _build_domain_skills(profile),
-        "authoring_guidance": list(AUTHORING_GUIDANCE),
+        "gold_intent_skills": intent_skills,
+        "domain_skills": domain_skills,
+        "authoring_guidance": authoring_guidance,
+        "holdout_rejected_count": len(rejected_intents) + len(rejected_domains) + len(rejected_guidance),
         "notes": [
             "Use discovered index+sourcetype combinations.",
             "Default to non-internal indexes unless question explicitly requests Splunk internal context.",
@@ -242,6 +247,7 @@ def main() -> int:
             "Prefer field-native queries when the environment profile shows the required fields already exist.",
         ],
     }
+    assert_no_holdout_leakage(payload, asset_name="spl_skillpack")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

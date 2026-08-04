@@ -16,6 +16,13 @@ from http.cookiejar import CookieJar
 from pathlib import Path
 
 from runtime_config import UI_ENV_PATH, parse_env_file, write_env_file
+from ui_auth_docker import (
+    DEFAULT_E2E_USER,
+    bootstrap_docker_ui_auth,
+    docker_ui_running,
+    generated_test_password,
+    try_urllib_login as _shared_try_urllib_login,
+)
 from spl_autonomy_manifest import build_manifest, write_run_manifest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,14 +32,10 @@ FAILED_LOGON_QUESTION = "Show failed login activity in the last 24 hours in wind
 REQUIRED_SPL_TERMS = ("4625",)
 REQUIRED_SPL_ANY_TERMS = ("stats", "eval", "table")
 FORBIDDEN_SPL_PATTERNS = (r"linux_secure.*4625", r"4625.*linux_secure")
-DEFAULT_E2E_USER = "e2e_admin"
-DEFAULT_E2E_PASSWORD = "AgtsmithE2eTest1!"
 PLACEHOLDER_PASSWORDS = {
     "",
     "Replace-With-A-Strong-Password",
-    "changeme",
     "password",
-    "admin",
 }
 
 
@@ -43,6 +46,7 @@ def _looks_like_password_hash(value: str) -> bool:
 
 def _resolve_e2e_credentials() -> tuple[str, str]:
     _, file_values = parse_env_file(UI_ENV_PATH)
+    generated_password = os.environ.get("AGTSMITH_E2E_PASS", "").strip() or generated_test_password()
     user = (
         os.environ.get("AGTSMITH_UI_USER", "").strip()
         or os.environ.get("SOC_UI_AUTH_USERNAME", "").strip()
@@ -55,9 +59,9 @@ def _resolve_e2e_credentials() -> tuple[str, str]:
         or file_values.get("SOC_UI_AUTH_PASSWORD", "").strip()
     )
     if _looks_like_password_hash(password):
-        password = os.environ.get("AGTSMITH_E2E_PASS", DEFAULT_E2E_PASSWORD)
-    elif password in PLACEHOLDER_PASSWORDS or len(password) < 12:
-        password = os.environ.get("AGTSMITH_E2E_PASS", DEFAULT_E2E_PASSWORD)
+        password = generated_password
+    elif password in PLACEHOLDER_PASSWORDS or len(password) < 8:
+        password = generated_password
     return user, password
 
 
@@ -95,19 +99,7 @@ def _post_form(url: str, fields: dict[str, str], *, jar: CookieJar | None = None
 
 
 def _try_urllib_login(base_url: str, user: str, password: str) -> bool:
-    jar = CookieJar()
-    login_url = f"{base_url.rstrip('/')}/login"
-    try:
-        _post_form(login_url, {"username": user, "password": password}, jar=jar)
-    except urllib.error.HTTPError as exc:
-        if exc.code != 401:
-            raise
-        return False
-    try:
-        status, final_url, _body = _fetch(f"{base_url.rstrip('/')}/investigation", jar=jar)
-    except urllib.error.HTTPError as exc:
-        return exc.code not in {401, 403}
-    return status < 400 and "/login" not in final_url and "/setup/first-run" not in final_url
+    return _shared_try_urllib_login(base_url, user, password)
 
 
 def _restart_ui_server(base_url: str) -> None:
@@ -176,36 +168,32 @@ def _exec_state_locator(page):
 
 
 def _docker_ui_running() -> bool:
-    try:
-        proc = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.Running}}", "agtsmith-ui-deploy"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return proc.returncode == 0 and proc.stdout.strip() == "true"
-    except (OSError, subprocess.SubprocessError):
-        return False
+    return docker_ui_running()
 
 
-def _refresh_mcp_token_if_possible() -> None:
+def _refresh_mcp_token_if_possible(*, force_rotate: bool = False) -> None:
     _, values = parse_env_file(UI_ENV_PATH)
     if not values.get("SPLUNK_USER") or not values.get("SPLUNK_PASS"):
         return
-    token_script = PROJECT_ROOT / ".cursor/skills/agtsmith-local-lab/scripts/mcp-token.sh"
-    if not token_script.exists():
+    refresh_script = PROJECT_ROOT / "scripts" / "lab_data" / "refresh_mcp_token.py"
+    if not refresh_script.exists():
         return
-    import re
 
-    env = os.environ.copy()
-    env.update(values)
-    proc = subprocess.run([str(token_script)], capture_output=True, text=True, cwd=PROJECT_ROOT, env=env, check=False)
-    out = proc.stdout + proc.stderr
-    match = re.search(r"^SPLUNK_LAB_BEARER_TOKEN=(.+)$", out, re.M)
-    if not match:
+    cmd = [
+        sys.executable,
+        str(refresh_script),
+        "--ui-env",
+        str(UI_ENV_PATH),
+    ]
+    if force_rotate:
+        cmd.append("--force-rotate")
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=PROJECT_ROOT, check=False)
+    if proc.returncode != 0:
         return
-    token = match.group(1).strip()
-    write_env_file({"SPLUNK_LAB_BEARER_TOKEN": token}, UI_ENV_PATH)
+    _, values = parse_env_file(UI_ENV_PATH)
+    token = str(values.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
+    if not token:
+        return
     if not _docker_ui_running():
         return
     sync_py = f"""
@@ -220,68 +208,28 @@ write_env_file({{"SPLUNK_LAB_BEARER_TOKEN": {token!r}}})
     )
 
 
-def _bootstrap_docker_ui_auth(user: str, password: str) -> None:
-    bootstrap_py = f"""
-import json
-import sys
-
-sys.path[:0] = [".", "scripts"]
-from runtime_config import write_env_file
-from web_ui_server import _hash_password
-
-hashed = _hash_password({password!r})
-write_env_file(
-    {{
-        "SOC_UI_AUTH_ENABLED": "1",
-        "SOC_UI_AUTH_USERNAME": {user!r},
-        "SOC_UI_AUTH_PASSWORD": hashed,
-        "SOC_UI_AUTH_ROLE": "admin",
-        "SOC_UI_AUTH_USERS_JSON": json.dumps(
-            [{"username": {user!r}, "password": hashed, "role": "admin"}],
-            separators=(",", ":"),
-        ),
-        "SOC_UI_AUTH_INITIALIZED": "1",
-        "AGTSMITH_TEMPLATE_OVERRIDE": "always",
-    }}
-)
-print("bootstrap_ok")
-"""
-    proc = subprocess.run(
-        ["docker", "exec", "agtsmith-ui-deploy", "python", "-c", bootstrap_py],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=PROJECT_ROOT,
-    )
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
-        raise RuntimeError(f"docker auth bootstrap failed: {detail}")
-    subprocess.run(["docker", "restart", "agtsmith-ui-deploy"], check=True)
-    deadline = time.time() + 45
-    while time.time() < deadline:
-        if _lab_up("http://127.0.0.1:8787"):
-            return
-        time.sleep(1)
-    raise RuntimeError("agtsmith-ui-deploy did not become reachable after restart")
-
-
 def _ensure_ui_auth(base_url: str, user: str, password: str) -> tuple[str, str]:
-    boot_user = os.environ.get("AGTSMITH_E2E_USER", DEFAULT_E2E_USER)
-    boot_pass = os.environ.get("AGTSMITH_E2E_PASS", DEFAULT_E2E_PASSWORD)
+    boot_user = os.environ.get("AGTSMITH_E2E_USER", user).strip() or DEFAULT_E2E_USER
+    boot_pass = os.environ.get("AGTSMITH_E2E_PASS", password).strip() or password
 
-    for candidate_user, candidate_pass in (
-        (boot_user, boot_pass),
+    candidates: list[tuple[str, str]] = []
+    for candidate in (
         (user, password),
+        (boot_user, boot_pass),
     ):
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate_user, candidate_pass in candidates:
         if _try_urllib_login(base_url, candidate_user, candidate_pass):
             return candidate_user, candidate_pass
 
-    if _docker_ui_running():
-        _bootstrap_docker_ui_auth(boot_user, boot_pass)
+    if _maybe_bootstrap_first_run(base_url, boot_user, boot_pass):
         if _try_urllib_login(base_url, boot_user, boot_pass):
             return boot_user, boot_pass
 
-    if _maybe_bootstrap_first_run(base_url, boot_user, boot_pass):
+    if _docker_ui_running():
+        bootstrap_docker_ui_auth(boot_user, boot_pass, merge=True)
         if _try_urllib_login(base_url, boot_user, boot_pass):
             return boot_user, boot_pass
 
@@ -289,8 +237,9 @@ def _ensure_ui_auth(base_url: str, user: str, password: str) -> tuple[str, str]:
     if _maybe_bootstrap_first_run(base_url, boot_user, boot_pass) and _try_urllib_login(base_url, boot_user, boot_pass):
         return boot_user, boot_pass
 
-    if _try_urllib_login(base_url, user, password):
-        return user, password
+    for candidate_user, candidate_pass in candidates:
+        if _try_urllib_login(base_url, candidate_user, candidate_pass):
+            return candidate_user, candidate_pass
 
     raise RuntimeError("Unable to authenticate for investigation-e2e after bootstrap/restart")
 

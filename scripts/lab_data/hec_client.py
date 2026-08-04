@@ -84,8 +84,18 @@ class HecClient:
         )
         try:
             with urllib.request.urlopen(req, timeout=self.config.timeout_sec, context=self._context()) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
                 if resp.status >= 300:
                     raise RuntimeError(f"hec_http_status:{resp.status}")
+                if body.strip():
+                    try:
+                        reply = json.loads(body)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError("hec_invalid_json_response") from exc
+                    if not isinstance(reply, dict) or int(reply.get("code", -1)) != 0:
+                        code = reply.get("code", "unknown") if isinstance(reply, dict) else "unknown"
+                        text = reply.get("text", "unknown") if isinstance(reply, dict) else "unknown"
+                        raise RuntimeError(f"hec_rejected:{code}:{text}")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             raise RuntimeError(f"hec_http_error:{exc.code}:{detail}") from exc

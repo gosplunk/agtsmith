@@ -10,10 +10,22 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from minimal_question_to_answer import map_question_to_template, template_to_query_args
-from question_intelligence import infer_time_window
+from question_intelligence import (
+    apply_question_time_window,
+    extract_explicit_sourcetypes,
+    infer_time_window,
+    question_requests_all_time,
+    question_requests_privilege_first_seen,
+)
 
 
 class QuestionRoutingTests(unittest.TestCase):
+    def test_sourcetype_output_words_do_not_become_dataset_locks(self) -> None:
+        self.assertEqual(
+            extract_explicit_sourcetypes("Show Splunk internal sourcetype volume and counts"),
+            [],
+        )
+
     def test_time_window_extracts_last_7_days(self) -> None:
         earliest, latest = infer_time_window("Show failed login activity in the last 7 days on my windows or linux machines")
         self.assertEqual(earliest, "-7d")
@@ -107,6 +119,97 @@ class QuestionRoutingTests(unittest.TestCase):
         query = str(args.get("query", ""))
         self.assertIn("EventCode=4624", query)
         self.assertNotIn("EventCode=4625", query)
+
+    def test_at_any_point_ever_requests_all_time(self) -> None:
+        question = "were there any failed logons at any point ever in windows?"
+        self.assertTrue(question_requests_all_time(question))
+        earliest, latest = infer_time_window(question)
+        self.assertEqual(earliest, "0")
+        self.assertEqual(latest, "now")
+
+    def test_failed_logons_ever_in_windows_template_args_use_all_time(self) -> None:
+        question = "were there any failed logons at any point ever in windows?"
+        template = map_question_to_template(question)
+        self.assertEqual(template.intent, "windows_auth_failures")
+        args = template_to_query_args(template, question, apply_environment=False)
+        self.assertEqual(args.get("earliest_time"), "0")
+        self.assertEqual(args.get("latest_time"), "now")
+
+    def test_apply_question_time_window_overrides_default_24h(self) -> None:
+        question = "were there any failed logons at any point ever in windows?"
+        tool_args = {"earliest_time": "-24h", "latest_time": "now", "row_limit": 50}
+        apply_question_time_window(question, tool_args)
+        self.assertEqual(tool_args.get("earliest_time"), "0")
+
+    def test_were_there_any_without_window_requests_all_time(self) -> None:
+        question = "were there any failed logons on windows?"
+        self.assertTrue(question_requests_all_time(question))
+        earliest, latest = infer_time_window(question)
+        self.assertEqual(earliest, "0")
+
+    def test_last_24_hours_still_bounded_when_also_ever(self) -> None:
+        question = "were there any failed logons ever in windows in the last 24 hours?"
+        self.assertFalse(question_requests_all_time(question))
+        earliest, latest = infer_time_window(question)
+        self.assertEqual(earliest, "-24h")
+
+    def test_privilege_first_seen_variants_use_first_seen_shape(self) -> None:
+        for question in (
+            "Show new sudo behavior over the last day.",
+            "Show first observed root sessions today.",
+        ):
+            with self.subTest(question=question):
+                self.assertTrue(question_requests_privilege_first_seen(question))
+                template = map_question_to_template(question)
+                self.assertEqual(template.intent, "linux_privilege_escalation_first_seen")
+                args = template_to_query_args(template, question, apply_environment=False)
+                query = str(args.get("query", "")).lower()
+                self.assertIn("earliest(_time)", query)
+                self.assertIn("first_seen", query)
+                self.assertNotIn("| table _time", query)
+
+    def test_privilege_activity_is_not_misrouted_as_host_inventory(self) -> None:
+        question = (
+            "Show sudo and privilege escalation activity on Linux hosts "
+            "in the last 24 hours"
+        )
+        template = map_question_to_template(question)
+        self.assertEqual(
+            template.intent,
+            "linux_privilege_escalation_activity",
+        )
+
+    def test_host_question_word_does_not_become_host_filter(self) -> None:
+        question = (
+            "Show failed SSH login activity in the last 24 hours and identify "
+            "which host is being targeted most."
+        )
+        template = map_question_to_template(question)
+        args = template_to_query_args(template, question, apply_environment=False)
+        self.assertNotIn("host IN (is)", str(args.get("query", "")))
+
+    def test_explicit_host_assignment_still_applies_host_filter(self) -> None:
+        question = "Show failed SSH login activity for host=prod-web-01 in the last 24 hours."
+        template = map_question_to_template(question)
+        args = template_to_query_args(template, question, apply_environment=False)
+        self.assertIn("host IN (prod-web-01)", str(args.get("query", "")))
+
+    def test_splunk_internal_sourcetype_variants_use_specific_intent(self) -> None:
+        for question in (
+            "Show top Splunk internal sourcetypes over the last 24 hours.",
+            "What Splunk internal sourcetypes are most active today?",
+        ):
+            with self.subTest(question=question):
+                template = map_question_to_template(question)
+                self.assertEqual(template.intent, "internal_sourcetypes")
+                args = template_to_query_args(template, question, apply_environment=False)
+                self.assertIn("index=_internal", str(args.get("query", "")))
+                self.assertIn("by sourcetype", str(args.get("query", "")))
+
+    def test_splunk_internal_sourcetype_volume_keeps_health_intent(self) -> None:
+        question = "Show Splunk internal sourcetype volume in the last 24 hours"
+        template = map_question_to_template(question)
+        self.assertEqual(template.intent, "splunk_internal_health")
 
 
 if __name__ == "__main__":

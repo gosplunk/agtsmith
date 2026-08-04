@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BENCHMARK_PATH = PROJECT_ROOT / "benchmarks" / "live_domain_benchmark.json"
 DEFAULT_OUT_ROOT = PROJECT_ROOT / "artifacts" / "spl_autonomy" / "live_benchmark"
-DEFAULT_EARLIEST_TIME = "-24h"
+DEFAULT_EARLIEST_TIME = "-7d"
 EARLIEST_TIME_CHOICES = ("-24h", "-7d")
 MANIFEST_CASE_ALIASES = {
     "failed_logons_phrasing_24h": "linux_auth_failures_24h",
@@ -103,17 +103,17 @@ CASE_TEMPLATES: list[dict[str, Any]] = [
         "id": "linux_privilege_escalation_24h",
         "theme": "linux_priv",
         "question": "Show sudo and privilege escalation activity on Linux hosts in the last 24 hours",
-        "intent": "linux_privilege_escalation",
+        "intent": "linux_privilege_escalation_activity",
         "profile_domain_hints": {
             "platform": "linux",
-            "use_cases": ["linux_privilege_escalation"],
+            "use_cases": ["linux_privilege_escalation_activity"],
             "preferred_sourcetypes": ["auth.log", "linux_secure", "linux_audit"],
         },
-        "expected_shape": "stats",
-        "required_terms": ["sudo", "stats", "actor", "src_ip"],
+        "expected_shape": "table",
+        "required_terms": ["sudo", "table", "actor", "target_user"],
         "forbidden_patterns": [r"index=\*", "index=windows", "index=botsv3"],
-        "allow_zero_rows": True,
-        "min_rows": 0,
+        "allow_zero_rows": False,
+        "min_rows": 1,
     },
     {
         "id": "windows_failed_logon_4625_24h",
@@ -220,14 +220,28 @@ def _pick_sourcetype(sourcetypes: list[str], *candidates: str) -> str:
 def _resolve_case_domain(case: BenchmarkCase, profile_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     profile = attach_semantics(load_environment_profile(profile_path))
     domains = resolve_authoritative_domains_for_question(case.question, case.intent, profile_path=profile_path)
-    primary = domains[0] if domains else None
+    hints = case.profile_domain_hints
+    preferred = [str(item) for item in hints.get("preferred_sourcetypes", []) if str(item).strip()]
+    platform = str(hints.get("platform", "")).strip()
+    hinted_primary = (
+        _fallback_domain_from_profile(
+            profile,
+            platform=platform,
+            preferred_sourcetypes=preferred,
+        )
+        if preferred
+        else None
+    )
+    primary = hinted_primary or (domains[0] if domains else None)
+    if hinted_primary and not any(
+        str(item.get("index", "")).strip()
+        == str(hinted_primary.get("index", "")).strip()
+        for item in domains
+        if isinstance(item, dict)
+    ):
+        domains = [hinted_primary, *domains]
     if primary is None:
-        hints = case.profile_domain_hints
-        preferred = [str(item) for item in hints.get("preferred_sourcetypes", []) if str(item).strip()]
-        platform = str(hints.get("platform", "")).strip()
-        if preferred:
-            primary = _fallback_domain_from_profile(profile, platform=platform, preferred_sourcetypes=preferred)
-        else:
+        if not preferred:
             fallback_domains = _fallback_domains_from_profile(profile, case.intent, case.question, max_domains=1)
             primary = fallback_domains[0] if fallback_domains else None
         if primary:
@@ -239,6 +253,25 @@ def _fallback_domain_from_profile(profile: dict[str, Any], *, platform: str, pre
     st_to_indexes = profile.get("sourcetype_to_indexes", {})
     if not isinstance(st_to_indexes, dict):
         return None
+    platform_l = platform.lower()
+
+    def _index_affinity(index_name: str) -> int:
+        index_l = index_name.lower()
+        score = 0
+        if platform_l and index_l == platform_l:
+            score += 100
+        elif platform_l and platform_l in index_l:
+            score += 50
+        if platform_l == "web" and any(
+            token in index_l for token in ("web", "http", "apache")
+        ):
+            score += 50
+        if index_l.startswith("agtsmith_test"):
+            score -= 10
+        if index_l.startswith("_") and platform_l != "internal":
+            score -= 100
+        return score
+
     for st in preferred_sourcetypes:
         indexes = st_to_indexes.get(st) or st_to_indexes.get(st.lower())
         if not indexes:
@@ -248,7 +281,12 @@ def _fallback_domain_from_profile(profile: dict[str, Any], *, platform: str, pre
                     break
         if not indexes:
             continue
-        idx = str(indexes[0]).strip()
+        candidate_indexes = [
+            str(item).strip() for item in indexes if str(item).strip()
+        ]
+        if not candidate_indexes:
+            continue
+        idx = max(candidate_indexes, key=_index_affinity)
         if not idx:
             continue
         index_row = next((row for row in profile.get("indexes", []) if isinstance(row, dict) and row.get("index") == idx), None)
@@ -896,7 +934,7 @@ def main() -> int:
         "--earliest-time",
         default=DEFAULT_EARLIEST_TIME,
         choices=list(EARLIEST_TIME_CHOICES),
-        help="Splunk earliest_time for MCP execution (default: -24h; use -7d to align with profile snapshot)",
+        help="Splunk earliest_time for MCP execution (default: -7d; use -24h for an explicit one-day run)",
     )
     args = parser.parse_args()
 

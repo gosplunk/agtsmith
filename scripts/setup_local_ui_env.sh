@@ -6,13 +6,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 : "${SPLUNK_USER:?Set SPLUNK_USER}"
 : "${SPLUNK_PASS:?Set SPLUNK_PASS}"
 
-TOKEN="$("${ROOT}/.cursor/skills/agtsmith-local-lab/scripts/mcp-token.sh" | awk '/^SPLUNK_LAB_BEARER_TOKEN=/{print substr($0, index($0, "=") + 1)}')"
-
-if [[ -z "${TOKEN}" ]]; then
-  echo "Failed to mint MCP token" >&2
-  exit 1
-fi
-
 cp -n "${ROOT}/config/ui.env.example" "${ROOT}/config/ui.env" 2>/dev/null || true
 
 python3 - <<PY
@@ -26,7 +19,8 @@ updates = {
     "SPLUNK_BASE_URL": "https://127.0.0.1:8089",
     "SPLUNK_WEB_URL": "http://127.0.0.1:8000",
     "SPLUNK_MCP_URL": "https://127.0.0.1:8089/services/mcp",
-    "SPLUNK_LAB_BEARER_TOKEN": "${TOKEN}",
+    "SPLUNK_USER": "${SPLUNK_USER}",
+    "SPLUNK_PASS": "${SPLUNK_PASS}",
     "AGTSMITH_CASE_BACKEND": "kvstore",
 }
 for key, value in updates.items():
@@ -37,5 +31,18 @@ for key, value in updates.items():
     else:
         text = text.rstrip() + "\\n" + line + "\\n"
 path.write_text(text, encoding="utf-8")
-print(f"Wrote {path} (token not printed)")
 PY
+
+PYTHON_BIN="${ROOT}/.venv/bin/python"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="python3"
+fi
+
+export SPLUNK_USER SPLUNK_PASS
+if ! PYTHONPATH="${ROOT}:${ROOT}/scripts" "${PYTHON_BIN}" \
+  "${ROOT}/scripts/lab_data/refresh_mcp_token.py" --ui-env "${ROOT}/config/ui.env"; then
+  echo "Failed to ensure MCP token" >&2
+  exit 1
+fi
+
+echo "Wrote ${ROOT}/config/ui.env (token not printed)"

@@ -65,12 +65,13 @@ def cleanup(*, layout: str, hours: int, dry_run: bool) -> dict[str, Any]:
         raise ValueError("no_indexes_for_layout")
 
     index_clause = " OR ".join(f'index="{idx}"' for idx in indexes)
+    generator_clause = '(lab_data_source=agtsmith_generator OR "agtsmith_generator")'
     # delete command requires admin; preview with search first when dry_run
     delete_query = (
-        f"search ({index_clause}) lab_data_source=agtsmith_generator earliest=-{hours}h | delete"
+        f"search ({index_clause}) {generator_clause} earliest=-{hours}h | delete"
     )
     preview_query = (
-        f"search ({index_clause}) lab_data_source=agtsmith_generator earliest=-{hours}h | stats count"
+        f"search ({index_clause}) {generator_clause} earliest=-{hours}h | stats count"
     )
 
     report: dict[str, Any] = {

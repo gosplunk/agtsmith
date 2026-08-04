@@ -16,12 +16,37 @@ from typing import Any
 
 import httpx
 
-from minimal_question_to_answer import OLLAMA_HOST
+from minimal_question_to_answer import OLLAMA_HOST, map_question_to_template
+
+try:
+    from ollama_client import call_ollama_json, extract_json_object
+except ImportError:
+    call_ollama_json = None  # type: ignore[assignment,misc]
+    extract_json_object = None  # type: ignore[assignment,misc]
+
+try:
+    from intent_field_contracts import validate_query_for_intent
+except ImportError:
+    validate_query_for_intent = None  # type: ignore[assignment,misc]
+
+try:
+    from query_policy import validate_query_args
+except ImportError:
+    validate_query_args = None  # type: ignore[assignment,misc]
 
 try:
     from spl_rag_context import build_spl_rag_context
 except ImportError:
     build_spl_rag_context = None  # type: ignore[assignment,misc]
+
+try:
+    from spl_writer_prompt import build_standalone_writer_system_prompt, build_standalone_writer_user_payload
+except ImportError:
+    build_standalone_writer_system_prompt = None  # type: ignore[assignment,misc]
+    build_standalone_writer_user_payload = None  # type: ignore[assignment,misc]
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CASES_PATH = PROJECT_ROOT / "benchmarks" / "spl_cases.json"
 
 
 TEST_CASES: list[dict[str, Any]] = [
@@ -29,30 +54,69 @@ TEST_CASES: list[dict[str, Any]] = [
         "id": "failed_login",
         "question": "Write a read-only Splunk SPL query for failed login activity in the last 24 hours.",
         "required_terms": ["failed", "stats", "user"],
+        "expected_intent": "failed_login_activity",
     },
     {
         "id": "linux_auth",
         "question": "Write a read-only Splunk SPL query for Linux authentication failures in index=linux over last 24 hours.",
         "required_terms": ["index=linux", "auth.log", "failed", "stats"],
+        "expected_intent": "linux_auth_failures",
     },
     {
         "id": "linux_priv_esc",
         "question": "Write a read-only Splunk SPL query for failed sudo or su activity in Linux logs over last 24 hours.",
         "required_terms": ["index=linux", "sudo", "su", "stats"],
+        "expected_intent": "linux_privilege_escalation",
     },
     {
         "id": "apache_top_ips",
         "question": "Write a read-only Splunk SPL query for top client IPs in index=linux sourcetype=access_combined over last 24 hours.",
         "required_terms": ["index=linux", "access_combined", "clientip", "stats"],
+        "expected_intent": "apache_access_top_ips",
     },
     {
         "id": "apache_404",
         "question": "Write a read-only Splunk SPL query for 404 spikes in index=linux sourcetype=access_combined over last 24 hours.",
         "required_terms": ["index=linux", "access_combined", "404", "timechart"],
+        "expected_intent": "apache_404_spike",
     },
 ]
 
+LEGACY_QUICK_CASES = TEST_CASES
+
 FORBIDDEN_TERMS = ("delete", "drop", "outputlookup", "| outputcsv", "| sendemail", "| map ", " collect ")
+
+
+def load_benchmark_cases(path: Path, *, max_cases: int = 0) -> list[dict[str, Any]]:
+    """Load writer eval cases from spl_cases.json (or legacy inline TEST_CASES)."""
+    if not path.exists():
+        return list(LEGACY_QUICK_CASES)
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    cases: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        question = str(row.get("question", "")).strip()
+        if not question:
+            continue
+        cases.append(
+            {
+                "id": str(row.get("id", "")),
+                "question": question,
+                "expected_intent": str(row.get("expected_intent", "")).strip(),
+                "required_terms": list(row.get("required_query_terms", [])),
+                "forbidden_terms": list(row.get("forbidden_query_terms", [])),
+                "preferred_indexes": list(row.get("preferred_indexes", [])),
+                "preferred_sourcetypes": list(row.get("preferred_sourcetypes", [])),
+                "expected_shape": str(row.get("expected_shape", "")).strip(),
+                "expected_earliest_time": str(row.get("expected_earliest_time", "")).strip(),
+                "expected_latest_time": str(row.get("expected_latest_time", "")).strip(),
+            }
+        )
+    if max_cases > 0:
+        cases = cases[:max_cases]
+    return cases or list(LEGACY_QUICK_CASES)
+
 
 ORIGIN_BY_KEY: tuple[tuple[str, str], ...] = (
     ("deepseek", "CN / DeepSeek"),
@@ -115,13 +179,87 @@ def _extract_json(text: str) -> dict[str, Any]:
         return {}
 
 
+def _extract_shape(query: str) -> str:
+    lower = query.lower()
+    if "| table " in lower:
+        return "table"
+    if "| timechart " in lower:
+        return "timechart"
+    if "| stats " in lower:
+        return "stats"
+    return "unknown"
+
+
+def _normalize_writer_candidate(parsed: dict[str, Any], *, question: str = "", case: dict[str, Any] | None = None) -> dict[str, Any]:
+    tool_args = parsed.get("tool_args", {}) if isinstance(parsed.get("tool_args"), dict) else {}
+    query = str(parsed.get("query") or tool_args.get("query") or "").strip()
+    if query:
+        from spl_query_normalize import normalize_writer_query
+        from environment_profile import load_environment_profile, normalize_query_index_aliases
+
+        query = normalize_writer_query(query)
+        query = normalize_query_index_aliases(query, load_environment_profile())
+        try:
+            from spl_domain_knowledge import apply_domain_postprocess
+
+            query = apply_domain_postprocess(query, question=question)
+        except Exception:
+            pass
+    earliest = str(parsed.get("earliest_time") or tool_args.get("earliest_time") or "").strip()
+    latest = str(parsed.get("latest_time") or tool_args.get("latest_time") or "").strip()
+    if case:
+        if not earliest and case.get("expected_earliest_time"):
+            earliest = str(case.get("expected_earliest_time"))
+        if not latest and case.get("expected_latest_time"):
+            latest = str(case.get("expected_latest_time"))
+    if question and (not earliest or not latest):
+        from minimal_question_to_answer import infer_time_window
+
+        inferred_e, inferred_l = infer_time_window(question)
+        if not earliest:
+            earliest = inferred_e
+        if not latest:
+            latest = inferred_l
+    row_limit = parsed.get("row_limit", tool_args.get("row_limit", 10))
+    raw_preview = str(parsed.get("_raw_text_preview") or parsed.get("raw_preview") or "")[:500]
+    return {
+        "query": query,
+        "earliest_time": earliest,
+        "latest_time": latest,
+        "row_limit": row_limit,
+        "raw_preview": raw_preview,
+    }
+
+
 def generate_candidate(
     model: str,
     question: str,
     *,
     rag_context: str = "",
+    intent: str = "",
     timeout: float = 120.0,
 ) -> dict[str, Any]:
+    mapped_intent = intent or map_question_to_template(question).intent
+    if build_standalone_writer_user_payload is not None and call_ollama_json is not None:
+        system = build_standalone_writer_system_prompt(intent=mapped_intent)
+        user_payload = build_standalone_writer_user_payload(question, intent=mapped_intent, rag_context=rag_context)
+        parsed = call_ollama_json(model=model, system_prompt=system, user_payload=user_payload, timeout=timeout)
+        from spl_query_schema import constrained_mode_enabled, parse_write_plan, validate_write_plan, write_plan_to_tool_args
+
+        if constrained_mode_enabled():
+            plan = parse_write_plan(parsed)
+            if plan is not None:
+                ok, _reason = validate_write_plan(plan)
+                if ok:
+                    tool_plan = write_plan_to_tool_args(plan, intent=mapped_intent)
+                    parsed = {
+                        "query": tool_plan.get("tool_args", {}).get("query", ""),
+                        "earliest_time": tool_plan.get("tool_args", {}).get("earliest_time", "-7d"),
+                        "latest_time": tool_plan.get("tool_args", {}).get("latest_time", "now"),
+                        "row_limit": tool_plan.get("tool_args", {}).get("row_limit", 10),
+                    }
+        return _normalize_writer_candidate(parsed, question=question, case=None)
+
     system = (
         "You are a Splunk SPL writer for a read-only SOC lab. "
         "Return strict JSON only with keys: query, earliest_time, latest_time, row_limit. "
@@ -136,24 +274,23 @@ def generate_candidate(
         )
     else:
         prompt = f"{system}\n\nTASK:\n{question}"
-    payload = {"model": model, "prompt": prompt, "stream": False, "think": False}
+    payload = {"model": model, "prompt": prompt, "stream": False, "think": False, "format": "json"}
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
         resp.raise_for_status()
         body = resp.json()
     raw = str(body.get("response", "")).strip()
-    parsed = _extract_json(raw)
-    query = str(parsed.get("query", "")).strip()
-    return {
-        "query": query,
-        "earliest_time": str(parsed.get("earliest_time", "")).strip(),
-        "latest_time": str(parsed.get("latest_time", "")).strip(),
-        "row_limit": parsed.get("row_limit", 10),
-        "raw_preview": raw[:500],
-    }
+    if extract_json_object is not None:
+        parsed = extract_json_object(raw)
+    else:
+        parsed = _extract_json(raw)
+    parsed["raw_preview"] = raw[:500]
+    return _normalize_writer_candidate(parsed, question=question, case=None)
 
 
-def score_candidate(candidate: dict[str, Any], required_terms: list[str]) -> tuple[int, list[str]]:
+def score_candidate(candidate: dict[str, Any], case: dict[str, Any]) -> tuple[int, list[str]]:
+    required_terms = list(case.get("required_terms", []))
+    forbidden_terms = list(case.get("forbidden_terms", [])) or list(FORBIDDEN_TERMS)
     score = 0
     notes: list[str] = []
 
@@ -166,57 +303,143 @@ def score_candidate(candidate: dict[str, Any], required_terms: list[str]) -> tup
         notes.append("missing_query")
 
     if lower.startswith("search "):
-        score += 20
+        score += 15
     else:
         notes.append("query_not_search_prefix")
 
     hit_terms = sum(1 for t in required_terms if t.lower() in lower)
-    term_score = int((hit_terms / max(1, len(required_terms))) * 30)
-    score += term_score
-    if hit_terms < len(required_terms):
-        notes.append(f"required_term_hits:{hit_terms}/{len(required_terms)}")
-
-    if all(ft not in lower for ft in FORBIDDEN_TERMS):
-        score += 20
+    if required_terms:
+        term_score = int((hit_terms / len(required_terms)) * 25)
+        score += term_score
+        if hit_terms < len(required_terms):
+            notes.append(f"required_term_hits:{hit_terms}/{len(required_terms)}")
     else:
-        notes.append("forbidden_term_present")
+        score += 25
+
+    forbidden_present = [term for term in forbidden_terms if term.lower() in lower]
+    if forbidden_present:
+        notes.append("forbidden_term_present:" + ",".join(forbidden_present[:3]))
+    else:
+        score += 15
+
+    for pref_group, points in (
+        (list(case.get("preferred_indexes", [])), 5),
+        (list(case.get("preferred_sourcetypes", [])), 5),
+    ):
+        if not pref_group:
+            score += points
+            continue
+        hits = sum(1 for term in pref_group if term.lower() in lower)
+        score += int((hits / len(pref_group)) * points)
+        if hits < len(pref_group):
+            notes.append(f"preferred_miss:{hits}/{len(pref_group)}")
+
+    expected_shape = str(case.get("expected_shape", "")).strip()
+    if expected_shape:
+        actual_shape = _extract_shape(query)
+        if actual_shape == expected_shape:
+            score += 5
+        else:
+            notes.append(f"shape_mismatch:{actual_shape}->{expected_shape}")
+    else:
+        score += 5
 
     earliest = str(candidate.get("earliest_time", "")).strip()
     latest = str(candidate.get("latest_time", "")).strip().lower()
+    expected_earliest = str(case.get("expected_earliest_time", "")).strip()
+    expected_latest = str(case.get("expected_latest_time", "")).strip().lower()
     if earliest and latest in {"now", "now()"}:
-        score += 10
+        score += 5
+        if expected_earliest and earliest != expected_earliest:
+            notes.append(f"earliest_mismatch:{earliest}->{expected_earliest}")
+        if expected_latest and latest.replace("()", "") != expected_latest.replace("()", ""):
+            notes.append(f"latest_mismatch:{latest}->{expected_latest}")
     else:
         notes.append("missing_or_bad_time_bounds")
 
     try:
         rl = int(candidate.get("row_limit", 10))
         if 1 <= rl <= 200:
-            score += 10
+            score += 5
         else:
             notes.append("row_limit_out_of_bounds")
     except Exception:
         notes.append("row_limit_not_int")
+
+    query_args = {
+        "query": query,
+        "earliest_time": earliest or "-7d",
+        "latest_time": "now" if latest in {"now", "now()"} else latest or "now",
+        "row_limit": candidate.get("row_limit", 10),
+    }
+    if validate_query_args is not None:
+        policy_ok, policy_reason = validate_query_args(query_args, question=str(case.get("question", "")))
+        if policy_ok:
+            score += 5
+        else:
+            notes.append(f"policy_fail:{policy_reason}")
+
+    intent = str(case.get("expected_intent", "")).strip()
+    if intent and validate_query_for_intent is not None:
+        contract_ok, contract_reason = validate_query_for_intent(
+            intent,
+            query_args,
+            question=str(case.get("question", "")),
+        )
+        if contract_ok:
+            score += 5
+        else:
+            notes.append(f"intent_contract_fail:{contract_reason}")
+
+    try:
+        from spl_structure_validate import structure_score_penalty, validate_structure
+
+        structure_ok, structure_reason = validate_structure(
+            query,
+            intent=intent,
+            question=str(case.get("question", "")),
+        )
+        if structure_ok:
+            score += 5
+        else:
+            penalty = int(structure_score_penalty(query, intent=intent, question=str(case.get("question", ""))))
+            score = max(0, score - penalty)
+            notes.append(f"structure_fail:{structure_reason}")
+    except Exception:
+        pass
 
     return max(0, min(100, score)), notes
 
 
 def _evaluate_model_cases(
     model: str,
+    cases: list[dict[str, Any]],
     *,
     use_rag: bool,
 ) -> tuple[list[dict[str, Any]], float]:
     case_rows: list[dict[str, Any]] = []
     total = 0
-    for case in TEST_CASES:
+    for case in cases:
         question = str(case["question"])
+        intent = str(case.get("expected_intent", "")).strip()
         rag_context = ""
         if use_rag:
             if build_spl_rag_context is None:
                 raise RuntimeError("spl_rag_context_unavailable")
-            rag_context = build_spl_rag_context(question)
+            rag_context = build_spl_rag_context(question, intent=intent)
         try:
-            c = generate_candidate(model, question, rag_context=rag_context)
-            sc, notes = score_candidate(c, list(case["required_terms"]))
+            c = generate_candidate(model, question, rag_context=rag_context, intent=intent)
+            c = _normalize_writer_candidate(
+                {
+                    "query": c.get("query", ""),
+                    "earliest_time": c.get("earliest_time", ""),
+                    "latest_time": c.get("latest_time", ""),
+                    "row_limit": c.get("row_limit", 10),
+                },
+                question=question,
+                case=case,
+            )
+            sc, notes = score_candidate(c, case)
         except Exception as exc:
             c = {"query": "", "earliest_time": "", "latest_time": "", "row_limit": "", "raw_preview": ""}
             sc = 0
@@ -224,14 +447,14 @@ def _evaluate_model_cases(
         total += sc
         case_rows.append(
             {
-                "case_id": case["id"],
+                "case_id": case.get("id", ""),
                 "score": sc,
                 "notes": notes,
                 "candidate": c,
                 "rag_enabled": use_rag,
             }
         )
-    avg = round(total / len(TEST_CASES), 2)
+    avg = round(total / max(1, len(cases)), 2)
     return case_rows, avg
 
 
@@ -255,7 +478,20 @@ def main() -> int:
         help="off=vanilla only, on=RAG-augmented (production parity), both=dual-track with lift",
     )
     parser.add_argument("--out-dir", default="artifacts/model_eval")
+    parser.add_argument(
+        "--cases",
+        default=str(DEFAULT_CASES_PATH),
+        help="Benchmark cases JSON (default: benchmarks/spl_cases.json). Use 'quick' for 5 legacy prompts.",
+    )
+    parser.add_argument("--max-cases", type=int, default=0, help="Limit case count (0 = all)")
     args = parser.parse_args()
+
+    if args.cases.strip().lower() == "quick":
+        cases_path = Path("/dev/null")
+        benchmark_cases = list(LEGACY_QUICK_CASES)
+    else:
+        cases_path = Path(args.cases)
+        benchmark_cases = load_benchmark_cases(cases_path, max_cases=args.max_cases)
 
     if args.rag_mode in {"on", "both"} and build_spl_rag_context is None:
         raise RuntimeError("RAG mode requires spl_rag_context module")
@@ -269,18 +505,18 @@ def main() -> int:
         origin = model_origin(model)
         row: dict[str, Any] = {"model": model, "origin": origin}
         if args.rag_mode == "off":
-            cases, avg = _evaluate_model_cases(model, use_rag=False)
+            case_rows, avg = _evaluate_model_cases(model, benchmark_cases, use_rag=False)
             row["avg_score"] = avg
             row["vanilla_avg_score"] = avg
-            row["cases"] = cases
+            row["cases"] = case_rows
         elif args.rag_mode == "on":
-            cases, avg = _evaluate_model_cases(model, use_rag=True)
+            case_rows, avg = _evaluate_model_cases(model, benchmark_cases, use_rag=True)
             row["avg_score"] = avg
             row["rag_avg_score"] = avg
-            row["cases"] = cases
+            row["cases"] = case_rows
         else:
-            vanilla_cases, vanilla_avg = _evaluate_model_cases(model, use_rag=False)
-            rag_cases, rag_avg = _evaluate_model_cases(model, use_rag=True)
+            vanilla_cases, vanilla_avg = _evaluate_model_cases(model, benchmark_cases, use_rag=False)
+            rag_cases, rag_avg = _evaluate_model_cases(model, benchmark_cases, use_rag=True)
             row["vanilla_avg_score"] = vanilla_avg
             row["rag_avg_score"] = rag_avg
             row["rag_lift"] = round(rag_avg - vanilla_avg, 2)
@@ -305,7 +541,8 @@ def main() -> int:
         "ollama_host": OLLAMA_HOST,
         "rag_mode": args.rag_mode,
         "tested_models": candidates,
-        "test_case_count": len(TEST_CASES),
+        "test_case_count": len(benchmark_cases),
+        "cases_source": str(cases_path) if args.cases.strip().lower() != "quick" else "legacy_quick",
         "ranked": ranked,
         "recommended_query_writer_model": best["model"],
         "recommended_score": best["avg_score"],

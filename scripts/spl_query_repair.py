@@ -12,8 +12,10 @@ import httpx
 from environment_profile import validate_query_against_environment
 from intent_field_contracts import validate_platform_sourcetype_coherence, validate_intent_platform_scope, validate_query_for_intent
 from minimal_question_to_answer import OLLAMA_HOST, map_question_to_template, template_to_query_args
+from ollama_client import call_ollama_json
 from query_policy import validate_query_args
 from spl_rag_context import build_spl_rag_context
+from spl_writer_prompt import build_repair_system_prompt
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -47,7 +49,7 @@ def _normalize_query_args(args: dict[str, Any]) -> dict[str, Any]:
     if query and not query.lower().startswith("search "):
         query = f"search {query}"
     out["query"] = query
-    out["earliest_time"] = str(src.get("earliest_time", "")).strip() or "-24h"
+    out["earliest_time"] = str(src.get("earliest_time", "")).strip() or "-7d"
     latest = str(src.get("latest_time", "")).strip() or "now"
     out["latest_time"] = "now" if latest.lower() == "now()" else latest
     try:
@@ -70,7 +72,11 @@ def _validate_query(args: dict[str, Any], *, question: str, intent: str = "") ->
         template = map_question_to_template(question)
         intent_name = str(getattr(template, "intent", "") or "").strip()
     if intent_name:
-        contract_ok, contract_reason = validate_query_for_intent(intent_name, args)
+        contract_ok, contract_reason = validate_query_for_intent(
+            intent_name,
+            args,
+            question=question,
+        )
         if not contract_ok:
             return False, f"intent:{contract_reason}"
         query_text = str(args.get("query", "")).strip()
@@ -99,15 +105,14 @@ def attempt_query_repair_once(
     if not intent_name:
         intent_name = str(getattr(map_question_to_template(question), "intent", "") or "").strip()
     rag_context = build_spl_rag_context(question, intent=intent_name, max_chars=rag_max_chars)
-    system = (
-        "You are a Splunk SPL repair assistant. "
-        "Repair the query so it remains read-only and passes strict policy+environment checks. "
-        "Return strict JSON only with keys: query, earliest_time, latest_time, row_limit, repair_reason."
-    )
+    template_args = template_to_query_args(map_question_to_template(question), question)
+    system = build_repair_system_prompt(intent=intent_name)
     payload = {
         "question": question,
+        "intent": intent_name,
         "failure_reason": failure_reason,
         "failed_query_args": candidate,
+        "canonical_template_query": str(template_args.get("query", "")).strip(),
         "constraints": {
             "query_must_start_with_search": True,
             "earliest_time_required": True,
@@ -126,15 +131,8 @@ def attempt_query_repair_once(
     model_error = ""
     coherence_failed = "coherence" in str(failure_reason).lower() or "platform_coherence" in str(failure_reason).lower()
     try:
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.post(
-                f"{OLLAMA_HOST}/api/generate",
-                json={"model": model, "prompt": prompt, "stream": False, "think": False},
-            )
-            resp.raise_for_status()
-            body = resp.json()
-        raw = str(body.get("response") or "").strip()
-        repaired = _extract_json_object(raw)
+        repaired = call_ollama_json(model=model, system_prompt=system, user_payload=payload, timeout=timeout)
+        raw = str(repaired.get("_raw_text_preview", ""))
         repaired_args = _normalize_query_args(repaired)
         ok, reason = _validate_query(repaired_args, question=question, intent=intent_name)
         if ok:

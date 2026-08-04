@@ -18,6 +18,7 @@ from botsv3_catalog import BOTSV3_SOURCETYPES
 from intent_field_contracts import validate_query_for_intent
 from langgraph_multi_model_soc import planner_node, run_multi_model_soc, writer_node
 from minimal_question_to_answer import map_question_to_template, run_splunk_query_args, template_to_query_args
+from question_intelligence import spl_time_values_equivalent
 from query_policy import validate_query_args
 from spl_autonomy_manifest import build_manifest
 from web_ui_server import _mitre_attack_bundle
@@ -148,7 +149,11 @@ def _score_case(
     lower = query.lower()
     findings: list[str] = []
     score = 0
-    contract_ok, contract_reason = validate_query_for_intent(actual_intent, query_args)
+    contract_ok, contract_reason = validate_query_for_intent(
+        actual_intent,
+        query_args,
+        question=case.question,
+    )
     actual_earliest = str(query_args.get("earliest_time", "")).strip()
     actual_latest = str(query_args.get("latest_time", "")).strip()
 
@@ -196,12 +201,12 @@ def _score_case(
         findings.append(f"intent_contract_fail:{contract_reason}")
 
     if case.expected_earliest_time:
-        if actual_earliest == case.expected_earliest_time:
+        if spl_time_values_equivalent(actual_earliest, case.expected_earliest_time):
             score += 5
         else:
             findings.append(f"time_mismatch_earliest:{actual_earliest}->{case.expected_earliest_time}")
     if case.expected_latest_time:
-        if actual_latest == case.expected_latest_time:
+        if spl_time_values_equivalent(actual_latest, case.expected_latest_time):
             score += 5
         else:
             findings.append(f"time_mismatch_latest:{actual_latest}->{case.expected_latest_time}")
@@ -275,13 +280,31 @@ def _score_case(
     elif any(item.startswith("mitre_mismatch:") for item in findings):
         failure_class = "mitre_mismatch"
 
+    final_score = max(0, min(100, score))
+    failure_caps = {
+        "execution_error": 49,
+        "policy_failure": 49,
+        "intent_contract_failure": 84,
+        "intent_mismatch": 84,
+        "query_antipattern": 84,
+        "empty_result": 84,
+        "field_coverage_gap": 84,
+        "shape_mismatch": 84,
+        "time_window_mismatch": 84,
+        "mitre_mismatch": 84,
+    }
+    if failure_class in failure_caps:
+        final_score = min(final_score, failure_caps[failure_class])
+    quality_gate_passed = failure_class == "pass" and final_score >= 85
+
     return {
-        "score": max(0, min(100, score)),
+        "score": final_score,
         "query_shape": actual_shape,
         "rows_returned": total_rows,
         "results_preview": results[:3],
         "findings": findings,
         "failure_class": failure_class,
+        "quality_gate_passed": quality_gate_passed,
         "intent_contract_ok": contract_ok,
         "intent_contract_reason": contract_reason,
         "mitre_techniques": actual_technique_ids,
@@ -493,6 +516,7 @@ def main() -> int:
     }
     failure_classes = Counter(row["failure_class"] for row in results if row["failure_class"] != "pass")
     failing_cases = [row for row in results if row["score"] < args.min_pass_score]
+    quality_gate_passes = sum(1 for row in results if row.get("quality_gate_passed"))
 
     previous_report_path = out_dir / f"spl_hardening_benchmark_latest_{scope}.json"
     previous_report: dict[str, Any] | None = None
@@ -517,6 +541,8 @@ def main() -> int:
             if scores
             else 0.0,
             "failing_case_count": len(failing_cases),
+            "quality_gate_pass_count": quality_gate_passes,
+            "quality_gate_pass_rate_pct": round((quality_gate_passes / len(results)) * 100, 2) if results else 0.0,
             "family_scores": family_scores,
             "failure_classes": dict(sorted(failure_classes.items())),
             "top_fix_targets": [row["id"] for row in sorted(failing_cases, key=lambda item: item["score"])[:5]],

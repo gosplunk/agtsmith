@@ -1,0 +1,85 @@
+{
+  "timestamp_utc": "2026-01-01T00:00:00+00:00",
+  "source": "deterministic_scenario_fixture",
+  "indexes": [
+    {"index": "auth", "sourcetypes": ["linux_secure", "XmlWinEventLog:Security"]},
+    {"index": "cloud", "sourcetypes": ["aws:cloudtrail", "azure:audit", "o365:management:activity"]},
+    {"index": "dns", "sourcetypes": ["bind:query", "stream:dns"]},
+    {"index": "security", "sourcetypes": ["o365:management:activity"]},
+    {"index": "web", "sourcetypes": ["access_combined", "proxy:access"]}
+  ],
+  "sourcetype_to_indexes": {
+    "XmlWinEventLog:Security": ["auth"],
+    "access_combined": ["web"],
+    "aws:cloudtrail": ["cloud"],
+    "azure:audit": ["cloud"],
+    "bind:query": ["dns"],
+    "linux_secure": ["auth"],
+    "o365:management:activity": ["cloud", "security"],
+    "proxy:access": ["web"],
+    "stream:dns": ["dns"]
+  },
+  "sourcetype_field_inventory": {
+    "XmlWinEventLog:Security": [
+      {"field": "TargetUserName", "sample_values": ["analyst"]},
+      {"field": "IpAddress", "sample_values": ["192.0.2.10"]},
+      {"field": "EventCode", "sample_values": ["4625"]},
+      {"field": "Computer", "sample_values": ["win-host"]}
+    ],
+    "access_combined": [
+      {"field": "clientip", "sample_values": ["192.0.2.20"]},
+      {"field": "status", "sample_values": ["404", "200"]},
+      {"field": "uri_path", "sample_values": ["/health"]},
+      {"field": "method", "sample_values": ["GET"]},
+      {"field": "host", "sample_values": ["web-1"]}
+    ],
+    "aws:cloudtrail": [
+      {"field": "sourceIPAddress", "sample_values": ["192.0.2.30"]},
+      {"field": "user", "sample_values": ["automation"]},
+      {"field": "eventName", "sample_values": ["ListBuckets"]},
+      {"field": "result", "sample_values": ["success", "failure"]},
+      {"field": "resourceName", "sample_values": ["example-bucket"]}
+    ],
+    "azure:audit": [
+      {"field": "ipAddress", "sample_values": ["192.0.2.40"]},
+      {"field": "userPrincipalName", "sample_values": ["user@example.invalid"]},
+      {"field": "operation", "sample_values": ["UpdatePolicy"]},
+      {"field": "result_state", "sample_values": ["succeeded", "failed"]},
+      {"field": "resource", "sample_values": ["policy"]}
+    ],
+    "bind:query": [
+      {"field": "src", "sample_values": ["192.0.2.50"]},
+      {"field": "resolver", "sample_values": ["192.0.2.53"]},
+      {"field": "query_name", "sample_values": ["example.invalid"]},
+      {"field": "answer_data", "sample_values": ["198.51.100.10"]},
+      {"field": "action", "sample_values": ["allowed", "blocked"]}
+    ],
+    "linux_secure": [
+      {"field": "src", "sample_values": ["192.0.2.60"]},
+      {"field": "user", "sample_values": ["root"]},
+      {"field": "action", "sample_values": ["success", "failure"]},
+      {"field": "host", "sample_values": ["linux-1"]}
+    ],
+    "o365:management:activity": [
+      {"field": "ClientIP", "sample_values": ["192.0.2.65"]},
+      {"field": "UserId", "sample_values": ["service@example.invalid"]},
+      {"field": "operation", "sample_values": ["FileAccessed"]},
+      {"field": "result", "sample_values": ["success", "failure"]},
+      {"field": "resource", "sample_values": ["document"]}
+    ],
+    "proxy:access": [
+      {"field": "src_ip", "sample_values": ["192.0.2.70"]},
+      {"field": "status_code", "sample_values": ["403", "200"]},
+      {"field": "url", "sample_values": ["https://example.invalid/"]},
+      {"field": "http_method", "sample_values": ["GET"]},
+      {"field": "dest", "sample_values": ["proxy-1"]}
+    ],
+    "stream:dns": [
+      {"field": "src_ip", "sample_values": ["192.0.2.80"]},
+      {"field": "dest_ip", "sample_values": ["192.0.2.53"]},
+      {"field": "query", "sample_values": ["example.invalid"]},
+      {"field": "answers", "sample_values": ["198.51.100.20"]},
+      {"field": "status", "sample_values": ["NOERROR", "NXDOMAIN"]}
+    ]
+  }
+}

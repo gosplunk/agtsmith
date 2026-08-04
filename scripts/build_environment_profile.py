@@ -275,6 +275,66 @@ def _load_index_sourcetypes(
     return st_list, st_counts, earliest_time
 
 
+INDEX_ACTIVITY_QUERY = "search index=* NOT index=_* | stats count by index | sort - count"
+INDEX_ACTIVITY_WINDOWS: tuple[str, ...] = ("-1h", "-24h", "-7d")
+
+
+def _extract_index_activity_rows(query_data: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = query_data.get("structured", {}).get("results", []) if isinstance(query_data, dict) else []
+    out: list[dict[str, Any]] = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        index_name = _safe_text(row.get("index"))
+        if not index_name or index_name.startswith("_"):
+            continue
+        try:
+            count = int(row.get("count", 0))
+        except Exception:
+            count = 0
+        if count <= 0:
+            continue
+        out.append({"index": index_name, "count": count})
+    out.sort(key=lambda item: (-int(item.get("count", 0)), str(item.get("index", ""))))
+    return out
+
+
+def _build_index_activity(
+    *,
+    windows: tuple[str, ...] = INDEX_ACTIVITY_WINDOWS,
+    latest_time: str = "now",
+    row_limit: int = 200,
+) -> dict[str, Any]:
+    activity: dict[str, list[dict[str, Any]]] = {}
+    errors: dict[str, str] = {}
+    for earliest in windows:
+        query_args = {
+            "query": INDEX_ACTIVITY_QUERY,
+            "earliest_time": earliest,
+            "latest_time": latest_time,
+            "row_limit": row_limit,
+        }
+        try:
+            data = run_splunk_query_args(
+                query_args,
+                intent="top_indexes",
+                summary_hint="index activity snapshot",
+            )
+            activity[earliest] = _extract_index_activity_rows(data)
+        except Exception as exc:
+            activity[earliest] = []
+            errors[earliest] = f"{type(exc).__name__}: {exc}"
+    return {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "query": INDEX_ACTIVITY_QUERY,
+        "latest_time": latest_time,
+        "windows": activity,
+        "errors": errors,
+    }
+
+
 def _extract_host_query_sourcetypes(query_data: dict[str, Any]) -> tuple[list[str], dict[str, int]]:
     rows = query_data.get("structured", {}).get("results", []) if isinstance(query_data, dict) else []
     sourcetypes: list[str] = []
@@ -519,6 +579,7 @@ def _field_summary_query(indexes: list[str], sourcetype: str, sample_size: int) 
     st_esc = _escape_spl_literal(sourcetype)
     return (
         f"search ({idx_expr}) sourcetype=\"{st_esc}\" "
+        "(NOT lab_data_source=agtsmith_generator OR lab_data_version=fidelity_v2) "
         f"| head {max(1, sample_size)} "
         "| fields * "
         "| fieldsummary maxvals=5"
@@ -656,13 +717,25 @@ def _build_sourcetype_field_inventory(
         if missing:
             targets = missing
     if effective_mode == "one":
-        next_st = _pick_next_sourcetype(
-            rows=rows,
-            existing_profile=existing_profile,
-            requested_sourcetype=requested_sourcetype,
-        )
-        if next_st:
-            targets = [next_st]
+        requested = [
+            item.strip()
+            for item in requested_sourcetype.split(",")
+            if item.strip()
+        ]
+        if len(requested) > 1:
+            targets = [item for item in requested if item in ordered]
+            meta["effective_refresh_mode"] = "selected"
+            meta["unknown_requested_sourcetypes"] = [
+                item for item in requested if item not in ordered
+            ]
+        else:
+            next_st = _pick_next_sourcetype(
+                rows=rows,
+                existing_profile=existing_profile,
+                requested_sourcetype=requested_sourcetype,
+            )
+            if next_st:
+                targets = [next_st]
     meta["target_count"] = len(targets)
     for idx, sourcetype in enumerate(targets, start=1):
         print(f"[field-inventory] {idx}/{len(targets)} sourcetype={sourcetype}")
@@ -985,6 +1058,16 @@ def build_profile(
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                 "note": "host-specific sourcetypes merged into global index inventory (append-only).",
             }
+    try:
+        profile["index_activity"] = _build_index_activity(latest_time=latest_time, row_limit=max(50, metadata_row_limit))
+    except Exception as exc:
+        profile["index_activity"] = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "query": INDEX_ACTIVITY_QUERY,
+            "latest_time": latest_time,
+            "windows": {},
+            "errors": {"build": f"{type(exc).__name__}: {exc}"},
+        }
     return attach_semantics(profile)
 
 
@@ -999,7 +1082,11 @@ def main() -> int:
     parser.add_argument("--focus-host", default="", help="Optional host name for host-focused Data Domains inventory")
     parser.add_argument("--replace", action="store_true", help="Replace profile instead of merge-preserving old entries")
     parser.add_argument("--field-refresh-mode", choices=("none", "one", "all", "auto"), default="auto")
-    parser.add_argument("--field-sourcetype", default="", help="Refresh field inventory for this sourcetype explicitly")
+    parser.add_argument(
+        "--field-sourcetype",
+        default="",
+        help="Refresh one sourcetype, or a comma-separated selected set",
+    )
     parser.add_argument("--field-sample-size", type=int, default=200)
     parser.add_argument("--field-row-limit", type=int, default=120)
     args = parser.parse_args()

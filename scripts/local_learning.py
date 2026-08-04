@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from environment_profile import load_environment_profile
+from holdout_firewall import filter_holdout_records
 from query_templates import TEMPLATES
 from runtime_config import (
     DEFAULT_MODEL_QUERY_PLANNER,
@@ -543,7 +544,10 @@ def learning_registry_summary() -> dict[str, Any]:
 
 def approved_learning_records() -> list[dict[str, Any]]:
     if _APPROVED_RECORD_OVERRIDE is not None:
-        return [row for row in _APPROVED_RECORD_OVERRIDE if isinstance(row, dict)]
+        rows, _rejected = filter_holdout_records(
+            [row for row in _APPROVED_RECORD_OVERRIDE if isinstance(row, dict)]
+        )
+        return rows
     data = load_learning_registry()
     rows = data.get("records", [])
     if not isinstance(rows, list):
@@ -558,7 +562,8 @@ def approved_learning_records() -> list[dict[str, Any]]:
         if kind not in ALLOWED_KINDS:
             continue
         out.append(row)
-    return out
+    allowed, _rejected = filter_holdout_records(out)
+    return allowed
 
 
 def ranked_approved_learning_records(question: str, intent: str = "", *, max_records: int = 4) -> list[dict[str, Any]]:
@@ -1470,7 +1475,11 @@ def _score_writer_case(case: dict[str, Any], *, actual_intent: str, query_args: 
     lower = query.lower()
     findings: list[str] = []
     score = 0
-    contract_ok, contract_reason = validate_query_for_intent(actual_intent, query_args)
+    contract_ok, contract_reason = validate_query_for_intent(
+        actual_intent,
+        query_args,
+        question=str(case.get("question", "")),
+    )
     expected_intent = str(case.get("expected_intent", "")).strip()
     required_terms = [str(item).strip() for item in case.get("required_query_terms", []) if str(item).strip()]
     forbidden_terms = [str(item).strip() for item in case.get("forbidden_query_terms", []) if str(item).strip()]
@@ -1984,6 +1993,10 @@ def _upsert_candidates(
     records = registry.get("records", [])
     if not isinstance(records, list):
         records = []
+    records, rejected_existing = filter_holdout_records(
+        [row for row in records if isinstance(row, dict)]
+    )
+    candidates, rejected_candidates = filter_holdout_records(candidates)
     by_id: dict[str, dict[str, Any]] = {}
     for row in records:
         if isinstance(row, dict) and str(row.get("id", "")).strip():
@@ -2019,6 +2032,7 @@ def _upsert_candidates(
     write_spl_optimization_repository(repository)
     return {
         "created": created,
+        "holdout_rejected_count": len(rejected_existing) + len(rejected_candidates),
         "stale_marked": stale_marked,
         "total": len(registry["records"]),
         "repository": {

@@ -17,6 +17,7 @@ from lab_data.config import (  # noqa: E402
     detect_layout_from_profile,
     format_verify_query,
     layout_index_names,
+    load_event_catalog,
     read_verify_manifest,
     resolve_domain_target,
     resolve_layout_name,
@@ -73,7 +74,7 @@ class LabDataConfigTests(unittest.TestCase):
     def test_resolve_domain_target_multi_index(self) -> None:
         target = resolve_domain_target("multi_index_ideal", "windows_auth")
         self.assertEqual(target["index"], "soc_windows")
-        self.assertEqual(target["sourcetype"], "XmlWinEventLog:Security")
+        self.assertEqual(target["sourcetype"], "XmlWinEventLog")
 
     def test_layout_index_names_includes_provision(self) -> None:
         names = layout_index_names("multi_index_ideal")
@@ -88,6 +89,22 @@ class LabDataConfigTests(unittest.TestCase):
         )
         self.assertIn('index=linux', query)
         self.assertIn('sourcetype="auth.log"', query)
+
+    def test_all_event_verify_queries_format_without_placeholder_collisions(self) -> None:
+        catalog = load_event_catalog()
+        for name, event_set in catalog["event_sets"].items():
+            with self.subTest(event_set=name):
+                target = resolve_domain_target(
+                    "expanded_lab",
+                    event_set["domain"],
+                )
+                query = format_verify_query(
+                    event_set["verify_query"],
+                    index=target["index"],
+                    sourcetype=target["sourcetype"],
+                )
+                self.assertNotIn("{index}", query)
+                self.assertNotIn("{sourcetype}", query)
 
     def test_resolve_layout_name_from_env(self) -> None:
         name = resolve_layout_name(None, ui_env={"LAB_DATA_LAYOUT": "minimal_ci"})
@@ -133,6 +150,12 @@ class LabDataConfigTests(unittest.TestCase):
         self.assertTrue(entry["ok"])
         self.assertEqual(entry["actual_rows"], 1)
         self.assertEqual(len(entry["event_sets"]), 2)
+
+    def test_verify_row_count_reads_stats_value(self) -> None:
+        from lab_data_verify import _row_count
+
+        self.assertEqual(_row_count({"results": [{"count": "0"}]}), 0)
+        self.assertEqual(_row_count({"results": [{"count": "80"}]}), 80)
 
     def test_resolve_layout_name_from_profile_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

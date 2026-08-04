@@ -101,9 +101,11 @@ if [[ -f "${UI_ENV_PATH}" ]]; then
   set +u
   source "${UI_ENV_PATH}" 2>/dev/null || true
   set -u
-  if [[ -n "${SPLUNK_USER:-}" && -n "${SPLUNK_PASS:-}" ]]; then
-    if ! curl -skf -o /dev/null https://127.0.0.1:8089/services/server/info \
-      -H "Authorization: Bearer ${SPLUNK_LAB_BEARER_TOKEN:-invalid}"; then
+  if [[ -n "${SPLUNK_LAB_BEARER_TOKEN:-}" ]]; then
+    if ! curl -skf -o /dev/null -X POST https://127.0.0.1:8089/services/mcp \
+      -H "Authorization: Bearer ${SPLUNK_LAB_BEARER_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"agtsmith-preflight","version":"1.0"}}}'; then
       echo "WARN MCP bearer token rejected — run make lab-data-refresh-mcp-token"
     else
       echo "OK  MCP bearer token"

@@ -453,6 +453,72 @@ PLAYBOOK_LIBRARY: dict[str, dict[str, Any]] = {
             },
         ),
     },
+    "inventory_ops": {
+        "name": "Inventory Operations",
+        "description": "Drill from index volume into sourcetypes, hosts, and staleness checks.",
+        "targets": (
+            {
+                "target_type": "index",
+                "target_label": "Index",
+                "pivot_kind": "index_drilldown",
+                "title": "Drill into sourcetype and host mix for the busiest index.",
+                "recommendation": "Run sourcetype/host stats for the top index returned.",
+            },
+            {
+                "target_type": "sourcetype",
+                "target_label": "Sourcetype",
+                "pivot_kind": "sourcetype_drilldown",
+                "title": "Pivot on the dominant sourcetype within the selected index.",
+                "recommendation": "Break down host activity for the top sourcetype.",
+            },
+        ),
+    },
+    "platform_ops": {
+        "name": "Splunk Platform Operations",
+        "description": "Inspect internal sourcetypes, forwarders, and license-related telemetry.",
+        "targets": (
+            {
+                "target_type": "sourcetype",
+                "target_label": "Internal sourcetype",
+                "pivot_kind": "internal_sourcetype_drilldown",
+                "title": "Drill into the busiest _internal sourcetype by host.",
+                "recommendation": "Break down the top internal sourcetype by host.",
+            },
+            {
+                "target_type": "host",
+                "target_label": "Forwarder host",
+                "pivot_kind": "host_followup",
+                "title": "Pivot on the forwarder or splunkd host with the highest volume.",
+                "recommendation": "Inspect host-level internal telemetry for the busiest node.",
+            },
+        ),
+    },
+    "it_ops_web": {
+        "name": "Web Traffic Operations",
+        "description": "Pivot from URI/status summaries into client IPs and status breakdowns.",
+        "targets": (
+            {
+                "target_type": "uri",
+                "target_label": "URI",
+                "pivot_kind": "path_followup",
+                "title": "Drill into the busiest URI paths.",
+                "recommendation": "Filter to the top URI and summarize status codes and client IPs.",
+            },
+        ),
+    },
+    "it_ops_errors": {
+        "name": "Application Error Operations",
+        "description": "Pivot from error spikes into host and sourcetype context.",
+        "targets": (
+            {
+                "target_type": "host",
+                "target_label": "Host",
+                "pivot_kind": "host_followup",
+                "title": "Pivot on hosts contributing to the error spike.",
+                "recommendation": "Break down error counts by host and sourcetype.",
+            },
+        ),
+    },
 }
 
 
@@ -465,8 +531,11 @@ INTENT_PLAYBOOKS: dict[str, str] = {
     "windows_sysmon_dns_activity": "endpoint_dns_activity",
     "windows_sysmon_network_activity": "endpoint_network_activity",
     "apache_access_top_ips": "web_recon_http",
+    "apache_suspicious_activity": "web_recon_http",
     "apache_404_spike": "web_recon_http",
+    "apache_404_scanning": "web_recon_http",
     "apache_suspicious_user_agents": "web_recon_http",
+    "apache_sensitive_path_probing": "web_recon_http",
     "stream_http_activity": "web_traffic_hunt",
     "aws_cloudtrail_activity": "cloud_api_identity",
     "cisco_asa_network_flows": "network_flow_hunt",
@@ -475,7 +544,71 @@ INTENT_PLAYBOOKS: dict[str, str] = {
     "stream_dns_activity": "dns_stream_hunt",
     "o365_management_activity": "saas_management",
     "osquery_process_activity": "endpoint_process_execution",
+    "top_indexes": "inventory_ops",
+    "metadata_inventory": "inventory_ops",
+    "index_sourcetype_volume": "inventory_ops",
+    "host_activity_summary": "inventory_ops",
+    "index_staleness": "inventory_ops",
+    "splunk_internal_health": "platform_ops",
+    "splunk_license_usage": "platform_ops",
+    "forwarder_connectivity": "platform_ops",
+    "web_traffic_summary": "it_ops_web",
+    "network_flow_summary": "network_flow_hunt",
+    "app_error_spike": "it_ops_errors",
 }
+
+
+PIVOT_QUERY_LIBRARY: dict[str, str] = {
+    "index_drilldown": "search index={index} earliest={earliest} latest={latest} | stats count by sourcetype host | sort - count",
+    "sourcetype_drilldown": "search index={index} sourcetype={sourcetype} earliest={earliest} latest={latest} | stats count by host | sort - count",
+    "host_drilldown": "search index=* host={host} earliest={earliest} latest={latest} | stats count by sourcetype index | sort - count",
+    "internal_sourcetype_drilldown": "search index=_internal sourcetype={sourcetype} earliest={earliest} latest={latest} | stats count by host | sort - count",
+}
+
+
+def playbook_query_pivots(
+    intent: str,
+    entities: dict[str, list[str]] | None = None,
+    *,
+    earliest: str = "-7d",
+    latest: str = "now",
+) -> list[dict[str, str]]:
+    """Return bounded executable next-query specs for operational drill-down."""
+    normalized = _normalize_intent(intent)
+    entities = entities or {}
+    pivots: list[dict[str, str]] = []
+
+    def _add(pivot_id: str, question: str, **fmt: str) -> None:
+        template = PIVOT_QUERY_LIBRARY.get(pivot_id, "")
+        if not template:
+            return
+        values = {"earliest": earliest, "latest": latest, **fmt}
+        try:
+            query = template.format(**values)
+        except Exception:
+            return
+        pivots.append({"id": pivot_id, "question": question, "query": query})
+
+    if normalized in {"top_indexes", "index_sourcetype_volume", "host_activity_summary"}:
+        indexes = entities.get("indexes") or entities.get("index") or []
+        if indexes:
+            idx = str(indexes[0])
+            _add("index_drilldown", f"Show sourcetype and host volume for index {idx}", index=idx)
+        sourcetypes = entities.get("sourcetypes") or entities.get("sourcetype") or []
+        if indexes and sourcetypes:
+            _add(
+                "sourcetype_drilldown",
+                f"Show host activity for {sourcetypes[0]} in {indexes[0]}",
+                index=str(indexes[0]),
+                sourcetype=str(sourcetypes[0]),
+            )
+    if normalized == "splunk_internal_health" and entities.get("sourcetypes"):
+        st = str(entities["sourcetypes"][0])
+        _add("internal_sourcetype_drilldown", f"Break down internal sourcetype {st} by host", sourcetype=st)
+    if entities.get("hosts"):
+        host = str(entities["hosts"][0])
+        _add("host_drilldown", f"Show sourcetype mix for host {host}", host=host)
+    return pivots[:4]
 
 
 def playbook_for_intent(intent: str) -> dict[str, Any]:

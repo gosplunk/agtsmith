@@ -1,7 +1,8 @@
 [Unit]
-Description=Refresh Splunk SOC environment profile
+Description=Refresh Splunk SOC environment profile and offline-docs RAG
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/joe/splunk-soc-agent
+WorkingDirectory=%h/ai_projects/agtsmith
+Environment=HOME=%h
 ExecStart=/usr/bin/make env-profile-refresh

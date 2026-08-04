@@ -25,6 +25,8 @@ export SPLUNK_USER=dev SPLUNK_PASS='<sandbox-password>'
 ```
 
 Add output to **gitignored** `config/ui.env` (copy from `config/ui.env.example`).
+This file is intentionally for host-runtime and local-lab workflows; the Docker
+deployment keeps its own named config volume and does not mount this file.
 
 ## Sidecar
 
@@ -38,6 +40,11 @@ sudo apt-get install -y docker-compose-v2
 export AGTSMITH_UID=$(id -u) AGTSMITH_GID=$(id -g)
 make docker-deploy-build docker-deploy-up
 ```
+
+Fresh Docker deployments do not create a reusable default login. Open
+`http://127.0.0.1:8787/setup/first-run` and create the initial operator account.
+After login, enter the Docker runtime endpoints and MCP credential through
+`Control Center -> Configuration`.
 
 Python venv for `make check`:
 
