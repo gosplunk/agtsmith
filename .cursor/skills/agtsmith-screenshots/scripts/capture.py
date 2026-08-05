@@ -16,6 +16,10 @@ SKILL_DIR = SCRIPT_DIR.parent
 REPO_ROOT = SKILL_DIR.parents[2]
 
 
+class AuthenticationError(RuntimeError):
+    """Raised when an authenticated screenshot target remains unauthenticated."""
+
+
 def load_manifest(path: Path) -> dict:
     with path.open(encoding="utf-8") as fh:
         return yaml.safe_load(fh)
@@ -40,17 +44,27 @@ def agtsmith_login(page, base_url: str) -> None:
     if not user or not password:
         raise RuntimeError("AGTSMITH_UI_USER and AGTSMITH_UI_PASS required for agtsmith auth targets")
     page.goto(base_url, wait_until="domcontentloaded")
-    user_input = page.locator('input[name="username"], input[name="user"], #username')
-    pass_input = page.locator('input[name="password"], #password')
-    if user_input.count() and pass_input.count():
-        user_input.first.fill(user)
-        pass_input.first.fill(password)
-        submit = page.locator('button[type="submit"], input[type="submit"]')
-        if submit.count():
-            submit.first.click()
-        else:
-            page.keyboard.press("Enter")
-        page.wait_for_load_state("networkidle")
+    user_input = page.locator('input[name="username"], input[name="user"], #username, #login-username')
+    pass_input = page.locator('input[name="password"], #password, #login-password')
+    if not user_input.count() and not pass_input.count() and "/login" not in page.url:
+        return
+    if not user_input.count() or not pass_input.count():
+        raise AuthenticationError("agtsmith login form was not found")
+    user_input.first.fill(user)
+    pass_input.first.fill(password)
+    submit = page.locator('button[type="submit"], input[type="submit"]')
+    if submit.count():
+        submit.first.click()
+    else:
+        page.keyboard.press("Enter")
+    page.wait_for_load_state("networkidle")
+    if "/login" in page.url or page.locator('input[name="password"], #password, #login-password').count():
+        raise AuthenticationError("agtsmith login failed")
+
+
+def assert_authenticated(page) -> None:
+    if "/login" in page.url or page.locator('input[name="password"], #password, #login-password').count():
+        raise AuthenticationError("authenticated screenshot target redirected to login")
 
 
 def _target_tags(target: dict, configure_ui_tag: str) -> list[str]:
@@ -86,6 +100,8 @@ def capture_target(page, target: dict, out_dir: Path, version: str, configure_ui
             agtsmith_login(page, f"{_ui_base_url()}/login")
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(wait_ms)
+        if auth:
+            assert_authenticated(page)
         page.screenshot(path=str(out_path), full_page=True)
         meta_path = out_path.with_suffix(".png.meta.json")
         meta_path.write_text(
@@ -104,6 +120,8 @@ def capture_target(page, target: dict, out_dir: Path, version: str, configure_ui
         )
         print(f"OK  {out_path}")
         return True
+    except AuthenticationError:
+        raise
     except Exception as exc:  # noqa: BLE001
         if target.get("skip_if_unreachable"):
             print(f"SKIP {tid}: {exc}")

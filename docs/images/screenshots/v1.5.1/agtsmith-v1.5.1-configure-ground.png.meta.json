@@ -1,0 +1,10 @@
+{
+  "target_id": "configure-ground",
+  "version": "v1.5.1",
+  "configure_ui_tag": "",
+  "tags": [
+    "configure",
+    "lane-ground"
+  ],
+  "url": "http://127.0.0.1:8787/configure#ground"
+}

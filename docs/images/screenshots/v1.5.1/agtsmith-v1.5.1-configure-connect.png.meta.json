@@ -1,0 +1,10 @@
+{
+  "target_id": "configure-connect",
+  "version": "v1.5.1",
+  "configure_ui_tag": "",
+  "tags": [
+    "configure",
+    "lane-connect"
+  ],
+  "url": "http://127.0.0.1:8787/configure#connect"
+}

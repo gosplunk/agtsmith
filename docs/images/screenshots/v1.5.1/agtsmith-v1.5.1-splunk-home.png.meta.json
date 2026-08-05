@@ -1,0 +1,7 @@
+{
+  "target_id": "splunk-home",
+  "version": "v1.5.1",
+  "configure_ui_tag": "",
+  "tags": [],
+  "url": "http://127.0.0.1:8000/en-US/app/launcher/home"
+}

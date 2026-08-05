@@ -1,0 +1,10 @@
+{
+  "target_id": "configure-validate",
+  "version": "v1.5.1",
+  "configure_ui_tag": "",
+  "tags": [
+    "configure",
+    "lane-validate"
+  ],
+  "url": "http://127.0.0.1:8787/configure#validate"
+}
