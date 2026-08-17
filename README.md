@@ -417,13 +417,13 @@ For the current planned-release view, including committed next-step work and kno
 - Continued documentation cleanup so first-time installs and operator workflows are easier to follow without hidden assumptions
 
 ## Docs Reading Order
-1. `docs/whitepapers/project_one_page_white_paper.md`
-2. `docs/whitepapers/technical_deep_dive.md`
-3. `docs/runbooks/initial_setup.md`
-4. `docs/runbooks/health_check.md`
-5. `docs/architecture/two_model_spl_pipeline.md`
-6. `docs/architecture/system_design.md`
-7. `docs/project/next_release_plan.md`
+1. [What A.G.E.N.T. Smith Is](docs/whitepapers/project_one_page_white_paper.md)
+2. [Technical Deep Dive](docs/whitepapers/technical_deep_dive.md)
+3. [Initial Setup Guide](docs/runbooks/initial_setup.md)
+4. [Health Check](docs/runbooks/health_check.md)
+5. [Two-Model SPL Pipeline](docs/architecture/two_model_spl_pipeline.md)
+6. [System Design](docs/architecture/system_design.md)
+7. [Next Release Plan](docs/project/next_release_plan.md)
 
 ## Default Model Assignments (v1.5.1)
 ```bash

@@ -79,7 +79,7 @@ If you already adopted `v1.4.0`, the practical `v1.4.1` change is this:
 
 If you want more than this patch summary:
 
-- [v1.4.0 Release Highlights](/docs/view?path=project/v1_4_0_delta.md)
-- [Technical Deep Dive](/docs/view?path=whitepapers/technical_deep_dive.md)
-- [Documentation Guide](/docs/view?path=project_overview.md)
+- [v1.4.0 Release Highlights](v1_4_0_delta.md)
+- [Technical Deep Dive](../whitepapers/technical_deep_dive.md)
+- [Documentation Guide](../project_overview.md)
 - `README.md` at the repository root for install and release context

@@ -5,44 +5,39 @@ This page is the reader's starting point. It does not try to explain the whole p
 
 ## Start Here
 If you are standing up A.G.E.N.T. Smith for the first time, read:
-- [`docs/runbooks/initial_setup.md`](/docs/view?path=runbooks/initial_setup.md)
+- [Initial Setup Guide](runbooks/initial_setup.md) (canonical runbook)
+- [Initial Setup Guide entry point](Initial_Setup_Guide.md) (GitHub-friendly alias)
 
 If you want the short explanation of what changed in `v1.5.2`, read:
-- [`docs/project/v1_5_2_delta.md`](/docs/view?path=project/v1_5_2_delta.md)
+- [v1.5.2 Release Highlights](project/v1_5_2_delta.md)
 
 If you want the shortest explanation of what A.G.E.N.T. Smith is, read:
-- [`docs/whitepapers/project_one_page_white_paper.md`](/docs/view?path=whitepapers/project_one_page_white_paper.md)
-
-If you are trying to stand the platform up for the first time, read:
-- [`docs/runbooks/initial_setup.md`](/docs/view?path=runbooks/initial_setup.md)
+- [What A.G.E.N.T. Smith Is](whitepapers/project_one_page_white_paper.md)
 
 If you want the technical explanation of how the runtime actually works, read:
-- [`docs/whitepapers/technical_deep_dive.md`](/docs/view?path=whitepapers/technical_deep_dive.md)
+- [Technical Deep Dive](whitepapers/technical_deep_dive.md)
 
 If you want the technical explanation of how workflow changes are evaluated offline, read:
-- [`docs/architecture/langgraph_eval_optimization.md`](/docs/view?path=architecture/langgraph_eval_optimization.md)
-
-If you are installing or configuring the platform, read:
-- [`docs/runbooks/initial_setup.md`](/docs/view?path=runbooks/initial_setup.md)
+- [LangGraph Eval Optimization](architecture/langgraph_eval_optimization.md)
 
 If you want the live workflow view in the UI, open:
 - Control Center -> LangGraph Graph
 
 ## Read By Audience
 - Business or leadership reader:
-  - [`docs/whitepapers/project_one_page_white_paper.md`](/docs/view?path=whitepapers/project_one_page_white_paper.md)
-  - [`docs/whitepapers/executive_white_paper.md`](/docs/view?path=whitepapers/executive_white_paper.md)
+  - [What A.G.E.N.T. Smith Is](whitepapers/project_one_page_white_paper.md)
+  - [Executive Summary](whitepapers/executive_white_paper.md)
 - Security engineer or architect:
-  - [`docs/whitepapers/technical_deep_dive.md`](/docs/view?path=whitepapers/technical_deep_dive.md)
-  - [`docs/architecture/system_design.md`](/docs/view?path=architecture/system_design.md)
-  - [`docs/architecture/two_model_spl_pipeline.md`](/docs/view?path=architecture/two_model_spl_pipeline.md)
-  - [`docs/model_strategy.md`](/docs/view?path=model_strategy.md)
-  - [`docs/architecture/network_diagram.md`](/docs/view?path=architecture/network_diagram.md)
+  - [Technical Deep Dive](whitepapers/technical_deep_dive.md)
+  - [System Design](architecture/system_design.md)
+  - [Two-Model SPL Pipeline](architecture/two_model_spl_pipeline.md)
+  - [Model Strategy](model_strategy.md)
+  - [Network Diagram](architecture/network_diagram.md)
 - Operator or installer:
-  - [`docs/runbooks/initial_setup.md`](/docs/view?path=runbooks/initial_setup.md)
-  - [`docs/runbooks/health_check.md`](/docs/view?path=runbooks/health_check.md)
-  - [`docs/runbooks/laptop_model_profile.md`](/docs/view?path=runbooks/laptop_model_profile.md)
-  - [`docs/runbooks/weekly_maintenance.md`](/docs/view?path=runbooks/weekly_maintenance.md)
+  - [Initial Setup Guide](runbooks/initial_setup.md)
+  - [Health Check](runbooks/health_check.md)
+  - [Laptop Model Profile](runbooks/laptop_model_profile.md)
+  - [Weekly Maintenance](runbooks/weekly_maintenance.md)
 
 ## What Exists Today
 - Authenticated web UI for LAN users
@@ -67,14 +62,14 @@ If you want the live workflow view in the UI, open:
 - The current system is a guarded MVP analyst augmentation platform, not yet a production control plane
 
 ## Recommended Reading Order
-1. [`docs/whitepapers/project_one_page_white_paper.md`](/docs/view?path=whitepapers/project_one_page_white_paper.md)
-2. [`docs/whitepapers/technical_deep_dive.md`](/docs/view?path=whitepapers/technical_deep_dive.md)
-3. [`docs/runbooks/initial_setup.md`](/docs/view?path=runbooks/initial_setup.md)
-4. [`docs/runbooks/health_check.md`](/docs/view?path=runbooks/health_check.md)
-5. [`docs/architecture/two_model_spl_pipeline.md`](/docs/view?path=architecture/two_model_spl_pipeline.md)
-6. [`docs/model_strategy.md`](/docs/view?path=model_strategy.md)
-7. [`docs/architecture/system_design.md`](/docs/view?path=architecture/system_design.md)
-8. [`docs/architecture/langgraph_eval_optimization.md`](/docs/view?path=architecture/langgraph_eval_optimization.md)
+1. [What A.G.E.N.T. Smith Is](whitepapers/project_one_page_white_paper.md)
+2. [Technical Deep Dive](whitepapers/technical_deep_dive.md)
+3. [Initial Setup Guide](runbooks/initial_setup.md)
+4. [Health Check](runbooks/health_check.md)
+5. [Two-Model SPL Pipeline](architecture/two_model_spl_pipeline.md)
+6. [Model Strategy](model_strategy.md)
+7. [System Design](architecture/system_design.md)
+8. [LangGraph Eval Optimization](architecture/langgraph_eval_optimization.md)
 
 ## Advanced Material
 The `docs/reference/` tree is the advanced knowledge and RAG support library. It is useful for model grounding and implementation work, but it is not the main reader path for understanding the platform.

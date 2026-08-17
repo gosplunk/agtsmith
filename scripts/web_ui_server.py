@@ -17155,6 +17155,10 @@ DOC_LABELS: dict[str, tuple[str, str]] = {
         "Initial Setup Guide",
         "Step-by-step setup for a new machine and new operator.",
     ),
+    "Initial_Setup_Guide.md": (
+        "Initial Setup Guide",
+        "Entry point that links to the canonical first-time install runbook.",
+    ),
     "runbooks/demo_walkthrough.md": (
         "Demo Walkthrough",
         "Recommended presentation path for stakeholders.",
@@ -17259,7 +17263,36 @@ def _render_docs_sidebar(active_path: str = "") -> str:
     return "\n".join(sections)
 
 
-def _render_markdown_simple(text: str) -> str:
+def _resolve_doc_markdown_href(href: str, current_doc_path: str = "") -> str:
+    raw = (href or "").strip()
+    if not raw:
+        return raw
+    if raw.startswith("/docs/view?"):
+        return raw
+    if re.match(r"^https?://", raw, re.I):
+        return raw
+    if raw.startswith("/") and not raw.startswith("/docs/"):
+        return raw
+
+    doc_rel = ""
+    if raw.startswith("docs/"):
+        doc_rel = raw[len("docs/") :].lstrip("/")
+    elif current_doc_path and not raw.startswith("/"):
+        base = (DOCS_ROOT / current_doc_path).resolve().parent
+        candidate = (base / raw).resolve()
+        try:
+            doc_rel = str(candidate.relative_to(DOCS_ROOT.resolve())).replace("\\", "/")
+        except Exception:
+            doc_rel = ""
+    elif raw.endswith(".md"):
+        doc_rel = raw.lstrip("/")
+
+    if doc_rel and _safe_docs_path(doc_rel) is not None:
+        return f"/docs/view?path={quote(doc_rel)}"
+    return raw
+
+
+def _render_markdown_simple(text: str, doc_path: str = "") -> str:
     lines = text.splitlines()
     out: list[str] = []
     in_code = False
@@ -17283,7 +17316,8 @@ def _render_markdown_simple(text: str) -> str:
 
         def _link_repl(match: re.Match[str]) -> str:
             label = render_inline(match.group(1))
-            href = html.escape(match.group(2), quote=True)
+            href = _resolve_doc_markdown_href(match.group(2), doc_path)
+            href = html.escape(href, quote=True)
             return stash(f'<a href="{href}">{label}</a>')
 
         value = re.sub(r"`([^`]+)`", _code_repl, value)
@@ -17665,7 +17699,7 @@ def _docs_view_body(path_value: str) -> str:
     text = doc_path.read_text(encoding="utf-8", errors="replace")
     rel = str(doc_path.relative_to(DOCS_ROOT))
     if doc_path.suffix.lower() == ".md":
-        rendered = _render_markdown_simple(text)
+        rendered = _render_markdown_simple(text, rel)
     else:
         rendered = f"<pre>{html.escape(text)}</pre>"
 

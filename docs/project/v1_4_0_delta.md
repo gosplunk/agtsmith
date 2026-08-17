@@ -136,7 +136,7 @@ The product boundary is still the same:
 
 If you want more than this release summary:
 
-- [Technical Deep Dive](/docs/view?path=whitepapers/technical_deep_dive.md)
-- [TDIR Blueprint](/docs/view?path=architecture/tdir_core_blueprint.md)
-- [Documentation Guide](/docs/view?path=project_overview.md)
+- [Technical Deep Dive](../whitepapers/technical_deep_dive.md)
+- [TDIR Blueprint](../architecture/tdir_core_blueprint.md)
+- [Documentation Guide](../project_overview.md)
 - `README.md` at the repository root for install and release context

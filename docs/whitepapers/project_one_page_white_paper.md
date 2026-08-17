@@ -1,7 +1,7 @@
 # A.G.E.N.T. Smith
 ## Autonomous Guardrail-Enforced Networked Tasker
 
-> Release note: see [`docs/project/v1_5_1_delta.md`](/docs/view?path=project/v1_5_1_delta.md) for the short operator-facing summary of what changed in `v1.5.1`.
+> Release note: see [v1.5.2 Release Highlights](../project/v1_5_2_delta.md) for the short operator-facing summary of what changed in `v1.5.2`.
 
 A.G.E.N.T. Smith is a Splunk-centric analyst augmentation platform built to answer a practical question: how do we help analysts investigate faster without giving up control, evidence quality, or transparency?
 
