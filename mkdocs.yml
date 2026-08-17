@@ -1,0 +1,53 @@
+site_name: A.G.E.N.T. Smith Documentation
+site_url: https://gosplunk.github.io/agtsmith/
+repo_url: https://github.com/gosplunk/agtsmith
+edit_uri: edit/main/docs/
+docs_dir: docs
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: indigo
+      accent: cyan
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+plugins:
+  - search
+nav:
+  - Home: index.md
+  - Documentation Overview: project_overview.md
+  - Initial Setup Guide: runbooks/initial_setup.md
+  - Releases:
+      - v1.5.3 Patch Notes: project/v1_5_3_delta.md
+      - v1.5.2 Highlights: project/v1_5_2_delta.md
+      - v1.5.1 Highlights: project/v1_5_1_delta.md
+  - Operator Runbooks:
+      - Health Check: runbooks/health_check.md
+      - Local Splunk Dev: runbooks/local_splunk_dev.md
+      - Splunk App Install: runbooks/splunk_app_install.md
+      - Demo Walkthrough: runbooks/demo_walkthrough.md
+      - Daily Operations: runbooks/daily_ops.md
+  - Platform:
+      - What Is Agent Smith: whitepapers/project_one_page_white_paper.md
+      - Technical Deep Dive: whitepapers/technical_deep_dive.md
+      - Model Strategy: model_strategy.md
+      - Splunk Integration: splunk_integration.md
+  - Architecture:
+      - System Design: architecture/system_design.md
+      - Two-Model SPL Pipeline: architecture/two_model_spl_pipeline.md
+      - Network Diagram: architecture/network_diagram.md
+      - LangGraph Eval: architecture/langgraph_eval_optimization.md
+  - SPL Quality:
+      - Internal SPL Benchmark: project/internal_spl_benchmark.md
+      - Linux SPL Benchmark: project/linux_spl_benchmark.md
+      - Live Domain Benchmark: project/live_domain_spl_benchmark.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - toc:
+      permalink: true

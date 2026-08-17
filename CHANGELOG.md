@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.5.3
+
+- added **GitHub Pages documentation site** at `https://gosplunk.github.io/agtsmith/` because GitHub blob preview links were failing for operators
+- added MkDocs build workflow (`.github/workflows/publish-docs.yml`) publishing `docs/` on every `main` push
+- added root **`SETUP.md`** copy of the Initial Setup Guide for clone-only reading (`less SETUP.md`)
+- removed dev-only `docs/images/screenshots/verify-scheduler/` artifacts and fixed remaining broken doc cross-links
+
 ## v1.5.2
 
 - added **Internal SPL** and **Linux SPL** benchmark programs with oracle JSON corpora, discover/card scripts, offline gates in `make check`, and live template/multimodel harnesses (`docs/project/internal_spl_benchmark.md`, `docs/project/linux_spl_benchmark.md`)

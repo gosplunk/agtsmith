@@ -1,7 +1,0 @@
-{
-  "target_id": "data-domains",
-  "version": "verify-scheduler",
-  "configure_ui_tag": "",
-  "tags": [],
-  "url": "http://127.0.0.1:8787/environment"
-}

@@ -1,17 +1,18 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.5.2`
+Current release: `v1.5.3`
+
+> **Read the docs here (works when GitHub file preview fails):**  
+> **[Initial Setup Guide](https://gosplunk.github.io/agtsmith/runbooks/initial_setup/)** · [Full documentation site](https://gosplunk.github.io/agtsmith/)
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
 This repository is published as a clean starting point. It ships with example configuration, not live environment secrets or local runtime state.
 
-For a short operator-facing summary of what changed in `v1.5.2`, read [v1.5.2 Release Highlights](docs/project/v1_5_2_delta.md).
+For a short operator-facing summary of what changed in `v1.5.3`, read [v1.5.3 Patch Notes](docs/project/v1_5_3_delta.md).
 
-**New install?** Start with the [Initial Setup Guide](docs/runbooks/initial_setup.md) — step-by-step Docker deploy, Splunk MCP, Ollama models, Data Domains, and first investigation. Full doc index: [docs/README.md](docs/README.md).
-
-If GitHub web preview fails temporarily, clone the repo and open the same paths locally, or use:
-`https://raw.githubusercontent.com/gosplunk/agtsmith/main/docs/runbooks/initial_setup.md`
+**New install?** Use the published setup guide (recommended): **[Initial Setup Guide on GitHub Pages](https://gosplunk.github.io/agtsmith/runbooks/initial_setup/)**  
+Repo copies: [docs/runbooks/initial_setup.md](docs/runbooks/initial_setup.md) · [SETUP.md](SETUP.md) · [Documentation index](docs/README.md)
 
 ## Start Here
 If you are trying to get the platform running for the first time, read the [Initial Setup Guide](docs/runbooks/initial_setup.md) alongside the quick start below.

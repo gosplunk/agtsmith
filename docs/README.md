@@ -1,16 +1,19 @@
 # Documentation Index
 
-Use this page when browsing the repo on GitHub. All links below are relative to the `docs/` directory.
+> **Published site (use this when GitHub blob links fail):**  
+> **https://gosplunk.github.io/agtsmith/**
 
 ## First-Time Install
-- [Initial Setup Guide](runbooks/initial_setup.md) — primary startup path (Docker `:8787`, Splunk MCP, Ollama, first investigation)
-- [Local Splunk Dev](runbooks/local_splunk_dev.md) — sandbox Splunk + sidecar lab workflow
-- [Splunk App Install](runbooks/splunk_app_install.md) — native Splunk Web wrapper under `splunk_app/`
+- [Initial Setup Guide on GitHub Pages](https://gosplunk.github.io/agtsmith/runbooks/initial_setup/)
+- [Initial Setup Guide (repo source)](runbooks/initial_setup.md)
+- [Root SETUP.md shortcut](../SETUP.md) — same content for `less SETUP.md` after clone
+- [Local Splunk Dev](runbooks/local_splunk_dev.md)
+- [Splunk App Install](runbooks/splunk_app_install.md)
 
 ## Release Notes
+- [v1.5.3 Patch Notes](project/v1_5_3_delta.md)
 - [v1.5.2 Release Highlights](project/v1_5_2_delta.md)
 - [v1.5.1 Release Highlights](project/v1_5_1_delta.md)
-- [v1.5.0 Release Highlights](project/v1_5_0_delta.md)
 - [Documentation Overview](project_overview.md)
 
 ## Platform
@@ -35,7 +38,7 @@ Use this page when browsing the repo on GitHub. All links below are relative to 
 - [Screenshot Capture](runbooks/screenshot_capture.md)
 - [Lab Data Generator](runbooks/lab_data_generator.md)
 
-## SPL Quality Programs (v1.5.2)
+## SPL Quality Programs
 - [Internal SPL Benchmark](project/internal_spl_benchmark.md)
 - [Linux SPL Benchmark](project/linux_spl_benchmark.md)
 - [Live Domain SPL Benchmark](project/live_domain_spl_benchmark.md)
@@ -44,4 +47,4 @@ Use this page when browsing the repo on GitHub. All links below are relative to 
 - [README](../README.md)
 - [CHANGELOG](../CHANGELOG.md)
 
-If GitHub shows a temporary “No server is currently available” page, the files are still in the repository — clone with `git clone https://github.com/gosplunk/agtsmith.git` and open them locally.
+If GitHub shows a unicorn / “No server is currently available” page on `blob/...` links, use the **published site** above or clone the repository and read files locally.

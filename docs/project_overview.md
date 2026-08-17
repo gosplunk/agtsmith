@@ -4,6 +4,9 @@
 This page is the reader's starting point. It does not try to explain the whole platform again. It tells you which document to read next based on what you need.
 
 ## Start Here
+If you want the short explanation of what changed in `v1.5.3`, read:
+- [v1.5.3 Patch Notes](project/v1_5_3_delta.md)
+
 If you want the short explanation of what changed in `v1.5.2`, read:
 - [v1.5.2 Release Highlights](project/v1_5_2_delta.md)
 
@@ -79,4 +82,9 @@ If you want the live workflow view in the UI, open:
 The `docs/reference/` tree is the advanced knowledge and RAG support library. It is useful for model grounding and implementation work, but it is not the main reader path for understanding the platform.
 
 ## GitHub Link Note
-Browse these docs from the repository root with normal relative links (for example `docs/runbooks/initial_setup.md` from `README.md`). If GitHub web rendering is temporarily unavailable, clone the repo and read the same files locally, or use the [Documentation Index](README.md).
+Browse these docs from the repository root with normal relative links (for example `docs/runbooks/initial_setup.md` from `README.md`).
+
+**If GitHub blob preview fails** (unicorn / server error page), use the published site:
+**https://gosplunk.github.io/agtsmith/runbooks/initial_setup/**
+
+See also the [Documentation Index](README.md).
