@@ -78,6 +78,7 @@ def _install_stub_modules() -> None:
     mod.run_splunk_query_args = lambda *args, **kwargs: {}
     mod.summarize_with_ollama_model = lambda *args, **kwargs: ""
     mod.template_to_query_args = lambda *args, **kwargs: {}
+    mod.MCPRequestTimeout = type("MCPRequestTimeout", (TimeoutError,), {})
     stubs["minimal_question_to_answer"] = mod
 
     mod = types.ModuleType("ollama_log_stream")

@@ -14,6 +14,8 @@ from minimal_question_to_answer import map_question_to_template
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CARDS_PATH_DEFAULT = PROJECT_ROOT / "artifacts" / "environment" / "sourcetype_cards.json"
+INTERNAL_CARDS_PATH_DEFAULT = PROJECT_ROOT / "artifacts" / "environment" / "internal_sourcetype_cards.json"
+LINUX_CARDS_PATH_DEFAULT = PROJECT_ROOT / "artifacts" / "environment" / "linux_sourcetype_cards.json"
 
 
 def cards_path() -> Path:
@@ -21,9 +23,83 @@ def cards_path() -> Path:
     return Path(override) if override else CARDS_PATH_DEFAULT
 
 
-@lru_cache(maxsize=1)
+def internal_cards_path() -> Path:
+    override = str(__import__("os").environ.get("SPL_INTERNAL_SOURCETYPE_CARDS_PATH", "")).strip()
+    return Path(override) if override else INTERNAL_CARDS_PATH_DEFAULT
+
+
+def linux_cards_path() -> Path:
+    override = str(__import__("os").environ.get("SPL_LINUX_SOURCETYPE_CARDS_PATH", "")).strip()
+    return Path(override) if override else LINUX_CARDS_PATH_DEFAULT
+
+
+def _question_is_linux_dataset(question: str) -> bool:
+    q = (question or "").lower()
+    return any(
+        term in q
+        for term in (
+            "index=linux",
+            "linux index",
+            "linux sourcetype",
+            "linux host",
+            "linux auth",
+            "linux sudo",
+            "linux audit",
+            "linux failed login",
+            "linux session",
+        )
+    ) or bool(re.search(r"\blinux\b.*\b(?:sourcetype|host|auth|sudo|audit|session)\b", q))
+
+
+def _question_is_internal_platform(question: str) -> bool:
+    q = (question or "").lower()
+    return any(
+        term in q
+        for term in (
+            "_internal",
+            "splunk internal",
+            "internal index",
+            "_audit",
+            "scheduler",
+            "splunkd",
+            "forwarder",
+            "license usage",
+            "splunk license",
+        )
+    )
+
+
+@lru_cache(maxsize=2)
 def load_cards(*, path: str | None = None) -> list[dict[str, Any]]:
     card_path = Path(path) if path else cards_path()
+    if not card_path.is_file():
+        return []
+    try:
+        rows = json.loads(card_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict) and str(row.get("sourcetype", "")).strip()]
+
+
+@lru_cache(maxsize=1)
+def load_internal_cards(*, path: str | None = None) -> list[dict[str, Any]]:
+    card_path = Path(path) if path else internal_cards_path()
+    if not card_path.is_file():
+        return []
+    try:
+        rows = json.loads(card_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict) and str(row.get("sourcetype", "")).strip()]
+
+
+@lru_cache(maxsize=1)
+def load_linux_cards(*, path: str | None = None) -> list[dict[str, Any]]:
+    card_path = Path(path) if path else linux_cards_path()
     if not card_path.is_file():
         return []
     try:
@@ -78,6 +154,24 @@ def cards_for_question(
     cards: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows = cards if cards is not None else load_cards()
+    if cards is None and _question_is_internal_platform(question):
+        internal_rows = load_internal_cards()
+        if internal_rows:
+            by_st = {str(r.get("sourcetype", "")).lower(): r for r in rows if isinstance(r, dict)}
+            for row in internal_rows:
+                st_key = str(row.get("sourcetype", "")).lower()
+                if st_key:
+                    by_st[st_key] = row
+            rows = list(by_st.values())
+    if cards is None and _question_is_linux_dataset(question):
+        linux_rows = load_linux_cards()
+        if linux_rows:
+            by_st = {str(r.get("sourcetype", "")).lower(): r for r in rows if isinstance(r, dict)}
+            for row in linux_rows:
+                st_key = str(row.get("sourcetype", "")).lower()
+                if st_key:
+                    by_st[st_key] = row
+            rows = list(by_st.values())
     if not rows:
         return []
     intent_name = intent.strip() or map_question_to_template(question).intent

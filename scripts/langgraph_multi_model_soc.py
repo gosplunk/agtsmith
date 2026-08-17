@@ -30,6 +30,7 @@ from investigation_progress import (
     MULTI_MODEL_NODE_PROGRESS,
     POST_GRAPH_PROGRESS_NODES,
     classify_review_profile,
+    journey_node_for_graph_node,
     progress_for_multi_model_node,
     progress_for_stage_log,
     requires_security_review,
@@ -62,6 +63,7 @@ from question_intelligence import (
     extract_explicit_sourcetype,
     infer_analytical_shape_hints,
     query_conflicts_with_explicit_sourcetype,
+    question_has_index_token,
     question_requests_all_time,
     question_requests_privilege_first_seen,
     APACHE_WEB_INTENTS,
@@ -72,9 +74,16 @@ from spl_rag_context import build_resolved_domain_hints, build_spl_rag_context
 from windows_event_code_catalog import build_event_code_reviewer_context
 from spl_query_repair import attempt_query_repair_once
 from tdir_core import build_tdir_case
-from environment_profile import apply_environment_query_constraints, load_environment_profile, normalize_query_index_aliases, validate_query_against_environment
+from environment_profile import (
+    apply_environment_query_constraints,
+    load_environment_profile,
+    normalize_query_index_aliases,
+    profile_inventory_structured_results,
+    validate_query_against_environment,
+)
 from intent_field_contracts import validate_query_for_intent, validate_platform_sourcetype_coherence, validate_intent_platform_scope
 from local_learning import ranked_approved_learning_records
+from saved_query_library import retrieve_saved_query_shortcut
 from runtime_config import (
     DEFAULT_MODEL_ANALYST_REVIEWER,
     DEFAULT_MODEL_EVIDENCE_REVIEWER,
@@ -287,6 +296,82 @@ def _inject_sources_into_query(query: str, sources: list[str]) -> str:
     return re.sub(r"^search\s+([^\|]+?)\b", lambda m: f"search {m.group(1).strip()} {source_clause} ", str(query or ""), count=1, flags=re.IGNORECASE).strip()
 
 
+def _writer_saved_query_suggestion_patch(shortcut: dict[str, Any]) -> dict[str, Any]:
+    if str(shortcut.get("mode", "")).strip().lower() != "suggest":
+        return {}
+    record = shortcut.get("record") if isinstance(shortcut.get("record"), dict) else {}
+    supporting_question = str(record.get("supporting_question", "")).strip()
+    return {
+        "saved_query_suggestion": {
+            "record_id": str(shortcut.get("record_id", "")).strip(),
+            "score": float(shortcut.get("score", 0.0) or 0.0),
+            "query": str(shortcut.get("query", "")).strip(),
+            "supporting_question": supporting_question,
+            "intent": str(shortcut.get("intent", "")).strip(),
+            "reason": str(shortcut.get("reason", "")).strip(),
+        }
+    }
+
+
+def _writer_output_from_saved_query_shortcut(
+    state: MultiModelState,
+    question: str,
+    shortcut: dict[str, Any],
+    *,
+    planner_intent: str,
+    started: float,
+) -> dict[str, Any] | None:
+    query = str(shortcut.get("query", "")).strip()
+    if str(shortcut.get("mode", "")).strip().lower() != "auto" or not query:
+        return None
+    planner_output = state.get("planner_output", {}) or {}
+    planner_args = planner_output.get("tool_args", {}) if isinstance(planner_output.get("tool_args"), dict) else {}
+    from minimal_question_to_answer import infer_time_window
+    from question_intelligence import apply_question_time_window
+
+    inferred_e, inferred_l = infer_time_window(question)
+    tool_args = {
+        "query": query,
+        "earliest_time": str(planner_args.get("earliest_time") or inferred_e or "-7d"),
+        "latest_time": str(planner_args.get("latest_time") or inferred_l or "now"),
+        "row_limit": int(planner_args.get("row_limit", 50) or 50),
+    }
+    apply_question_time_window(question, tool_args)
+    intent = str(shortcut.get("intent", "")).strip() or planner_intent or "investigation_saved"
+    writer_output = _normalize_candidate(
+        {
+            "selected_tool": "splunk_run_query",
+            "tool_args": tool_args,
+            "intent": intent,
+            "confidence": min(0.95, max(0.75, float(shortcut.get("score", 0.92) or 0.92))),
+            "reason": f"saved_query_library:{shortcut.get('reason', 'match')}",
+            "source": "saved_query_library",
+        },
+        question,
+        fallback_reason="saved_query_library_shortcut",
+    )
+    routing = _writer_post_routing(state, writer_output)
+    duration_ms = int((time.monotonic() - started) * 1000)
+    return {
+        "planner_output": planner_output,
+        "writer_output": writer_output,
+        **routing,
+        "writer_duration_ms": duration_ms,
+        "stage_logs": _append_stage_log(
+            state,
+            stage="writer",
+            title="Writer reused saved query library match",
+            details=[
+                f"record_id={shortcut.get('record_id', '')}",
+                f"score={shortcut.get('score', 0.0)}",
+                f"query={query[:220]}",
+            ],
+            model="saved_query_library",
+            duration_ms=duration_ms,
+        ),
+    }
+
+
 def _apply_learning_assets(question: str, plan: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(plan, dict) or str(plan.get("selected_tool", "")).strip() != "splunk_run_query":
         return plan
@@ -426,6 +511,8 @@ class MultiModelState(TypedDict, total=False):
     writer_duration_ms: int
     spl_validate_duration_ms: int
     skipped_nodes: list[str]
+    force_saved_query_id: str
+    saved_query_suggestion: dict[str, Any]
 
 
 def _review_profile_for_state(state: MultiModelState, *, planner_intent: str = "") -> str:
@@ -727,7 +814,7 @@ def _normalize_candidate(candidate: dict[str, Any], question: str, *, fallback_r
             args.pop("search", None)
         if "query" in args:
             q = str(args.get("query", "")).strip()
-            if q and not q.lower().startswith("search "):
+            if q and not q.lower().startswith("search ") and not q.startswith("|"):
                 args["query"] = f"search {q}"
             # Remove inline time modifiers from SPL. Time belongs in tool args.
             args["query"] = re.sub(r"\s+(earliest(?:_time)?|latest(?:_time)?)\s*=\s*([^\s|]+)", "", args["query"], flags=re.IGNORECASE)
@@ -993,12 +1080,30 @@ def _enforce_question_alignment(question: str, plan: dict[str, Any]) -> dict[str
     aligned = dict(plan)
     mapped_template = map_question_to_template(question)
 
-    if (
+    # A question that names a time window, a data-volume comparison, or any other
+    # signal requiring a real event search must never be force-routed to a
+    # metadata-only tool (splunk_get_indexes has no time filter and cannot answer
+    # "in the last hour" style questions). Check this before the typo-tolerant
+    # index-inventory override below so wording like "which indexes have data in
+    # the last hour" falls through to the time-aware run_query branch instead.
+    from mcp_deterministic_routing import question_disqualified_for_deterministic
+
+    needs_time_scoped_search = bool(question_disqualified_for_deterministic(question))
+
+    # Typo-tolerant index inventory detection: catch common misspellings ("idexes",
+    # "indexs", "indeces") paired with an inventory-style verb or "access" phrasing,
+    # so e.g. "which idexes do I have access to?" still routes to index inventory
+    # instead of falling through to a generic/security template.
+    has_index_like_token = question_has_index_token(q)
+    has_inventory_verb = any(v in q for v in ("which", "what", "list", "show", "available"))
+    has_access_phrase = "access to" in q or "can access" in q or "have access" in q
+    if not needs_time_scoped_search and (
         "list indexes" in q
         or "show indexes" in q
         or "what indexes" in q
         or "indexes i can access" in q
         or re.search(r"\b(how many|number of|count of)\s+indexes?\b", q)
+        or (has_index_like_token and (has_inventory_verb or has_access_phrase))
     ):
         aligned["selected_tool"] = "splunk_get_indexes"
         aligned["tool_args"] = {}
@@ -1012,6 +1117,22 @@ def _enforce_question_alignment(question: str, plan: dict[str, Any]) -> dict[str
             aligned.update(_build_template_aligned_plan(question, mapped_template))
             aligned["reason"] = "question_alignment_override:top_indexes_run_query"
             return aligned
+
+    time_bounded_inventory_intents = {
+        "index_sourcetype_volume",
+        "internal_sourcetypes",
+        "linux_sourcetypes",
+        "linux_host_activity",
+        "host_activity_summary",
+        "splunk_internal_health",
+        "internal_auth_failures",
+        "forwarder_connectivity",
+        "splunk_license_usage",
+    }
+    if mapped_template.intent in time_bounded_inventory_intents and needs_time_scoped_search:
+        aligned.update(_build_template_aligned_plan(question, mapped_template))
+        aligned["reason"] = f"question_alignment_override:{mapped_template.intent}_run_query"
+        return aligned
 
     if "splunk version" in q or "splunk info" in q or "server info" in q or "instance info" in q:
         aligned["selected_tool"] = "splunk_get_info"
@@ -1596,6 +1717,46 @@ def writer_node(state: MultiModelState) -> MultiModelState:
     planner_output = state.get("planner_output", {}) or {}
     planner_intent = str(planner_output.get("intent", "")).strip()
     mapped_template = map_question_to_template(question)
+    force_saved_query_id = str(state.get("force_saved_query_id", "")).strip()
+    shortcut = retrieve_saved_query_shortcut(
+        question,
+        planner_intent,
+        force_saved_query_id=force_saved_query_id,
+    )
+    suggestion_patch = _writer_saved_query_suggestion_patch(shortcut)
+    shortcut_writer = _writer_output_from_saved_query_shortcut(
+        state,
+        question,
+        shortcut,
+        planner_intent=planner_intent,
+        started=started,
+    )
+    if shortcut_writer is not None:
+        return {**shortcut_writer, **suggestion_patch}
+    template_override_mode = _template_override_mode()
+    if (
+        template_override_mode != "never"
+        and mapped_template.intent in DETERMINISTIC_RUN_QUERY_INTENTS
+    ):
+        bypass_output = _writer_bypass_for_template_override(question, mapped_template)
+        if bypass_output is not None:
+            routing = _writer_post_routing(state, bypass_output)
+            return {
+                "writer_output": bypass_output,
+                **routing,
+                "writer_duration_ms": int((time.monotonic() - started) * 1000),
+                "stage_logs": _append_stage_log(
+                    state,
+                    stage="writer",
+                    title=f"Writer bypassed LLM (AGTSMITH_TEMPLATE_OVERRIDE={template_override_mode})",
+                    details=[
+                        f"intent={mapped_template.intent}",
+                        "Deterministic template SPL used before analytical plan for benchmark-stable platform intent.",
+                    ],
+                    model=MODEL_QUERY_WRITER,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                ),
+            }
     analytical_candidate, analytical_diagnostics = _preferred_analytical_candidate(state)
     planner_output["analytical_plan_execution"] = analytical_diagnostics
     if analytical_candidate is not None:
@@ -1696,25 +1857,6 @@ def writer_node(state: MultiModelState) -> MultiModelState:
                     duration_ms=duration_ms,
                 ),
             }
-    bypass_output = _writer_bypass_for_template_override(question, mapped_template)
-    if bypass_output is not None:
-        routing = _writer_post_routing(state, bypass_output)
-        return {
-            "writer_output": bypass_output,
-            **routing,
-            "writer_duration_ms": int((time.monotonic() - started) * 1000),
-            "stage_logs": _append_stage_log(
-                state,
-                stage="writer",
-                title="Writer bypassed LLM (AGTSMITH_TEMPLATE_OVERRIDE=always)",
-                details=[
-                    f"intent={mapped_template.intent}",
-                    "Template override mode forced deterministic SPL instead of writer generation.",
-                ],
-                model=MODEL_QUERY_WRITER,
-                duration_ms=int((time.monotonic() - started) * 1000),
-            ),
-        }
     rag_context = (
         build_spl_rag_context(question, intent=planner_intent, max_chars=RAG_MAX_CHARS)
         if RAG_ENABLED
@@ -1928,6 +2070,7 @@ def writer_node(state: MultiModelState) -> MultiModelState:
         **routing,
         "writer_duration_ms": int((time.monotonic() - started) * 1000),
         "stage_logs": stage_logs,
+        **suggestion_patch,
     }
 
 
@@ -2291,83 +2434,115 @@ def validate_final_plan_node(state: MultiModelState) -> MultiModelState:
         repair_meta: dict[str, Any] = {}
         intent_name = str(plan.get("intent", "")).strip()
         for attempt_idx in range(3):
-            ok, reason = validate_query_args(args_current, question=question)
-            if not ok:
-                failure_reason = f"policy:{reason}"
-            else:
-                contract_ok, contract_reason = validate_query_for_intent(
-                    intent_name,
-                    args_current,
-                    question=str(state.get("question", "")),
-                )
-                if not contract_ok:
-                    failure_reason = f"intent_contract:{contract_reason}"
+            validation_passes = 2 if attempt_idx == 0 else 1
+            for validation_pass in range(validation_passes):
+                ok, reason = validate_query_args(args_current, question=question)
+                if not ok:
+                    failure_reason = f"policy:{reason}"
                 else:
-                    query_text = str(args_current.get("query", "")).strip()
-                    query_text = normalize_query_index_aliases(query_text, load_environment_profile())
-                    if query_text:
-                        args_current = dict(args_current)
-                        args_current["query"] = query_text
-                    from spl_structure_validate import validate_structure
-
-                    structure_ok, structure_reason = validate_structure(
-                        query_text,
-                        intent=intent_name,
-                        question=question,
+                    contract_ok, contract_reason = validate_query_for_intent(
+                        intent_name,
+                        args_current,
+                        question=str(state.get("question", "")),
                     )
-                    if not structure_ok:
-                        failure_reason = f"structure:{structure_reason}"
+                    if not contract_ok:
+                        failure_reason = f"intent_contract:{contract_reason}"
                     else:
-                        coherence_ok, coherence_reason = validate_platform_sourcetype_coherence(query_text, intent_name)
-                        if not coherence_ok:
-                            failure_reason = f"platform_coherence:{coherence_reason}"
-                        else:
-                            scope_ok, scope_reason = validate_intent_platform_scope(
-                                query_text,
-                                intent_name,
-                                question=question,
-                            )
-                            if not scope_ok:
-                                failure_reason = f"platform_scope:{scope_reason}"
-                            else:
-                                from spl_domain_knowledge import validate_query_against_domain_knowledge
+                        query_text = str(args_current.get("query", "")).strip()
+                        _profile_for_norm = load_environment_profile()
+                        query_text = normalize_query_index_aliases(query_text, _profile_for_norm)
+                        if query_text and not re.search(r"\|\s*append\s*\[", query_text, flags=re.IGNORECASE):
+                            from spl_query_normalize import drop_invented_sourcetypes
 
-                                domain_ok, domain_reason = validate_query_against_domain_knowledge(
+                            # Applies to every query source (writer-model AND canonical
+                            # templates): if a sourcetype OR list has at least one known
+                            # alternative, drop only the unknown member(s) instead of
+                            # letting validate_structure hard-block the whole query.
+                            query_text = drop_invented_sourcetypes(query_text, profile=_profile_for_norm)
+                        if query_text:
+                            args_current = dict(args_current)
+                            args_current["query"] = query_text
+                        from spl_structure_validate import validate_structure
+
+                        structure_ok, structure_reason = validate_structure(
+                            query_text,
+                            intent=intent_name,
+                            question=question,
+                        )
+                        if not structure_ok:
+                            failure_reason = f"structure:{structure_reason}"
+                        else:
+                            coherence_ok, coherence_reason = validate_platform_sourcetype_coherence(query_text, intent_name)
+                            if not coherence_ok:
+                                failure_reason = f"platform_coherence:{coherence_reason}"
+                            else:
+                                scope_ok, scope_reason = validate_intent_platform_scope(
                                     query_text,
+                                    intent_name,
                                     question=question,
-                                    intent=intent_name,
                                 )
-                                if not domain_ok:
-                                    failure_reason = f"domain:{domain_reason}"
+                                if not scope_ok:
+                                    failure_reason = f"platform_scope:{scope_reason}"
                                 else:
-                                    env_ok, env_reason = validate_query_against_environment(args_current)
-                                    if not env_ok:
-                                        failure_reason = f"environment:{env_reason}"
+                                    from spl_domain_knowledge import validate_query_against_domain_knowledge
+
+                                    domain_ok, domain_reason = validate_query_against_domain_knowledge(
+                                        query_text,
+                                        question=question,
+                                        intent=intent_name,
+                                    )
+                                    if not domain_ok:
+                                        failure_reason = f"domain:{domain_reason}"
                                     else:
-                                        if isinstance(args_current, dict):
-                                            args_current.pop("_env_constraints_applied", None)
-                                        plan["tool_args"] = args_current
-                                        result_payload: dict[str, Any] = {
-                                            "final_plan": plan,
-                                            "validation_ok": True,
-                                            "validation_reason": "plan_valid",
-                                            "validation_duration_ms": int((time.monotonic() - started) * 1000),
-                                            "stage_logs": _append_stage_log(
-                                                state,
-                                                stage="validation",
-                                                title="Deterministic validation approved the plan",
-                                                details=[
-                                                    f"intent={intent_name}",
-                                                    f"selected_tool={plan.get('selected_tool', '')}",
-                                                    "Policy, intent contract, platform coherence, and environment checks passed.",
-                                                ],
-                                                duration_ms=int((time.monotonic() - started) * 1000),
-                                            ),
-                                        }
-                                        if repair_meta:
-                                            result_payload["query_repair"] = repair_meta
-                                            result_payload["validation_reason"] = "plan_valid_after_auto_repair"
-                                        return result_payload
+                                        env_ok, env_reason = validate_query_against_environment(args_current)
+                                        if not env_ok:
+                                            failure_reason = f"environment:{env_reason}"
+                                        else:
+                                            if isinstance(args_current, dict):
+                                                args_current.pop("_env_constraints_applied", None)
+                                            plan["tool_args"] = args_current
+                                            result_payload: dict[str, Any] = {
+                                                "final_plan": plan,
+                                                "validation_ok": True,
+                                                "validation_reason": "plan_valid",
+                                                "validation_duration_ms": int((time.monotonic() - started) * 1000),
+                                                "stage_logs": _append_stage_log(
+                                                    state,
+                                                    stage="validation",
+                                                    title="Deterministic validation approved the plan",
+                                                    details=[
+                                                        f"intent={intent_name}",
+                                                        f"selected_tool={plan.get('selected_tool', '')}",
+                                                        "Policy, intent contract, platform coherence, and environment checks passed.",
+                                                    ],
+                                                    duration_ms=int((time.monotonic() - started) * 1000),
+                                                ),
+                                            }
+                                            if repair_meta:
+                                                result_payload["query_repair"] = repair_meta
+                                                result_payload["validation_reason"] = "plan_valid_after_auto_repair"
+                                            return result_payload
+
+                if (
+                    attempt_idx == 0
+                    and validation_pass == 0
+                    and failure_reason.startswith("intent_contract:")
+                ):
+                    from spl_domain_knowledge import bind_domain_knowledge_for_plan
+
+                    bound = bind_domain_knowledge_for_plan(question, {"intent": intent_name, "tool_args": args_current})
+                    if bound.get("matched") and str(bound.get("query", "")).strip():
+                        args_current = dict(bound.get("tool_args") or {})
+                        args_current["query"] = str(bound.get("query", "")).strip()
+                        plan = dict(plan)
+                        plan["tool_args"] = args_current
+                        plan["intent"] = str(bound.get("intent", intent_name))
+                        plan["source"] = "domain_knowledge_contract_repair"
+                        intent_name = str(plan.get("intent", intent_name)).strip()
+                        repair_meta = {**(repair_meta or {}), "domain_contract_repair": True}
+                        continue
+
+                break
 
             if analytical_preferred:
                 failed_reason = failure_reason
@@ -2538,6 +2713,12 @@ def _validate_field_policy_plan(
     if not ok:
         return False, f"intent_contract:{reason}"
     query = str(args.get("query", "")).strip()
+    if query:
+        from spl_query_normalize import drop_invented_sourcetypes
+
+        query = drop_invented_sourcetypes(query, profile=load_environment_profile())
+        args = dict(args)
+        args["query"] = query
     from spl_structure_validate import validate_structure
 
     ok, reason = validate_structure(query, intent=intent, question=question)
@@ -2919,8 +3100,17 @@ def run_tool_node(state: MultiModelState) -> MultiModelState:
     args = plan.get("tool_args", {}) if isinstance(plan.get("tool_args", {}), dict) else {}
     query_budget = state.get("query_budget_output", {}) or {}
     started = time.monotonic()
+    profile_structured = None
+    if tool == "splunk_run_query" and str(plan.get("intent", "")).strip() == "top_indexes":
+        profile_structured = profile_inventory_structured_results(str(state.get("question", "")))
 
-    if tool == "splunk_get_indexes":
+    if profile_structured is not None:
+        data = {
+            "structured": profile_structured,
+            "source": "environment_profile_index_activity",
+            "profile_first": True,
+        }
+    elif tool == "splunk_get_indexes":
         data = run_splunk_get_indexes()
     elif tool == "splunk_get_info":
         data = run_splunk_get_info()
@@ -2968,6 +3158,7 @@ def run_tool_node(state: MultiModelState) -> MultiModelState:
             title="Splunk tool execution completed",
             details=[
                 f"selected_tool={tool}",
+                f"source={data.get('source', 'splunk_mcp')}",
                 f"execution_ms={data.get('execution_ms', 0)}",
                 f"rows_returned={((data.get('structured', {}) or {}).get('total_rows', 0) if isinstance(data, dict) else 0)}",
             ],
@@ -3598,7 +3789,7 @@ SUMMARY_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_SUMMARY_TIMEOUT_SEC", "25"))
 def summarize_node(state: MultiModelState) -> MultiModelState:
     started = time.monotonic()
     question = state["question"]
-    plan = state.get("final_plan", {}) or {}
+    plan = state.get("final_plan", {}) or state.get("writer_output", {}) or {}
     review_profile = _review_profile_for_state(state)
     metadata_profile = review_profile == "metadata"
     security_profile = review_profile == "security"
@@ -3721,6 +3912,12 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
         "semantic_candidates": state.get("semantic_candidate_output", {}),
         "query_budget": state.get("query_budget_output", {}),
         "confidence_cap": _float01(state.get("confidence_cap", 1.0), default=1.0),
+        **(
+            {"saved_query_suggestion": dict(state.get("saved_query_suggestion", {}))}
+            if isinstance(state.get("saved_query_suggestion"), dict)
+            and state.get("saved_query_suggestion")
+            else {}
+        ),
         "model_workflow": [
             {
                 "stage": "planner",
@@ -3842,6 +4039,7 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
         "field_strategy": int(state.get("field_strategy_duration_ms", 0) or 0),
         "domain_knowledge": int(state.get("domain_knowledge_duration_ms", 0) or 0),
         "writer": int(state.get("writer_duration_ms", 0) or 0),
+        "spl_validate": int(state.get("spl_validate_duration_ms", 0) or 0),
         "security_review": int(state.get("security_review_duration_ms", 0) or 0),
         "peer_review_1": int(state.get("peer_review_duration_ms", 0) or 0),
         "peer_review_2": int(state.get("peer_review_2_duration_ms", 0) or 0),
@@ -3858,12 +4056,16 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
     if selected_tool_name in ALLOWED_TOOLS:
         display_spl = _display_spl_for_plan(plan)
         selected_args = output.get("query_args", {}) if isinstance(output.get("query_args", {}), dict) else {}
+        writer_model = MODEL_QUERY_WRITER
+        plan_source = str(plan.get("source", "")).strip()
+        if plan_source == "saved_query_library" or str(plan.get("reason", "")).startswith("saved_query_library"):
+            writer_model = "saved_query_library"
         selected_spl_details.append(
             {
                 "step": 1,
                 "query": display_spl,
                 "selected_tool": selected_tool_name,
-                "writer_model": MODEL_QUERY_WRITER,
+                "writer_model": writer_model,
                 "execution_ms": int(splunk_data.get("execution_ms", 0) or 0),
                 "rows_returned": output.get("rows_returned"),
                 "total_rows": output.get("total_rows"),
@@ -3926,6 +4128,7 @@ def summarize_node(state: MultiModelState) -> MultiModelState:
         + node_timings_ms["field_strategy"]
         + node_timings_ms["domain_knowledge"]
         + node_timings_ms["writer"]
+        + node_timings_ms["spl_validate"]
         + node_timings_ms["security_review"]
         + node_timings_ms["peer_review_1"]
         + node_timings_ms["peer_review_2"]
@@ -4236,7 +4439,7 @@ def build_graph():
     return graph.compile()
 
 
-ProgressCallback = Callable[[str, int, str, str], None] | Callable[[str, int, str, str, bool], None]
+ProgressCallback = Callable[..., None]
 
 
 def _emit_multi_model_progress(
@@ -4245,24 +4448,40 @@ def _emit_multi_model_progress(
     node: str = "",
     stage: str = "",
     skipped: bool = False,
+    phase: str = "enter",
+    duration_ms: int | None = None,
 ) -> None:
     if progress_cb is None:
         return
-    info = progress_for_multi_model_node(node) if node else progress_for_stage_log(stage)
+    journey_node = journey_node_for_graph_node(node or stage)
+    if not journey_node:
+        return
+    info = progress_for_multi_model_node(journey_node)
     pct = info.get("pct")
+    if pct is None:
+        info = progress_for_stage_log(stage or node)
+        pct = info.get("pct")
     if pct is None:
         return
     label = "skipped" if skipped else str(info.get("label", ""))
     title = str(info.get("title", ""))
+    normalized_phase = str(phase or "enter").strip().lower()
+    if normalized_phase not in {"enter", "complete"}:
+        normalized_phase = "enter"
+    measured_ms = max(0, int(duration_ms or 0)) if duration_ms is not None else None
+    args = (journey_node, int(pct), label, title, skipped, normalized_phase, measured_ms)
     try:
-        progress_cb(str(node or stage or "stage"), int(pct), label, title, skipped)  # type: ignore[misc]
+        progress_cb(*args)  # type: ignore[misc]
     except TypeError:
-        progress_cb(str(node or stage or "stage"), int(pct), label, title)
+        try:
+            progress_cb(journey_node, int(pct), label, title, skipped)  # type: ignore[misc]
+        except TypeError:
+            progress_cb(journey_node, int(pct), label, title)  # type: ignore[misc]
 
 
 def _emit_skipped_journey_nodes(progress_cb: ProgressCallback | None, nodes: list[str]) -> None:
     for node in nodes:
-        _emit_multi_model_progress(progress_cb, node=node, skipped=True)
+        _emit_multi_model_progress(progress_cb, node=node, skipped=True, phase="complete", duration_ms=0)
 
 
 def _next_multi_model_node(node_id: str, skipped_nodes: list[str] | None = None) -> str:
@@ -4281,14 +4500,6 @@ def _next_multi_model_node(node_id: str, skipped_nodes: list[str] | None = None)
     return ""
 
 
-def _stage_log_is_skip(entry: dict[str, Any]) -> bool:
-    title = str(entry.get("title", "")).strip().lower()
-    label = str(entry.get("label", "")).strip().lower()
-    if entry.get("skipped") is True:
-        return True
-    return "skipped" in title or label == "skipped"
-
-
 def _invoke_multi_model_graph(
     app: Any,
     initial: dict[str, Any],
@@ -4300,9 +4511,9 @@ def _invoke_multi_model_graph(
         return result if isinstance(result, dict) else {}
 
     result: dict[str, Any] | None = None
-    seen_stage_keys: set[str] = set()
     seen_nodes: set[str] = set()
-    _emit_multi_model_progress(progress_cb, node="ingest_question")
+    seen_stage_keys: set[str] = set()
+    _emit_multi_model_progress(progress_cb, node="guardrail", phase="enter")
 
     for mode, payload in app.stream(initial, stream_mode=["updates", "values"]):
         if mode == "updates" and isinstance(payload, dict):
@@ -4310,7 +4521,6 @@ def _invoke_multi_model_graph(
                 node_key = str(node_name or "").strip()
                 if node_key and node_key not in seen_nodes:
                     seen_nodes.add(node_key)
-                    _emit_multi_model_progress(progress_cb, node=node_key)
                     skipped_nodes: list[str] = []
                     if isinstance(node_delta, dict):
                         raw_skipped = node_delta.get("skipped_nodes") or []
@@ -4320,24 +4530,23 @@ def _invoke_multi_model_graph(
                         _emit_skipped_journey_nodes(progress_cb, skipped_nodes)
                     next_node = _next_multi_model_node(node_key, skipped_nodes)
                     if next_node:
-                        _emit_multi_model_progress(progress_cb, node=next_node)
+                        _emit_multi_model_progress(progress_cb, node=next_node, phase="enter")
         elif mode == "values" and isinstance(payload, dict):
             result = payload
-            skipped_nodes = [
-                str(item).strip()
-                for item in (payload.get("skipped_nodes") or [])
-                if str(item).strip()
-            ]
-            for entry in payload.get("stage_logs", []) or []:
+            for entry in payload.get("stage_logs") or []:
                 if not isinstance(entry, dict):
                     continue
-                stage_key = str(entry.get("stage", "")).strip()
+                stage_key = str(entry.get("stage") or "").strip()
                 if not stage_key or stage_key in seen_stage_keys:
                     continue
-                if _stage_log_is_skip(entry):
-                    continue
                 seen_stage_keys.add(stage_key)
-                _emit_multi_model_progress(progress_cb, stage=stage_key)
+                duration_ms = max(0, int(entry.get("duration_ms") or 0))
+                _emit_multi_model_progress(
+                    progress_cb,
+                    stage=stage_key,
+                    phase="complete",
+                    duration_ms=duration_ms,
+                )
 
     if isinstance(result, dict):
         return result
@@ -4352,11 +4561,16 @@ def run_multi_model_soc(
     write_artifact: bool = False,
     artifact_dir: str = "artifacts/runs/multi_model",
     progress_cb: ProgressCallback | None = None,
+    force_saved_query_id: str = "",
 ) -> dict[str, Any]:
     app = build_graph()
+    initial: dict[str, Any] = {"question": question, "session_id": session_id}
+    forced_id = str(force_saved_query_id or "").strip()
+    if forced_id:
+        initial["force_saved_query_id"] = forced_id
     result = _invoke_multi_model_graph(
         app,
-        {"question": question, "session_id": session_id},
+        initial,
         progress_cb=progress_cb,
     )
     output = result.get("output", {}) if isinstance(result, dict) else {}

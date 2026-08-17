@@ -136,6 +136,7 @@ def _install_stub_modules() -> None:
         "latest_time": "now",
         "row_limit": 20,
     }
+    mod.MCPRequestTimeout = type("MCPRequestTimeout", (TimeoutError,), {})
     _DEMO_MAP_QUESTION_TO_TEMPLATE = mod.map_question_to_template
     _DEMO_RUN_SPLUNK_GET_INDEXES = mod.run_splunk_get_indexes
     _DEMO_RUN_SPLUNK_GET_INFO = mod.run_splunk_get_info

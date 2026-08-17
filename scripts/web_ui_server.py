@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,18 +42,30 @@ from investigation_progress import (
     PLAYBOOK_FLOW_NODES,
     PLAYBOOK_LAYOUT,
     PLAYBOOK_LAYOUT_PRESETS,
+    PLAYBOOK_LANES,
+    PLAYBOOK_PHASES,
     PLAYBOOK_NODE_BRANCH,
     PLAYBOOK_NODE_ICONS,
     PLAYBOOK_NODE_TIPS,
     PLAYBOOK_NODE_ORDER,
     PLAYBOOK_NODES,
+    PLAYBOOK_TIMING_SOURCE,
+    PLAYBOOK_VIEWBOX,
+    PLAYBOOK_HEADER_H,
+    PLAYBOOK_HEADER_Y,
+    PLAYBOOK_LEGEND_Y,
+    PLAYBOOK_LEGEND_H,
     WORKFLOW_STAGE_TO_JOURNEY_NODE,
+    executed_spl_from_result,
     is_inventory_question,
+    journey_rail_state_from_result,
     progress_for_multi_model_node,
     progress_for_stage_log,
     skipped_stage_event_payload,
 )
+from holdout_firewall import HoldoutLeakageError
 from langgraph_multi_model_soc import describe_multi_model_graph, run_multi_model_soc
+from mcp_deterministic_routing import resolve_mcp_chat_pipeline
 from local_learning import (
     ensure_learning_registry,
     generate_self_learn_candidates,
@@ -61,6 +74,7 @@ from local_learning import (
     set_learning_record_status,
 )
 from minimal_question_to_answer import (
+    MCPRequestTimeout,
     map_question_to_template,
     run_splunk_get_indexes,
     run_splunk_get_info,
@@ -120,9 +134,12 @@ from runtime_config import (
     get_edge_llm_model,
     get_edge_llm_role,
     get_edge_llm_timeout_sec,
+    get_env_profile_auto_refresh_enabled,
+    get_env_profile_refresh_interval_minutes,
     get_soc_ui_session_remember_timeout_min,
     get_soc_ui_session_timeout_min,
     get_ollama_host,
+    is_local_ollama_host,
     get_splunk_base_url,
     get_splunk_mcp_url,
     get_runtime_secret,
@@ -150,8 +167,14 @@ ENV_PROFILE_REFRESH_STATE = ARTIFACTS_ROOT / "environment" / "env_profile_refres
 SPL_SKILLPACK_PATH = ARTIFACTS_ROOT / "knowledge" / "spl_skillpack_latest.json"
 SPL_OFFLINE_DOCS_RAG_PATH = ARTIFACTS_ROOT / "knowledge" / "spl_offline_docs_rag_index.json"
 DEFAULT_SPL_OFFLINE_DOCS_SOURCE = Path(
-    "/home/joehaga/ai_projects/Splunk4Offlinedocs/artifacts/staging/"
-    "splunk_offline_docs/appserver/static/docs/manifest/search-index.json"
+    os.getenv(
+        "SPL_OFFLINE_DOCS_SOURCE",
+        str(
+            PROJECT_ROOT.parent
+            / "Splunk4Offlinedocs/artifacts/staging/splunk_offline_docs/"
+            "appserver/static/docs/manifest/search-index.json"
+        ),
+    )
 )
 PERSONALIZATION_LOCK = ARTIFACTS_ROOT / "knowledge" / ".personalization.lock"
 PERSONALIZATION_LOG = ARTIFACTS_ROOT / "knowledge" / "personalization_web.log"
@@ -161,6 +184,11 @@ LOCAL_LEARNING_LOG = ARTIFACTS_ROOT / "learning" / "local_learning_web.log"
 LOCAL_LEARNING_STATE = ARTIFACTS_ROOT / "learning" / "local_learning_status.json"
 LOCAL_LEARNING_STALE_SECONDS = 5 * 60
 ENV_PROFILE_REFRESH_STALE_SECONDS = 2 * 60 * 60
+ENV_PROFILE_FRESH_MINUTES = max(1, int(os.getenv("ENV_PROFILE_MAX_AGE_MINUTES", "60")))
+# Scheduler cadence is configurable at runtime (Configure page -> Ground ->
+# Keep Data Domains Fresh), so it is read dynamically via
+# get_env_profile_refresh_interval_minutes() rather than cached here.
+ENV_PROFILE_AUTO_REFRESH_POLL_SECONDS = 60
 AUDIT_ROOT = ARTIFACTS_ROOT / "audit"
 QUERY_AUDIT_LOG = AUDIT_ROOT / "query_runs.jsonl"
 LOG_SOURCE_REGISTRY = RemoteLogSourceRegistry()
@@ -179,6 +207,7 @@ MCP_CHAT_MODE_LIVE = "live"
 MCP_CHAT_MODE_DEMO = "demo"
 MCP_CHAT_PIPELINE_ASSISTED = "assisted"
 MCP_CHAT_PIPELINE_DETERMINISTIC = "deterministic"
+OLLAMA_KEEP_WARM_COOKIE = "agtsmith_ollama_keep_warm"
 MCP_DEFAULT_QUESTION = "Which indexes have data in the last hour?"
 EXPECTED_MODEL_KEYS = list(MODEL_ASSIGNMENT_KEYS)
 CONFIG_MODEL_EXTRA_KEYS = list(MODEL_PULL_EXTRA_KEYS)
@@ -202,6 +231,8 @@ CONFIG_EDITABLE_KEYS = [
     "SOC_UI_AUTH_ROLE",
     "SOC_UI_SESSION_TIMEOUT_MIN",
     "SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN",
+    "ENV_PROFILE_AUTO_REFRESH_ENABLED",
+    "ENV_PROFILE_REFRESH_INTERVAL_MINUTES",
     *EDGE_CONFIG_KEYS,
     *EXPECTED_MODEL_KEYS,
     *CONFIG_MODEL_EXTRA_KEYS,
@@ -1734,6 +1765,24 @@ def _collect_dependency_status() -> dict[str, Any]:
     }
 
 
+MCP_TIMEOUT_HINT = (
+    "Splunk did not respond in time. This is almost always Splunk still warming up "
+    "(search dispatch, KV Store, or app initialization) after a restart -- not a saved-"
+    "credentials problem; your MCP token is stored correctly. If you just restarted Splunk "
+    "or your computer, wait 1-2 minutes and use Configuration -> Test MCP to confirm Splunk "
+    "answers before retrying your question."
+)
+
+
+def _mcp_error_payload(exc: BaseException) -> dict[str, Any]:
+    """Build a JSON-safe error payload, adding an actionable hint for known-slow MCP timeouts."""
+    payload: dict[str, Any] = {"error": f"{type(exc).__name__}: {exc}"}
+    if isinstance(exc, MCPRequestTimeout):
+        payload["error_type"] = "mcp_timeout"
+        payload["hint"] = MCP_TIMEOUT_HINT
+    return payload
+
+
 def _mcp_probe(values: dict[str, str]) -> dict[str, Any]:
     splunk_mcp = str(values.get("SPLUNK_MCP_URL", "")).strip()
     token = str(values.get("SPLUNK_LAB_BEARER_TOKEN", "")).strip()
@@ -2401,20 +2450,41 @@ def _mcp_chat_mode_payload(mode: str | None) -> dict[str, Any]:
     }
 
 
-def _mcp_chat_pipeline_payload(pipeline: str | None) -> dict[str, Any]:
-    normalized = str(pipeline or MCP_CHAT_PIPELINE_ASSISTED).strip().lower()
-    if normalized == MCP_CHAT_PIPELINE_DETERMINISTIC:
+def _mcp_chat_pipeline_payload(
+    pipeline: str | None,
+    *,
+    routing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    routing = routing if isinstance(routing, dict) else {}
+    effective = str(
+        routing.get("effective_pipeline") or pipeline or MCP_CHAT_PIPELINE_ASSISTED
+    ).strip().lower()
+    requested = str(routing.get("requested_pipeline") or pipeline or MCP_CHAT_PIPELINE_ASSISTED).strip().lower()
+    auto_routed = bool(routing.get("auto_routed"))
+    auto_reason = str(routing.get("auto_route_reason", "")).strip()
+    if effective == MCP_CHAT_PIPELINE_DETERMINISTIC:
+        detail = "Uses bounded templates and deterministic routing without LLM query writing."
+        if auto_routed:
+            detail = (
+                f"Auto-routed from LLM-assisted because the question matched strict inventory rules"
+                f"{f' ({auto_reason})' if auto_reason else ''}. "
+                + detail
+            )
         return {
-            "requested_pipeline": MCP_CHAT_PIPELINE_DETERMINISTIC,
+            "requested_pipeline": requested,
             "effective_pipeline": MCP_CHAT_PIPELINE_DETERMINISTIC,
             "label": "Deterministic MCP",
-            "detail": "Uses bounded templates and deterministic routing without LLM query writing.",
+            "detail": detail,
+            "auto_routed": auto_routed,
+            "auto_route_reason": auto_reason,
         }
     return {
         "requested_pipeline": MCP_CHAT_PIPELINE_ASSISTED,
         "effective_pipeline": MCP_CHAT_PIPELINE_ASSISTED,
         "label": "LLM-Assisted MCP",
         "detail": "Uses the guarded multi-model planner, writer, reviewer, and evidence summary path before Splunk MCP execution.",
+        "auto_routed": False,
+        "auto_route_reason": "",
     }
 
 
@@ -2616,7 +2686,49 @@ def _reconcile_stale_env_profile_refresh() -> None:
 
 def _data_domains_maintenance_meta() -> dict[str, Any]:
     """Maintenance flags for Data Domains / offline-docs RAG (used by refresh status API)."""
-    return {"offline_docs_rag_stale": False}
+    now = datetime.now(timezone.utc)
+    profile_payload = _read_json(ENV_PROFILE_PATH)
+    profile_timestamp = str(profile_payload.get("timestamp_utc", "")).strip()
+    profile_dt: datetime | None = None
+    if profile_timestamp:
+        try:
+            profile_dt = datetime.fromisoformat(profile_timestamp.replace("Z", "+00:00"))
+            if profile_dt.tzinfo is None:
+                profile_dt = profile_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            profile_dt = None
+    profile_age_minutes = (
+        max(0.0, (now - profile_dt.astimezone(timezone.utc)).total_seconds() / 60.0)
+        if profile_dt is not None
+        else None
+    )
+    auto_refresh_enabled = get_env_profile_auto_refresh_enabled()
+    refresh_interval_minutes = get_env_profile_refresh_interval_minutes()
+    next_due = (
+        profile_dt.astimezone(timezone.utc) + timedelta(minutes=refresh_interval_minutes)
+        if profile_dt is not None and auto_refresh_enabled
+        else None
+    )
+
+    source_path = Path(os.getenv("SPL_OFFLINE_DOCS_SOURCE", str(DEFAULT_SPL_OFFLINE_DOCS_SOURCE)))
+    source_exists = source_path.is_file()
+    rag_exists = SPL_OFFLINE_DOCS_RAG_PATH.is_file()
+    offline_docs_rag_stale = source_exists and (
+        not rag_exists
+        or source_path.stat().st_mtime > SPL_OFFLINE_DOCS_RAG_PATH.stat().st_mtime
+    )
+    return {
+        "profile_age_minutes": round(profile_age_minutes, 2) if profile_age_minutes is not None else None,
+        "profile_fresh_max_minutes": ENV_PROFILE_FRESH_MINUTES,
+        "profile_stale": profile_age_minutes is None
+        or profile_age_minutes > ENV_PROFILE_FRESH_MINUTES,
+        "auto_refresh_enabled": auto_refresh_enabled,
+        "refresh_interval_minutes": refresh_interval_minutes,
+        "next_refresh_due_utc": next_due.isoformat() if next_due is not None else "",
+        "offline_docs_source_available": source_exists,
+        "offline_docs_rag_available": rag_exists,
+        "offline_docs_rag_stale": offline_docs_rag_stale,
+    }
 
 
 def _environment_profile_refresh_status() -> dict[str, Any]:
@@ -2953,6 +3065,53 @@ def _run_environment_profile_refresh() -> None:
             pass
 
 
+def _env_profile_auto_refresh_due() -> bool:
+    """True when the auto-refresh scheduler should kick off a refresh now."""
+    if not get_env_profile_auto_refresh_enabled():
+        return False
+    if not _environment_profile_exists():
+        # First build is handled by the Splunk MCP validation bootstrap flow
+        # (_maybe_trigger_environment_profile_bootstrap); the scheduler only
+        # keeps an existing profile fresh.
+        return False
+    if _environment_profile_refresh_in_progress():
+        return False
+    meta = _data_domains_maintenance_meta()
+    age_minutes = meta.get("profile_age_minutes")
+    interval_minutes = get_env_profile_refresh_interval_minutes()
+    return age_minutes is None or age_minutes >= interval_minutes
+
+
+def _env_profile_auto_refresh_loop() -> None:
+    """Background loop started once at server startup (see main()).
+
+    Polls every ENV_PROFILE_AUTO_REFRESH_POLL_SECONDS so that enabling,
+    disabling, or changing the interval from the Configure page takes effect
+    on the next tick without a server restart.
+    """
+    while True:
+        try:
+            if _env_profile_auto_refresh_due():
+                _run_environment_profile_refresh()
+        except Exception as exc:
+            try:
+                with ENV_PROFILE_REFRESH_LOG.open("a", encoding="utf-8") as handle:
+                    handle.write(f"\n[env-profile-auto-refresh] scheduler exception: {exc}\n")
+            except Exception:
+                pass
+        time.sleep(ENV_PROFILE_AUTO_REFRESH_POLL_SECONDS)
+
+
+def _start_env_profile_auto_refresh_scheduler() -> threading.Thread:
+    thread = threading.Thread(
+        target=_env_profile_auto_refresh_loop,
+        name="env-profile-auto-refresh",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def _wipe_environment_profile_artifacts() -> list[str]:
     removed: list[str] = []
     targets = [
@@ -3033,6 +3192,10 @@ def _config_snapshot() -> dict[str, Any]:
         values["SOC_UI_SESSION_TIMEOUT_MIN"] = get_soc_ui_session_timeout_min()
     if not values.get("SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN"):
         values["SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN"] = get_soc_ui_session_remember_timeout_min()
+    if not values.get("ENV_PROFILE_AUTO_REFRESH_ENABLED"):
+        values["ENV_PROFILE_AUTO_REFRESH_ENABLED"] = "1" if get_env_profile_auto_refresh_enabled() else "0"
+    if not values.get("ENV_PROFILE_REFRESH_INTERVAL_MINUTES"):
+        values["ENV_PROFILE_REFRESH_INTERVAL_MINUTES"] = str(get_env_profile_refresh_interval_minutes())
     expected_models = _default_expected_models(values)
     models = [values.get(key, "") for key in EXPECTED_MODEL_KEYS if values.get(key, "").strip()]
     unique_models: list[str] = []
@@ -3612,13 +3775,23 @@ def _analyst_runtime_models_payload() -> list[dict[str, str]]:
             return configured
         return str(DEFAULT_MODEL_ASSIGNMENTS.get(key, "")).strip()
 
-    return [
+    rows: list[dict[str, str]] = [
         {"role": "planner", "label": "Planner", "model": _model_for("OLLAMA_MODEL_QUERY_PLANNER")},
         {"role": "writer", "label": "Writer", "model": _model_for("OLLAMA_MODEL_QUERY_WRITER")},
         {"role": "analyst", "label": "Analyst", "model": _model_for("OLLAMA_MODEL_ANALYST_REVIEWER")},
         {"role": "security", "label": "Security", "model": _model_for("OLLAMA_MODEL_SECURITY_REVIEWER")},
         {"role": "peers", "label": "Peers", "model": _model_for("OLLAMA_MODEL_PEER_REVIEWER")},
     ]
+    try:
+        from domain_embedding_retrieval import domain_embedding_enabled, domain_index_available
+
+        if domain_embedding_enabled() and domain_index_available():
+            rows.append({"role": "grounding", "label": "Grounding", "model": "nomic-embed-text"})
+    except Exception:
+        pass
+    if get_edge_llm_enabled():
+        rows.append({"role": "edge_classifier", "label": "Edge Classifier", "model": get_edge_llm_model()})
+    return rows
 
 
 def _runtime_playbook_overlay_nodes_html() -> str:
@@ -3631,28 +3804,155 @@ def _runtime_playbook_overlay_nodes_html() -> str:
     )
 
 
+RUNTIME_RAIL_EXPANDED_WIDTH = "248px"
+
+
+def _runtime_journey_compact_styles() -> str:
+    return """
+    .runtime-journey-legend {
+      display:flex;
+      flex-wrap:wrap;
+      gap:6px 10px;
+      margin:6px 0 0;
+      padding:0;
+      list-style:none;
+    }
+    .runtime-journey-legend-item {
+      display:inline-flex;
+      align-items:center;
+      gap:5px;
+      font-size:9px;
+      font-weight:700;
+      letter-spacing:.04em;
+      text-transform:uppercase;
+      color:#7ea2c1;
+      cursor:help;
+    }
+    .runtime-journey-legend-dot {
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      border:1px solid #2a445c;
+      background:#0f172a;
+      flex:0 0 auto;
+    }
+    .runtime-journey-legend-dot.writer-path-library { border-color:#f59e0b; background:#f59e0b; }
+    .runtime-journey-legend-dot.writer-path-deterministic { border-color:#2dd4bf; background:#2dd4bf; }
+    .runtime-journey-legend-dot.writer-path-llm { border-color:#38bdf8; background:#38bdf8; }
+    .runtime-journey { list-style:none; margin:0; padding:0; display:grid; gap:0; }
+    .runtime-journey-step {
+      display:grid;
+      grid-template-columns:14px minmax(0,1fr);
+      gap:6px;
+      align-items:center;
+      padding:2px 0;
+      color:#9fb4cc;
+      font-size:11px;
+      line-height:1.25;
+    }
+    .runtime-journey-label-wrap { display:flex; align-items:baseline; justify-content:space-between; gap:6px; min-width:0; }
+    .runtime-journey-label { min-width:0; }
+    .runtime-journey-step-time {
+      flex:0 0 auto;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+      font-size:9px;
+      color:#94a3b8;
+      font-weight:600;
+      font-variant-numeric:tabular-nums;
+    }
+    .runtime-journey-step.active .runtime-journey-step-time { color:#7dd3fc; }
+    .runtime-journey-step.done .runtime-journey-step-time { color:#86efac; }
+    .runtime-journey-dot {
+      width:10px;
+      height:10px;
+      border-radius:999px;
+      border:2px solid #2a445c;
+      background:#0f172a;
+      box-sizing:border-box;
+    }
+    .runtime-journey-step.done .runtime-journey-dot { border-color:#22c55e; background:#22c55e; }
+    .runtime-journey-step.active .runtime-journey-dot {
+      border-color:#38bdf8;
+      box-shadow:0 0 0 2px rgba(56,189,248,.18);
+      background:radial-gradient(circle at center,#38bdf8 0 35%,#0f172a 36%);
+    }
+    .runtime-journey-step.active { color:#dbeafe; font-weight:700; }
+    .runtime-journey-step.done { color:#bbf7d0; }
+    .runtime-journey-step.is-skipped { color:#64748b; font-weight:500; }
+    .runtime-journey-step.is-skipped .runtime-journey-dot {
+      border-color:#475569;
+      border-style:dashed;
+      background:#0f172a;
+      box-shadow:none;
+    }
+    .runtime-journey-step.is-skipped .runtime-journey-step-time { color:#64748b; font-weight:600; }
+    .runtime-journey-step.writer-path-library.done { color:#fde68a; }
+    .runtime-journey-step.writer-path-library.done .runtime-journey-dot { border-color:#f59e0b; background:#f59e0b; }
+    .runtime-journey-step.writer-path-library.done .runtime-journey-step-time { color:#fcd34d; }
+    .runtime-journey-step.writer-path-library.active .runtime-journey-dot {
+      border-color:#fbbf24;
+      box-shadow:0 0 0 2px rgba(251,191,36,.22);
+      background:radial-gradient(circle at center,#fbbf24 0 35%,#0f172a 36%);
+    }
+    .runtime-journey-step.writer-path-deterministic.done { color:#99f6e4; }
+    .runtime-journey-step.writer-path-deterministic.done .runtime-journey-dot { border-color:#2dd4bf; background:#2dd4bf; }
+    .runtime-journey-step.writer-path-deterministic.done .runtime-journey-step-time { color:#5eead4; }
+    .runtime-journey-step.writer-path-deterministic.active .runtime-journey-dot {
+      border-color:#2dd4bf;
+      box-shadow:0 0 0 2px rgba(45,212,191,.22);
+      background:radial-gradient(circle at center,#2dd4bf 0 35%,#0f172a 36%);
+    }
+    .runtime-journey-step.writer-path-llm.done { color:#bae6fd; }
+    .runtime-journey-step.writer-path-llm.done .runtime-journey-dot { border-color:#38bdf8; background:#38bdf8; }
+    .runtime-journey-step.writer-path-llm.done .runtime-journey-step-time { color:#7dd3fc; }
+    .runtime-journey-step.writer-path-llm.active .runtime-journey-dot {
+      border-color:#38bdf8;
+      box-shadow:0 0 0 2px rgba(56,189,248,.18);
+      background:radial-gradient(circle at center,#38bdf8 0 35%,#0f172a 36%);
+    }
+    """
+
+
 def _runtime_journey_overlay_styles() -> str:
     return """
     .runtime-journey-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
     .runtime-journey-expand { appearance:none; border:1px solid #27415a; margin:0; padding:2px 6px; border-radius:8px; background:#071523; color:#38bdf8; font-size:11px; font-weight:900; cursor:pointer; line-height:1.2; box-shadow:none; }
     .runtime-journey-expand:hover { background:#0b2034; border-color:#38bdf8; }
-    .runtime-journey-overlay-backdrop { position:fixed; top:0; bottom:0; left:0; right:var(--runtime-rail-width, 312px); background:rgba(2,8,15,.55); backdrop-filter:blur(4px); z-index:340; }
+    .runtime-journey-overlay-backdrop { position:fixed; top:0; bottom:0; left:0; right:var(--runtime-rail-width, 248px); background:rgba(2,8,15,.55); backdrop-filter:blur(4px); z-index:340; }
     .runtime-journey-overlay-backdrop[hidden] { display:none; }
-    .runtime-journey-overlay { position:fixed; top:0; right:calc(var(--runtime-rail-width, 312px) + 16px); width:min(1500px, calc(100vw - 64px - var(--runtime-rail-width, 312px) - 16px)); height:100vh; z-index:350; display:flex; flex-direction:column; background:rgba(15,23,42,.92); backdrop-filter:blur(16px); border-left:1px solid rgba(62,184,255,.25); box-shadow:-24px 0 48px rgba(2,8,15,.55), inset 1px 0 0 rgba(62,184,255,.12), 0 0 40px rgba(62,184,255,.08); box-sizing:border-box; }
+    .runtime-journey-overlay { position:fixed; top:0; right:calc(var(--runtime-rail-width, 248px) + 16px); width:min(1500px, calc(100vw - 64px - var(--runtime-rail-width, 248px) - 16px)); height:100vh; z-index:350; display:flex; flex-direction:column; background:rgba(15,23,42,.92); backdrop-filter:blur(16px); border-left:1px solid rgba(62,184,255,.25); box-shadow:-24px 0 48px rgba(2,8,15,.55), inset 1px 0 0 rgba(62,184,255,.12), 0 0 40px rgba(62,184,255,.08); box-sizing:border-box; }
     .runtime-journey-overlay[hidden] { display:none; }
     .runtime-journey-overlay-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 16px 12px; border-bottom:1px solid rgba(62,184,255,.15); background:linear-gradient(180deg,rgba(15,23,42,.98),rgba(15,23,42,.85)); }
     .runtime-journey-overlay-head-left { display:flex; align-items:center; gap:10px; min-width:0; }
     .runtime-journey-overlay-logo { flex:0 0 auto; color:#3EB1FF; filter:drop-shadow(0 0 6px rgba(62,177,255,.45)); }
     .runtime-journey-overlay-title-row { display:flex; align-items:center; gap:8px; color:#f1f5f9; font-size:15px; font-weight:800; letter-spacing:.01em; }
-    .runtime-journey-overlay-live-dot { width:8px; height:8px; border-radius:999px; background:#22c55e; box-shadow:0 0 0 0 rgba(34,197,94,.55); animation:runtime-journey-overlay-pulse 1.6s ease-out infinite; flex:0 0 auto; }
-    @keyframes runtime-journey-overlay-pulse { 0% { box-shadow:0 0 0 0 rgba(34,197,94,.55); } 70% { box-shadow:0 0 0 8px rgba(34,197,94,0); } 100% { box-shadow:0 0 0 0 rgba(34,197,94,0); } }
-    .runtime-journey-overlay-head-right { display:flex; align-items:center; gap:10px; flex:0 0 auto; }
+    .runtime-journey-overlay-status { width:16px; height:16px; display:inline-grid; place-items:center; flex:0 0 auto; }
+    .runtime-journey-overlay-status[data-state="idle"] { visibility:hidden; }
+    .runtime-journey-overlay-status-spinner { display:none; width:13px; height:13px; border:2px solid rgba(125,211,252,.28); border-top-color:#38bdf8; border-radius:999px; box-sizing:border-box; animation:runtime-journey-overlay-spin .8s linear infinite; }
+    .runtime-journey-overlay-status-check { display:none; width:16px; height:16px; color:#22c55e; filter:drop-shadow(0 0 5px rgba(34,197,94,.5)); }
+    .runtime-journey-overlay-status[data-state="running"] .runtime-journey-overlay-status-spinner { display:block; }
+    .runtime-journey-overlay-status[data-state="complete"] .runtime-journey-overlay-status-check { display:block; }
+    @keyframes runtime-journey-overlay-spin { to { transform:rotate(360deg); } }
+    .runtime-journey-overlay-head-right { display:flex; align-items:center; justify-content:flex-end; gap:10px; flex:0 0 auto; min-width:0; }
+    .runtime-journey-overlay-zoom { display:inline-flex; align-items:center; gap:3px; padding:3px; border:1px solid rgba(62,184,255,.22); border-radius:9px; background:rgba(7,21,35,.82); }
+    .runtime-journey-overlay-zoom-button,
+    .runtime-journey-overlay-fit-button { appearance:none; min-width:25px; height:24px; margin:0; padding:0 6px; border:1px solid transparent; border-radius:6px; background:transparent; color:#bae6fd; font-size:13px; font-weight:900; line-height:1; box-shadow:none; cursor:pointer; }
+    .runtime-journey-overlay-fit-button { min-width:32px; font-size:10px; letter-spacing:.03em; }
+    .runtime-journey-overlay-zoom-button:hover:not(:disabled),
+    .runtime-journey-overlay-fit-button:hover { border-color:rgba(56,189,248,.5); background:rgba(14,116,144,.22); color:#f0f9ff; }
+    .runtime-journey-overlay-zoom-button:focus-visible,
+    .runtime-journey-overlay-fit-button:focus-visible { outline:2px solid #38bdf8; outline-offset:1px; }
+    .runtime-journey-overlay-zoom-button:disabled { color:#475569; cursor:not-allowed; }
+    .runtime-journey-overlay-fit-button[aria-pressed="true"] { border-color:rgba(34,197,94,.42); background:rgba(22,101,52,.24); color:#86efac; }
+    .runtime-journey-overlay-zoom-value { width:43px; color:#cbd5e1; font-size:10px; font-weight:800; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-variant-numeric:tabular-nums; text-align:center; }
     .runtime-journey-overlay-profile-pill { display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; border:1px solid rgba(62,184,255,.45); background:rgba(62,184,255,.12); color:#7dd3fc; font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; box-shadow:0 0 12px rgba(62,184,255,.18); }
     .runtime-journey-overlay-close { appearance:none; border:1px solid rgba(62,184,255,.25); margin:0; padding:4px 10px; border-radius:10px; background:rgba(7,21,35,.85); color:#dbeafe; font-size:16px; font-weight:700; cursor:pointer; line-height:1; box-shadow:none; }
     .runtime-journey-overlay-close:hover { border-color:#38bdf8; color:#38bdf8; }
-    .runtime-journey-overlay-flow { flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; padding:12px 16px 16px 12px; }
-    .playbook-flowchart { width:100%; max-width:100%; overflow:hidden; border-radius:12px; position:relative; }
-    .playbook-flowchart-svg { display:block; width:100%; height:auto; min-height:520px; max-height:calc(100vh - 120px); overflow:visible;
+    .runtime-journey-overlay-flow { position:relative; flex:1 1 auto; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable both-edges; scrollbar-color:#334155 #07111f; padding:12px 16px 16px 12px; cursor:grab; }
+    .runtime-journey-overlay-flow:focus-visible { outline:2px solid rgba(56,189,248,.7); outline-offset:-2px; }
+    .runtime-journey-overlay-flow.is-panning { cursor:grabbing; user-select:none; }
+    .playbook-flowchart { width:100%; max-width:none; height:auto; margin:0 auto; overflow:visible; border-radius:12px; position:relative; flex:none; }
+    .playbook-flowchart-svg { display:block; width:100%; height:auto; min-height:0; overflow:visible;
       background-color:#070d18;
       background-image:linear-gradient(rgba(62,177,255,.05) 1px, transparent 1px),linear-gradient(90deg, rgba(62,177,255,.05) 1px, transparent 1px);
       background-size:28px 28px; border-radius:12px; }
@@ -3661,7 +3961,7 @@ def _runtime_journey_overlay_styles() -> str:
     .playbook-flow-edge.branch-operational { stroke:#22d3ee; opacity:.78; }
     .playbook-flow-edge.branch-metadata { stroke:#a855f7; opacity:.78; }
     .playbook-flow-edge.branch-security { stroke:#f59e0b; opacity:.78; }
-    .playbook-flow-edge.branch-blocked { stroke:#fb923c; stroke-width:1.75; stroke-dasharray:7 5; opacity:.42; }
+    .playbook-flow-edge.branch-blocked { stroke:#fb923c; stroke-width:2; stroke-dasharray:7 5; opacity:.68; marker-start:url(#blockedOriginDot); }
     .playbook-flow-edge.done { stroke:#22c55e; stroke-width:2; filter:url(#greenGlow); }
     .playbook-flow-edge.active { stroke:#3EB1FF; stroke-width:2.5; filter:url(#glow); }
     .playbook-flow-edge.branch-trunk.active { stroke:#3EB1FF; opacity:1; }
@@ -3669,14 +3969,14 @@ def _runtime_journey_overlay_styles() -> str:
     .playbook-flow-edge.branch-operational.done { stroke:#22c55e; }
     .playbook-flow-edge.branch-metadata.active { stroke:#c084fc; opacity:1; }
     .playbook-flow-edge.branch-security.active { stroke:#fbbf24; opacity:1; }
-    .playbook-flow-edge.is-branch-skipped { stroke:#475569; stroke-dasharray:6 5; opacity:.4; }
+    .playbook-flow-edge.is-branch-skipped { stroke:#64748b; stroke-dasharray:6 5; opacity:.52; }
     .playbook-flow-edge-label-group.is-branch-skipped { display:none; }
     .playbook-flow-edge-label-bg { fill:rgba(15,23,42,.97); stroke:rgba(51,65,85,.85); stroke-width:1; rx:6; }
     .playbook-flow-edge-labels { pointer-events:none; }
     .playbook-flow-edge-label-bg.done { stroke:rgba(34,197,94,.35); fill:rgba(6,95,70,.35); }
     .playbook-flow-edge-label-bg.active { stroke:rgba(62,177,255,.45); fill:rgba(12,74,110,.45); }
     .playbook-flow-edge-label-bg.is-branch-skipped { opacity:.4; }
-    .playbook-flow-edge-label { fill:#94a3b8; font-size:10px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; pointer-events:none; }
+    .playbook-flow-edge-label { fill:#e2e8f0; font-size:12px; font-weight:700; letter-spacing:.01em; pointer-events:none; }
     .playbook-flow-edge-label.done { fill:#86efac; }
     .playbook-flow-edge-label.active { fill:#7dd3fc; }
     .playbook-flow-edge-label.is-branch-skipped { opacity:.4; }
@@ -3688,8 +3988,8 @@ def _runtime_journey_overlay_styles() -> str:
     .playbook-node-tooltip[hidden] { display:none; }
     .playbook-node-tooltip strong { display:block; color:#f8fafc; font-size:12px; font-weight:800; margin-bottom:4px; }
     .playbook-node-tooltip span { display:block; color:#94a3b8; font-size:11px; line-height:1.5; }
-    .playbook-flow-node.is-branch-skipped { opacity:.45; }
-    .playbook-flow-node.is-skipped { opacity:.45; }
+    .playbook-flow-node.is-branch-skipped { opacity:.6; }
+    .playbook-flow-node.is-skipped { opacity:.6; }
     .playbook-flow-node.pending .playbook-flow-process { stroke-width:1.85; transition:stroke .25s, filter .25s, opacity .25s; }
     .playbook-flow-node.phase-trunk.pending .playbook-flow-process { fill:url(#nodeGradTrunk); stroke:#3EB1FF; filter:url(#trunkGlow); }
     .playbook-flow-node.phase-operational.pending .playbook-flow-process { fill:url(#nodeGradOperational); stroke:#22d3ee; filter:url(#operationalGlow); }
@@ -3719,29 +4019,21 @@ def _runtime_journey_overlay_styles() -> str:
     .playbook-flow-node.active .playbook-flow-icon-path { fill:#dbeafe; }
     .playbook-flow-node.is-skipped .playbook-flow-icon-path, .playbook-flow-node.is-branch-skipped .playbook-flow-icon-path { fill:#64748b; }
     .playbook-flow-decision-icon { fill:#fbbf24; opacity:.95; }
-    .playbook-flow-label { fill:#f1f5f9; font-size:11px; font-weight:700; pointer-events:none; }
-    .playbook-flow-label-process { font-size:10.5px; letter-spacing:-.01em; }
+    .playbook-flow-label { fill:#f1f5f9; font-size:12px; font-weight:700; pointer-events:none; }
+    .playbook-flow-label-process { font-size:11.5px; letter-spacing:-.01em; }
     .playbook-flow-label-decision { font-size:11px; font-weight:800; letter-spacing:-.01em; }
     .playbook-flow-node.pending .playbook-flow-label { fill:#cbd5e1; }
     .playbook-flow-node.is-skipped .playbook-flow-label, .playbook-flow-node.is-branch-skipped .playbook-flow-label { fill:#64748b; }
-    .playbook-flow-skip-label { fill:#64748b; font-size:8px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; opacity:0; pointer-events:none; }
+    .playbook-flow-skip-label { fill:#a8b6ca; font-size:9.5px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; opacity:0; pointer-events:none; }
     .playbook-flow-node.is-skipped .playbook-flow-skip-label, .playbook-flow-node.is-branch-skipped .playbook-flow-skip-label { opacity:1; }
-    .playbook-flow-time { fill:#64748b; font-size:9px; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:600; pointer-events:none; }
+    .playbook-flow-time { fill:#cbd5e1; font-size:10.5px; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-weight:800; font-variant-numeric:tabular-nums; paint-order:stroke; stroke:rgba(7,13,24,.92); stroke-width:3px; stroke-linejoin:round; pointer-events:none; }
     .playbook-flow-node.done .playbook-flow-time { fill:#86efac; }
     .playbook-flow-node.active .playbook-flow-time { fill:#7dd3fc; }
-    .playbook-flow-done-badge { opacity:0; pointer-events:none; }
-    .playbook-flow-node.done .playbook-flow-done-badge { opacity:1; }
-    .playbook-flow-done-circle { fill:#22c55e; stroke:#ecfdf5; stroke-width:1; }
-    .playbook-flow-done-check { fill:none; stroke:#ecfdf5; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
-    .playbook-flow-spinner-track { fill:none; stroke:rgba(100,116,139,.35); stroke-width:2; }
-    .playbook-flow-spinner-arc { fill:none; stroke:#3EB1FF; stroke-width:2; stroke-linecap:round; opacity:0; transform-origin:center; animation:playbook-spinner-spin 1s linear infinite; }
-    .playbook-flow-node.active .playbook-flow-spinner-arc { opacity:1; }
-    @keyframes playbook-spinner-spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
     .playbook-flow-legend { pointer-events:none; }
     .playbook-flow-legend-box { fill:rgba(15,23,42,.92); stroke:rgba(51,65,85,.85); stroke-width:1; }
-    .playbook-flow-legend-title { fill:#64748b; font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
-    .playbook-flow-legend-section { fill:#475569; font-size:8.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
-    .playbook-flow-legend-label { fill:#cbd5e1; font-size:10px; font-weight:600; }
+    .playbook-flow-legend-title { fill:#94a3b8; font-size:10px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+    .playbook-flow-legend-section { fill:#64748b; font-size:9.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+    .playbook-flow-legend-label { fill:#cbd5e1; font-size:11px; font-weight:600; }
     .playbook-flow-legend-line { stroke-width:2.25; stroke-linecap:round; }
     .playbook-flow-legend-line.trunk { stroke:#3EB1FF; }
     .playbook-flow-legend-line.operational { stroke:#22d3ee; }
@@ -3751,8 +4043,40 @@ def _runtime_journey_overlay_styles() -> str:
     .playbook-flow-legend-decision { fill:rgba(15,23,42,.95); stroke:#f59e0b; stroke-width:1.5; }
     .playbook-flow-legend-process { fill:rgba(15,23,42,.95); stroke:#3EB1FF; stroke-width:1.5; }
     .playbook-flow-legend-edge-bg { fill:rgba(30,41,59,.95); stroke:rgba(51,65,85,.8); stroke-width:1; }
-    .playbook-flow-legend-edge-text { fill:#94a3b8; font-size:7px; font-weight:700; letter-spacing:.02em; }
-    @media (max-width: 768px) { .runtime-journey-overlay-backdrop { right:0; } .runtime-journey-overlay { right:0; width:100vw; max-width:100vw; } }
+    .playbook-flow-legend-edge-text { fill:#cbd5e1; font-size:10px; font-weight:700; letter-spacing:.01em; }
+    .playbook-flow-framework { pointer-events:none; }
+    .playbook-flow-lane-panel { stroke:none; }
+    .playbook-flow-lane-panel.lane-core { fill:rgba(14,116,144,.025); }
+    .playbook-flow-lane-panel.lane-operational { fill:rgba(8,145,178,.045); }
+    .playbook-flow-lane-panel.lane-metadata { fill:rgba(126,34,206,.045); }
+    .playbook-flow-lane-panel.lane-security { fill:rgba(180,83,9,.045); }
+    .playbook-flow-lane-header { stroke-width:1; }
+    .playbook-flow-lane-header.lane-core { fill:rgba(14,116,144,.16); stroke:rgba(56,189,248,.28); }
+    .playbook-flow-lane-header.lane-operational { fill:rgba(8,145,178,.15); stroke:rgba(34,211,238,.28); }
+    .playbook-flow-lane-header.lane-metadata { fill:rgba(126,34,206,.14); stroke:rgba(192,132,252,.28); }
+    .playbook-flow-lane-header.lane-security { fill:rgba(180,83,9,.14); stroke:rgba(251,191,36,.28); }
+    .playbook-flow-lane-title { font-size:13px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
+    .playbook-flow-lane-title.lane-core { fill:#7dd3fc; }
+    .playbook-flow-lane-title.lane-operational { fill:#67e8f9; }
+    .playbook-flow-lane-title.lane-metadata { fill:#c4b5fd; }
+    .playbook-flow-lane-title.lane-security { fill:#fbbf24; }
+    .playbook-flow-lane-divider { stroke:rgba(51,65,85,.5); stroke-width:1; }
+    .playbook-flow-phase-band { fill:rgba(15,23,42,.035); }
+    .playbook-flow-phase-gutter { fill:rgba(3,10,20,.72); stroke:rgba(51,65,85,.45); stroke-width:1; }
+    .playbook-flow-phase-divider { stroke:rgba(56,189,248,.22); stroke-width:1; stroke-dasharray:5 6; }
+    .playbook-flow-phase-index { fill:#60a5fa; font-size:14px; font-weight:900; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; }
+    .playbook-flow-phase-label { fill:#9fb4cc; font-size:12px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }
+    .playbook-flow-phase-time-bg { fill:rgba(15,23,42,.92); stroke:rgba(71,85,105,.8); stroke-width:1; }
+    .playbook-flow-phase-time { fill:#cbd5e1; font-size:12px; font-weight:900; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-variant-numeric:tabular-nums; }
+    .playbook-flow-phase.active .playbook-flow-phase-time-bg { fill:rgba(8,47,73,.95); stroke:rgba(56,189,248,.7); filter:url(#glow); }
+    .playbook-flow-phase.active .playbook-flow-phase-time { fill:#7dd3fc; }
+    .playbook-flow-phase.has-time:not(.active) .playbook-flow-phase-time { fill:#86efac; }
+    .playbook-flow-phase.is-skipped .playbook-flow-phase-time { fill:#64748b; font-size:10px; text-transform:uppercase; }
+    .playbook-flow-edge.is-highlighted { stroke-width:3; opacity:1; filter:url(#glow); }
+    .playbook-flow-node.is-highlighted .playbook-flow-process,
+    .playbook-flow-node.is-highlighted .playbook-flow-decision { stroke-width:2.5; filter:url(#glow); }
+    .runtime-journey-step.is-playbook-highlight { outline:1px solid rgba(62,177,255,.45); border-radius:6px; background:rgba(62,177,255,.08); }
+    @media (max-width: 768px) { .runtime-journey-overlay-backdrop { right:0; } .runtime-journey-overlay { right:0; width:100vw; max-width:100vw; } .runtime-journey-overlay-head { flex-wrap:wrap; gap:8px; padding:10px 12px; } .runtime-journey-overlay-head-right { width:100%; gap:6px; } }
     """
 
 
@@ -3801,23 +4125,63 @@ def _runtime_rail_html() -> str:
         'title="Expand playbook graph">⤢</button>'
         "</div>"
         f'<ol class="runtime-journey" id="runtime-journey">{journey_items}</ol>'
+        '<ul class="runtime-journey-legend" id="runtime-journey-legend" aria-label="SPL writer path legend">'
+        '<li class="runtime-journey-legend-item" title="Reused analyst-saved SPL from the query library">'
+        '<span class="runtime-journey-legend-dot writer-path-library" aria-hidden="true"></span>Library</li>'
+        '<li class="runtime-journey-legend-item" title="Template, domain oracle, or analytical plan compiler">'
+        '<span class="runtime-journey-legend-dot writer-path-deterministic" aria-hidden="true"></span>Deterministic</li>'
+        '<li class="runtime-journey-legend-item" title="LLM-generated SPL from the query writer model">'
+        '<span class="runtime-journey-legend-dot writer-path-llm" aria-hidden="true"></span>LLM</li>'
+        "</ul>"
         "</section>"
-        '<section class="runtime-rail-section">'
-        '<div class="runtime-rail-kicker">Active Models</div>'
-        f'<div class="runtime-models" id="runtime-models">{model_rows}</div>'
+        '<section class="runtime-rail-section runtime-rail-models">'
+        '<div class="runtime-rail-kicker runtime-models-head">'
+        "<span>Tasked LLM</span>"
+        '<button type="button" class="runtime-models-expand" id="runtime-models-expand" '
+        'aria-expanded="false" aria-controls="runtime-models" title="Show all model assignments">'
+        '<span class="runtime-models-expand-chevron" aria-hidden="true">⌄</span>'
+        "</button>"
+        "</div>"
+        '<div class="runtime-model-summary" id="runtime-model-summary" data-state="idle">'
+        '<span class="runtime-model-summary-role" id="runtime-model-summary-role">Idle</span>'
+        '<span class="runtime-model-chip"><span class="runtime-model-name" '
+        'id="runtime-model-summary-name">—</span></span>'
+        "</div>"
+        f'<div class="runtime-models" id="runtime-models" data-expanded="false">{model_rows}</div>'
         "</section>"
-        '<section class="runtime-rail-section runtime-rail-ops">'
-        '<div class="runtime-rail-kicker">Ollama Ops</div>'
+        '<section class="runtime-rail-section runtime-rail-ops" id="runtime-rail-ops" data-compute="idle">'
+        '<div class="runtime-ops-head">'
+        '<div class="runtime-rail-kicker">Ollama Utilization</div>'
+        '<span class="runtime-ops-live-dot" id="runtime-ops-live-dot" aria-hidden="true"></span>'
+        "</div>"
         '<div class="runtime-ops-body" id="runtime-ops-body">'
-        '<div class="runtime-ops-row"><span>Status</span><strong id="runtime-ops-status">—</strong></div>'
-        '<div class="runtime-ops-row runtime-ops-gpu">'
-        "<span>GPU VRAM</span>"
-        '<div class="runtime-ops-vram">'
-        '<div class="runtime-ops-vram-track"><div class="runtime-ops-vram-bar" id="runtime-ops-vram-bar"></div></div>'
-        '<strong id="runtime-ops-vram-label">n/a</strong>'
+        '<div class="runtime-ops-row runtime-ops-device-row"><span id="runtime-ops-device-label">Active device</span>'
+        '<div class="runtime-ops-devices" aria-label="Active Ollama compute devices">'
+        '<span class="runtime-ops-device-pill" id="runtime-ops-device-gpu">GPU</span>'
+        '<span class="runtime-ops-device-pill" id="runtime-ops-device-cpu">CPU</span>'
         "</div></div>"
-        '<div class="runtime-ops-row"><span>Loaded Models</span><strong id="runtime-ops-loaded">—</strong></div>'
-        '<div class="runtime-ops-row"><span>Host</span><strong id="runtime-ops-host">—</strong></div>'
+        '<div class="runtime-ops-row runtime-ops-model-row"><span id="runtime-ops-model-label">Tasked model</span>'
+        '<strong id="runtime-ops-model" title="No model currently loaded">—</strong></div>'
+        '<div class="runtime-ops-meter">'
+        '<div class="runtime-ops-meter-label"><span>GPU</span><strong id="runtime-ops-gpu-util">n/a</strong></div>'
+        '<div class="runtime-ops-meter-track"><div class="runtime-ops-meter-bar runtime-ops-gpu-bar" '
+        'id="runtime-ops-gpu-bar"></div></div></div>'
+        '<div class="runtime-ops-meter">'
+        '<div class="runtime-ops-meter-label"><span>VRAM</span><strong id="runtime-ops-vram-label">n/a</strong></div>'
+        '<div class="runtime-ops-meter-track"><div class="runtime-ops-meter-bar runtime-ops-vram-bar" '
+        'id="runtime-ops-vram-bar"></div></div></div>'
+        '<div class="runtime-ops-meter">'
+        '<div class="runtime-ops-meter-label"><span>CPU</span><strong id="runtime-ops-cpu-util">n/a</strong></div>'
+        '<div class="runtime-ops-meter-track"><div class="runtime-ops-meter-bar runtime-ops-cpu-bar" '
+        'id="runtime-ops-cpu-bar"></div></div></div>'
+        '<div class="runtime-ops-state" id="runtime-ops-status">Idle</div>'
+        '<div class="runtime-ops-hint">Glow is live; outline marks the last model task.</div>'
+        '<div class="runtime-ops-row runtime-ops-keep-warm" id="runtime-ops-keep-warm-row" hidden>'
+        '<label class="runtime-ops-keep-warm-label" for="runtime-ops-keep-warm" '
+        'title="Keep planner and writer models loaded in local Ollama between runs. Only applies when Ollama is on this host.">'
+        'Keep Warm</label>'
+        '<input type="checkbox" id="runtime-ops-keep-warm" aria-label="Keep Ollama models warm between runs" />'
+        '</div>'
         '<div class="runtime-ops-updated muted" id="runtime-ops-updated">Waiting for snapshot...</div>'
         "</div>"
         '<a class="runtime-ops-full-link" id="runtime-ops-full-link" href="/admin/ollama-ops" hidden>'
@@ -3836,16 +4200,36 @@ def _runtime_rail_html() -> str:
         "</svg>"
         '<div class="runtime-journey-overlay-title-row" id="runtime-journey-overlay-title">'
         "<span>LangGraph Playbook</span>"
-        '<span class="runtime-journey-overlay-live-dot" aria-hidden="true"></span>'
+        '<span class="runtime-journey-overlay-status" id="runtime-journey-overlay-status" '
+        'data-state="idle" role="status" aria-label="Playbook idle" title="Playbook idle">'
+        '<span class="runtime-journey-overlay-status-spinner" aria-hidden="true"></span>'
+        '<svg class="runtime-journey-overlay-status-check" viewBox="0 0 20 20" '
+        'fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">'
+        '<path d="M4 10.5l4 4L16 6.5" stroke-linecap="round" stroke-linejoin="round"/>'
+        "</svg>"
+        "</span>"
         "</div>"
         "</div>"
         '<div class="runtime-journey-overlay-head-right">'
+        '<div class="runtime-journey-overlay-zoom" role="group" aria-label="Playbook zoom controls">'
+        '<button type="button" class="runtime-journey-overlay-zoom-button" '
+        'id="runtime-journey-overlay-zoom-out" aria-label="Zoom out" title="Zoom out">−</button>'
+        '<output class="runtime-journey-overlay-zoom-value" id="runtime-journey-overlay-zoom-value" '
+        'aria-label="Current zoom">100%</output>'
+        '<button type="button" class="runtime-journey-overlay-zoom-button" '
+        'id="runtime-journey-overlay-zoom-in" aria-label="Zoom in" title="Zoom in">+</button>'
+        '<button type="button" class="runtime-journey-overlay-fit-button" '
+        'id="runtime-journey-overlay-zoom-fit" aria-label="Fit playbook to screen" '
+        'title="Fit playbook to screen" aria-pressed="true">Fit</button>'
+        "</div>"
         '<span class="runtime-journey-overlay-profile-pill" id="runtime-journey-overlay-profile">OPERATIONAL</span>'
         '<button type="button" class="runtime-journey-overlay-close" id="runtime-journey-overlay-close" '
         'aria-label="Close playbook overlay" title="Close">×</button>'
         "</div>"
         "</div>"
-        f'<div class="runtime-journey-overlay-flow" id="runtime-journey-overlay-playbook">{_runtime_playbook_overlay_nodes_html()}</div>'
+        f'<div class="runtime-journey-overlay-flow" id="runtime-journey-overlay-playbook" tabindex="0" '
+        'aria-label="Scrollable playbook canvas. Double-click a section to zoom in, or use the zoom controls.">'
+        f"{_runtime_playbook_overlay_nodes_html()}</div>"
         "</div>"
         "</aside>"
     )
@@ -3864,6 +4248,12 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     playbook_tips_json = json.dumps(PLAYBOOK_NODE_TIPS)
     playbook_icons_json = json.dumps(PLAYBOOK_NODE_ICONS)
     playbook_aliases_json = json.dumps(PLAYBOOK_ACTIVE_NODE_ALIASES)
+    playbook_viewbox_json = json.dumps(PLAYBOOK_VIEWBOX)
+    playbook_legend_json = json.dumps({"y": PLAYBOOK_LEGEND_Y, "h": PLAYBOOK_LEGEND_H})
+    playbook_lanes_json = json.dumps(PLAYBOOK_LANES)
+    playbook_phases_json = json.dumps(PLAYBOOK_PHASES)
+    playbook_timing_source_json = json.dumps(PLAYBOOK_TIMING_SOURCE)
+    playbook_header_json = json.dumps({"y": PLAYBOOK_HEADER_Y, "h": PLAYBOOK_HEADER_H})
     journey_progress_json = json.dumps(
         [
             {
@@ -3903,10 +4293,19 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   const PLAYBOOK_NODE_TIPS = {playbook_tips_json};
   const PLAYBOOK_ICONS = {playbook_icons_json};
   const PLAYBOOK_ALIASES = {playbook_aliases_json};
-  const FLOW_VIEWBOX = {{ x: -78, y: -51, w: 1196, h: 810 }};
+  const PLAYBOOK_TIMING_SOURCE = {playbook_timing_source_json};
+  const FLOW_VIEWBOX = {playbook_viewbox_json};
+  const PLAYBOOK_LEGEND = {playbook_legend_json};
+  const PLAYBOOK_LANES = {playbook_lanes_json};
+  const PLAYBOOK_PHASES = {playbook_phases_json};
+  const PLAYBOOK_HEADER = {playbook_header_json};
   const PROCESS_W = 172;
   const PROCESS_H = 50;
   const DECISION_R = 44;
+  const PLAYBOOK_ZOOM_MIN = 0.1;
+  const PLAYBOOK_ZOOM_MAX = 2;
+  const PLAYBOOK_ZOOM_FACTOR = 1.2;
+  const PLAYBOOK_DOUBLE_CLICK_FACTOR = 1.6;
   const JOURNEY_PROGRESS = {journey_progress_json};
   const NODE_ACTIVE_ROLE = {node_role_json};
   const JOURNEY_TIMING_MS_KEYS = {journey_timing_keys_json};
@@ -3915,30 +4314,38 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     ingest_question: 'guardrail',
     query_planner: 'planner',
     plan: 'planner',
-    field_bind: 'planner',
+    field_bind: 'field_bind',
+    field_discovery: 'field_discovery',
+    field_strategy: 'field_strategy',
+    domain_knowledge: 'domain_knowledge',
     query_writer: 'writer',
     spl_writer: 'writer',
-    spl_validate: 'writer',
+    spl_validate: 'spl_validate',
     reviewer: 'security_review',
     security_reviewer: 'security_review',
-    peer_review: 'security_review',
-    peer_review_1: 'security_review',
-    peer_review_2: 'security_review',
-    peer_reviewer: 'security_review',
-    peer_reviewer_1: 'security_review',
-    peer_reviewer_2: 'security_review',
-    validation: 'run_tool',
-    validate_final_plan: 'run_tool',
+    peer_review: 'peer_review',
+    peer_review_1: 'peer_review',
+    peer_review_2: 'peer_review_2',
+    peer_reviewer: 'peer_review',
+    peer_reviewer_1: 'peer_review',
+    peer_reviewer_2: 'peer_review_2',
+    validation: 'validate_final_plan',
+    validate_final_plan: 'validate_final_plan',
+    field_policy: 'field_policy',
+    semantic_gate: 'semantic_gate',
+    semantic_candidate_select: 'semantic_candidate_select',
     execution: 'run_tool',
+    post_execution: 'post_execution',
     analyst_evidence_review: 'evidence_review',
     security_evidence_review: 'evidence_review',
     deterministic_evidence_pack: 'evidence_review',
+    evidence_review: 'evidence_review',
     summary: 'summarize',
     finalize: 'finalize',
     package_response: 'package_response',
   }};
   const SHOW_OPS_LINK = {ops_link};
-  const OPS_POLL_MS = 5000;
+  const OPS_POLL_MS = 2000;
   const RAIL_MIN_WIDTH = 1280;
   const shell = document.getElementById('app-shell');
   const rail = document.getElementById('runtime-rail');
@@ -3946,13 +4353,29 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   const collapse = document.getElementById('runtime-rail-collapse');
   const pulse = document.getElementById('runtime-rail-pulse');
   const journeyExpand = document.getElementById('runtime-journey-expand');
+  const modelsExpand = document.getElementById('runtime-models-expand');
+  const modelsList = document.getElementById('runtime-models');
+  const MODELS_STORAGE_KEY = 'agtsmith_runtime_models_expanded';
   const journeyOverlay = document.getElementById('runtime-journey-overlay');
   const journeyOverlayBackdrop = document.getElementById('runtime-journey-overlay-backdrop');
   const journeyOverlayClose = document.getElementById('runtime-journey-overlay-close');
+  const playbookStatus = document.getElementById('runtime-journey-overlay-status');
+  const playbookViewport = document.getElementById('runtime-journey-overlay-playbook');
+  const playbookCanvas = document.getElementById('playbook-flowchart');
+  const playbookSvg = document.getElementById('playbook-flowchart-svg');
+  const playbookZoomOut = document.getElementById('runtime-journey-overlay-zoom-out');
+  const playbookZoomIn = document.getElementById('runtime-journey-overlay-zoom-in');
+  const playbookZoomFit = document.getElementById('runtime-journey-overlay-zoom-fit');
+  const playbookZoomValue = document.getElementById('runtime-journey-overlay-zoom-value');
   const opsLink = document.getElementById('runtime-rail-ops-full-link') || document.getElementById('runtime-ops-full-link');
+  const keepWarmRow = document.getElementById('runtime-ops-keep-warm-row');
+  const keepWarmToggle = document.getElementById('runtime-ops-keep-warm');
   let opsTimer = null;
+  let latestOpsSummary = {{}};
+  let lastTaskedSnapshot = {{ role: '', label: '', model: '', computeTarget: '' }};
   let journeyLiveTimer = null;
   let runActive = false;
+  let playbookRunCompleted = false;
   let playbookDocMode = false;
   let activeNode = '';
   let activeRoleNode = '';
@@ -3962,19 +4385,84 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   let journeyOverlayOpen = false;
   let reviewProfile = 'operational';
   const skippedNodes = new Set();
+  const completedNodes = new Set();
   const skippedPlaybookNodes = new Set();
   let packagingWallStart = 0;
   const stageTimingsSec = {{}};
   const stageStartAt = {{}};
-  const playbookTimingsSec = {{}};
-  const playbookStartAt = {{}};
+  let writerPathMode = '';
+  let writerPathDetail = '';
+  let playbookZoom = 1;
+  let playbookZoomMode = 'fit';
+  let playbookZoomFrame = 0;
+  let playbookPanState = null;
+  let playbookResizeObserver = null;
+
+  function resolveWriterPathFromResult(result) {{
+    if (!result || typeof result !== 'object') return {{ mode: '', detail: '' }};
+    const body = (result.result && typeof result.result === 'object') ? result.result : result;
+    const logs = Array.isArray(body.stage_logs)
+      ? body.stage_logs
+      : (Array.isArray(result.stage_logs) ? result.stage_logs : []);
+    const writerLog = logs.find((entry) => {{
+      if (!entry || typeof entry !== 'object') return false;
+      const stage = String(entry.stage || '').trim();
+      return stage === 'writer' || stage === 'query_writer' || stage === 'spl_writer';
+    }}) || null;
+    const writerOut = body.query_writer_output
+      || body.writer_output
+      || (body.writer && body.writer.output)
+      || result.query_writer_output
+      || {{}};
+    const model = String((writerLog && writerLog.model) || '').trim().toLowerCase();
+    const source = String(writerOut.source || (writerLog && writerLog.source) || '').trim().toLowerCase();
+    const title = String((writerLog && writerLog.title) || '').trim();
+    if (model === 'saved_query_library' || source === 'saved_query_library') {{
+      return {{ mode: 'library', detail: title || 'Reused saved query from library' }};
+    }}
+    const deterministicSources = new Set([
+      'domain_knowledge',
+      'writer_template_bypass',
+      'writer_template_fallback',
+      'writer_bypass',
+      'validated_bound_analytical_plan',
+      'environment_profile_index_activity',
+    ]);
+    if (model === 'deterministic_spl_plan_compiler' || deterministicSources.has(source)) {{
+      const detail = model === 'deterministic_spl_plan_compiler'
+        ? 'Analytical plan compiler'
+        : source === 'domain_knowledge'
+          ? 'Domain oracle shortcut'
+          : source === 'writer_template_bypass'
+            ? 'Query template bypass'
+            : source === 'writer_template_fallback'
+              ? 'Query template fallback'
+              : title || 'Deterministic SPL path';
+      return {{ mode: 'deterministic', detail }};
+    }}
+    if (source.startsWith('writer_model') || source === 'writer_constrained' || source === 'writer_fallback') {{
+      return {{ mode: 'llm', detail: title || 'LLM query writer' }};
+    }}
+    if (writerLog || (writerOut && typeof writerOut === 'object' && Object.keys(writerOut).length)) {{
+      return {{ mode: 'llm', detail: title || source || 'LLM query writer' }};
+    }}
+    return {{ mode: '', detail: '' }};
+  }}
+
+  function applyWriterPathFromResult(result) {{
+    const resolved = resolveWriterPathFromResult(result);
+    writerPathMode = resolved.mode || '';
+    writerPathDetail = resolved.detail || '';
+  }}
+
+  function clearWriterPath() {{
+    writerPathMode = '';
+    writerPathDetail = '';
+  }}
 
   function formatStageSeconds(seconds) {{
     const value = Math.max(0, Number(seconds) || 0);
-    if (value > 0 && value < 10 && Math.abs(value - Math.round(value)) > 0.05) {{
-      return `${{value.toFixed(1)}}s`;
-    }}
-    return `${{Math.round(value)}}s`;
+    return `${{value.toFixed(3)}}s`;
   }}
 
   function msToSec(ms) {{
@@ -4023,23 +4511,6 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     const key = String(node || '').trim();
     if (key === 'writer_direct') return PLAYBOOK_ORDER.indexOf('validate_final_plan');
     return PLAYBOOK_ORDER.indexOf(key);
-  }}
-
-  function finalizeActivePlaybookTiming(node='') {{
-    const key = String(node || '').trim();
-    if (!key || !playbookStartAt[key]) return;
-    const elapsed = (Date.now() - playbookStartAt[key]) / 1000;
-    playbookTimingsSec[key] = Math.max(playbookTimingsSec[key] || 0, elapsed);
-    delete playbookStartAt[key];
-  }}
-
-  function notePlaybookTransition(nextNode='') {{
-    const current = activePlaybookNode();
-    if (current && current !== nextNode) finalizeActivePlaybookTiming(current);
-    const target = String(nextNode || '').trim();
-    if (target && target !== 'writer_direct' && playbookTimingsSec[target] == null && !playbookStartAt[target]) {{
-      playbookStartAt[target] = Date.now();
-    }}
   }}
 
   function flowNodeMeta(node='') {{
@@ -4164,6 +4635,78 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     return d;
   }}
 
+  function trimPathEnd(points, trimPx=6) {{
+    if (!Array.isArray(points) || points.length < 2) return points.slice();
+    const trimmed = points.map((pt) => ({{ x: Number(pt.x), y: Number(pt.y) }}));
+    const last = trimmed.length - 1;
+    const end = trimmed[last];
+    const prev = trimmed[last - 1];
+    const dx = end.x - prev.x;
+    const dy = end.y - prev.y;
+    const len = Math.hypot(dx, dy);
+    if (len <= trimPx + 0.5) return trimmed;
+    const ratio = (len - trimPx) / len;
+    trimmed[last] = {{
+      x: prev.x + dx * ratio,
+      y: prev.y + dy * ratio,
+    }};
+    return trimmed;
+  }}
+
+  function edgePathPoints(from='', to='', edge={{}}) {{
+    const anchorFrom = String(edge?.anchor_from || '').trim();
+    const anchorTo = String(edge?.anchor_to || '').trim();
+    const waypoints = Array.isArray(edge?.waypoints) ? edge.waypoints : [];
+    if (anchorFrom || anchorTo || waypoints.length) {{
+      const sides = inferEdgeSides(from, to);
+      const startSide = anchorFrom || sides.startSide;
+      const endSide = anchorTo || sides.endSide;
+      const start = nodeAnchor(from, startSide);
+      const end = nodeAnchor(to, endSide);
+      const points = [start];
+      waypoints.forEach((wp) => {{
+        const x = Number(wp?.x);
+        const y = Number(wp?.y);
+        if (Number.isFinite(x) && Number.isFinite(y)) points.push({{ x, y }});
+      }});
+      points.push(end);
+      return trimPathEnd(points, String(edge?.branch || '') === 'blocked' ? 4 : 6);
+    }}
+    const fromPos = layoutPoint(from);
+    const toPos = layoutPoint(to);
+    const dx = toPos.x - fromPos.x;
+    const dy = toPos.y - fromPos.y;
+    let startSide = 'bottom';
+    let endSide = 'top';
+    if (Math.abs(dy) > Math.abs(dx) * 0.55) {{
+      startSide = dy > 0 ? 'bottom' : 'top';
+      endSide = dy > 0 ? 'top' : 'bottom';
+    }} else {{
+      startSide = dx > 0 ? 'right' : 'left';
+      endSide = dx > 0 ? 'left' : 'right';
+    }}
+    const start = nodeAnchor(from, startSide);
+    const end = nodeAnchor(to, endSide);
+    if (Math.abs(start.x - end.x) < 8 && Math.abs(start.y - end.y) < 8) {{
+      return trimPathEnd([start, end]);
+    }}
+    if (Math.abs(dy) <= Math.abs(dx) * 0.55) {{
+      const midX = start.x + (end.x - start.x) * 0.5;
+      return trimPathEnd([start, {{ x: midX, y: start.y }}, {{ x: midX, y: end.y }}, end]);
+    }}
+    const midY = start.y + (end.y - start.y) * 0.5;
+    if (Math.abs(start.x - end.x) < 12) {{
+      return trimPathEnd([start, end]);
+    }}
+    const bend = Math.max(18, Math.abs(end.y - start.y) * 0.12);
+    const routeY = start.y < end.y ? midY + bend * 0.15 : midY - bend * 0.15;
+    return trimPathEnd([start, {{ x: start.x, y: routeY }}, {{ x: end.x, y: routeY }}, end]);
+  }}
+
+  function edgePath(from='', to='', edge={{}}) {{
+    return orthPath(edgePathPoints(from, to, edge));
+  }}
+
   function inferEdgeSides(from='', to='') {{
     const fromPos = layoutPoint(from);
     const toPos = layoutPoint(to);
@@ -4185,56 +4728,6 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       dx,
       dy,
     }};
-  }}
-
-  function edgePath(from='', to='', edge={{}}) {{
-    const anchorFrom = String(edge?.anchor_from || '').trim();
-    const anchorTo = String(edge?.anchor_to || '').trim();
-    const waypoints = Array.isArray(edge?.waypoints) ? edge.waypoints : [];
-    if (anchorFrom || anchorTo || waypoints.length) {{
-      const sides = inferEdgeSides(from, to);
-      const startSide = anchorFrom || sides.startSide;
-      const endSide = anchorTo || sides.endSide;
-      const start = nodeAnchor(from, startSide);
-      const end = nodeAnchor(to, endSide);
-      const points = [start];
-      waypoints.forEach((wp) => {{
-        const x = Number(wp?.x);
-        const y = Number(wp?.y);
-        if (Number.isFinite(x) && Number.isFinite(y)) points.push({{ x, y }});
-      }});
-      points.push(end);
-      return orthPath(points);
-    }}
-    const fromPos = layoutPoint(from);
-    const toPos = layoutPoint(to);
-    const dx = toPos.x - fromPos.x;
-    const dy = toPos.y - fromPos.y;
-    let startSide = 'bottom';
-    let endSide = 'top';
-    if (Math.abs(dy) > Math.abs(dx) * 0.55) {{
-      startSide = dy > 0 ? 'bottom' : 'top';
-      endSide = dy > 0 ? 'top' : 'bottom';
-    }} else {{
-      startSide = dx > 0 ? 'right' : 'left';
-      endSide = dx > 0 ? 'left' : 'right';
-    }}
-    const start = nodeAnchor(from, startSide);
-    const end = nodeAnchor(to, endSide);
-    if (Math.abs(start.x - end.x) < 8 && Math.abs(start.y - end.y) < 8) {{
-      return `M ${{start.x}} ${{start.y}} L ${{end.x}} ${{end.y}}`;
-    }}
-    if (Math.abs(dy) <= Math.abs(dx) * 0.55) {{
-      const midX = start.x + (end.x - start.x) * 0.5;
-      return `M ${{start.x}} ${{start.y}} L ${{midX}} ${{start.y}} L ${{midX}} ${{end.y}} L ${{end.x}} ${{end.y}}`;
-    }}
-    const midY = start.y + (end.y - start.y) * 0.5;
-    if (Math.abs(start.x - end.x) < 12) {{
-      return `M ${{start.x}} ${{start.y}} L ${{end.x}} ${{end.y}}`;
-    }}
-    const bend = Math.max(18, Math.abs(end.y - start.y) * 0.12);
-    const routeY = start.y < end.y ? midY + bend * 0.15 : midY - bend * 0.15;
-    return `M ${{start.x}} ${{start.y}} L ${{start.x}} ${{routeY}} L ${{end.x}} ${{routeY}} L ${{end.x}} ${{end.y}}`;
   }}
 
   function edgeSides(from='', to='') {{
@@ -4273,10 +4766,16 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   }}
 
   function edgeLabelText(edge={{}}) {{
-    const short = String(edge?.label_short || '').trim();
-    if (short) return short.toUpperCase();
     const full = String(edge?.label || '').trim();
-    return full ? full.toUpperCase() : '';
+    const short = String(edge?.label_short || '').trim();
+    if (full && full.length <= 16) return full;
+    if (short && short.length <= 16) return short;
+    return full || short;
+  }}
+
+  function edgeLabelWidth(text='') {{
+    const len = String(text || '').length;
+    return Math.max(56, len * 7.4 + 22);
   }}
 
   function edgeDrawOrder(edge={{}}) {{
@@ -4390,10 +4889,139 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
         <feGaussianBlur stdDeviation="2.5" result="blur"/>
         <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
       </filter>
-      <marker id="playbook-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <marker id="playbook-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto">
         <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/>
+      </marker>
+      <marker id="blockedOriginDot" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="5">
+        <circle cx="5" cy="5" r="4" fill="context-stroke"/>
       </marker>`;
     svg.appendChild(defs);
+  }}
+
+  function playbookPhaseLabelLines(label='') {{
+    const text = String(label || '').trim();
+    if (text === 'Validation & execution') return ['Validation &', 'execution'];
+    if (text === 'Review profile') return ['Review', 'profile'];
+    return [text];
+  }}
+
+  function appendPlaybookFramework(svg, ns) {{
+    const layer = document.createElementNS(ns, 'g');
+    layer.setAttribute('class', 'playbook-flow-framework');
+    layer.setAttribute('aria-hidden', 'true');
+    const phaseBottom = Math.max(
+      ...PLAYBOOK_PHASES.map((phase) => Number(phase?.y2) || 0),
+      FLOW_VIEWBOX.h,
+    );
+
+    PLAYBOOK_LANES.forEach((lane) => {{
+      const laneId = String(lane?.id || 'core');
+      const x1 = Number(lane?.x1) || 0;
+      const x2 = Number(lane?.x2) || x1;
+      const panel = document.createElementNS(ns, 'rect');
+      panel.setAttribute('class', `playbook-flow-lane-panel lane-${{laneId}}`);
+      panel.setAttribute('x', String(x1));
+      panel.setAttribute('y', String(PLAYBOOK_HEADER.y + PLAYBOOK_HEADER.h));
+      panel.setAttribute('width', String(Math.max(0, x2 - x1)));
+      panel.setAttribute('height', String(Math.max(0, phaseBottom - PLAYBOOK_HEADER.y - PLAYBOOK_HEADER.h)));
+      layer.appendChild(panel);
+    }});
+
+    PLAYBOOK_PHASES.forEach((phase, index) => {{
+      const phaseId = String(phase?.id || `phase-${{index + 1}}`);
+      const y1 = Number(phase?.y1) || 0;
+      const y2 = Number(phase?.y2) || y1;
+      const group = document.createElementNS(ns, 'g');
+      group.setAttribute('class', 'playbook-flow-phase');
+      group.setAttribute('data-phase', phaseId);
+      const band = document.createElementNS(ns, 'rect');
+      band.setAttribute('class', 'playbook-flow-phase-band');
+      band.setAttribute('x', '8');
+      band.setAttribute('y', String(y1));
+      band.setAttribute('width', String(FLOW_VIEWBOX.w - 20));
+      band.setAttribute('height', String(Math.max(0, y2 - y1)));
+      group.appendChild(band);
+      const gutter = document.createElementNS(ns, 'rect');
+      gutter.setAttribute('class', 'playbook-flow-phase-gutter');
+      gutter.setAttribute('x', '8');
+      gutter.setAttribute('y', String(y1));
+      gutter.setAttribute('width', '132');
+      gutter.setAttribute('height', String(Math.max(0, y2 - y1)));
+      group.appendChild(gutter);
+      const divider = document.createElementNS(ns, 'line');
+      divider.setAttribute('class', 'playbook-flow-phase-divider');
+      divider.setAttribute('x1', '8');
+      divider.setAttribute('x2', String(FLOW_VIEWBOX.w - 12));
+      divider.setAttribute('y1', String(y2));
+      divider.setAttribute('y2', String(y2));
+      group.appendChild(divider);
+      const indexText = document.createElementNS(ns, 'text');
+      indexText.setAttribute('class', 'playbook-flow-phase-index');
+      indexText.setAttribute('x', '24');
+      indexText.setAttribute('y', String(y1 + 30));
+      indexText.textContent = String(phase?.index || index + 1).padStart(2, '0');
+      group.appendChild(indexText);
+      const labelText = document.createElementNS(ns, 'text');
+      labelText.setAttribute('class', 'playbook-flow-phase-label');
+      labelText.setAttribute('x', '24');
+      labelText.setAttribute('y', String(y1 + 52));
+      playbookPhaseLabelLines(phase?.label).forEach((line, lineIndex) => {{
+        const span = document.createElementNS(ns, 'tspan');
+        span.setAttribute('x', '24');
+        span.setAttribute('dy', lineIndex === 0 ? '0' : '14');
+        span.textContent = line;
+        labelText.appendChild(span);
+      }});
+      group.appendChild(labelText);
+      const timerY = Math.min(y2 - 34, y1 + 86);
+      const timerBg = document.createElementNS(ns, 'rect');
+      timerBg.setAttribute('class', 'playbook-flow-phase-time-bg');
+      timerBg.setAttribute('x', '22');
+      timerBg.setAttribute('y', String(timerY));
+      timerBg.setAttribute('width', '96');
+      timerBg.setAttribute('height', '24');
+      timerBg.setAttribute('rx', '7');
+      group.appendChild(timerBg);
+      const timer = document.createElementNS(ns, 'text');
+      timer.setAttribute('class', 'playbook-flow-phase-time');
+      timer.setAttribute('data-phase', phaseId);
+      timer.setAttribute('x', '70');
+      timer.setAttribute('y', String(timerY + 16));
+      timer.setAttribute('text-anchor', 'middle');
+      timer.setAttribute('aria-live', 'polite');
+      timer.textContent = '0.000s';
+      group.appendChild(timer);
+      layer.appendChild(group);
+    }});
+
+    PLAYBOOK_LANES.forEach((lane) => {{
+      const laneId = String(lane?.id || 'core');
+      const x1 = Number(lane?.x1) || 0;
+      const x2 = Number(lane?.x2) || x1;
+      const header = document.createElementNS(ns, 'rect');
+      header.setAttribute('class', `playbook-flow-lane-header lane-${{laneId}}`);
+      header.setAttribute('x', String(x1 + 1));
+      header.setAttribute('y', String(PLAYBOOK_HEADER.y));
+      header.setAttribute('width', String(Math.max(0, x2 - x1 - 2)));
+      header.setAttribute('height', String(PLAYBOOK_HEADER.h));
+      header.setAttribute('rx', '7');
+      layer.appendChild(header);
+      const title = document.createElementNS(ns, 'text');
+      title.setAttribute('class', `playbook-flow-lane-title lane-${{laneId}}`);
+      title.setAttribute('x', String((x1 + x2) / 2));
+      title.setAttribute('y', String(PLAYBOOK_HEADER.y + 32));
+      title.setAttribute('text-anchor', 'middle');
+      title.textContent = String(lane?.label || laneId);
+      layer.appendChild(title);
+      const divider = document.createElementNS(ns, 'line');
+      divider.setAttribute('class', 'playbook-flow-lane-divider');
+      divider.setAttribute('x1', String(x1));
+      divider.setAttribute('x2', String(x1));
+      divider.setAttribute('y1', String(PLAYBOOK_HEADER.y));
+      divider.setAttribute('y2', String(phaseBottom));
+      layer.appendChild(divider);
+    }});
+    svg.appendChild(layer);
   }}
 
   function appendProcessIconBadge(group, ns, nodeId, pos) {{
@@ -4427,44 +5055,14 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     group.appendChild(icon);
   }}
 
-  function appendNodeStatusChrome(group, ns, pos) {{
-    const rightX = pos.x + PROCESS_W / 2 - 20;
-    const cy = pos.y;
-    const doneBadge = document.createElementNS(ns, 'g');
-    doneBadge.setAttribute('class', 'playbook-flow-done-badge');
-    const doneCircle = document.createElementNS(ns, 'circle');
-    doneCircle.setAttribute('class', 'playbook-flow-done-circle');
-    doneCircle.setAttribute('cx', String(rightX));
-    doneCircle.setAttribute('cy', String(cy));
-    doneCircle.setAttribute('r', '7');
-    doneBadge.appendChild(doneCircle);
-    const doneCheck = document.createElementNS(ns, 'polyline');
-    doneCheck.setAttribute('class', 'playbook-flow-done-check');
-    doneCheck.setAttribute('points', `${{rightX - 3}},${{cy}} ${{rightX - 1}},${{cy + 2}} ${{rightX + 4}},${{cy - 3}}`);
-    doneBadge.appendChild(doneCheck);
-    group.appendChild(doneBadge);
-    const spinnerTrack = document.createElementNS(ns, 'circle');
-    spinnerTrack.setAttribute('class', 'playbook-flow-spinner-track');
-    spinnerTrack.setAttribute('cx', String(rightX));
-    spinnerTrack.setAttribute('cy', String(cy));
-    spinnerTrack.setAttribute('r', '7');
-    group.appendChild(spinnerTrack);
-    const spinnerArc = document.createElementNS(ns, 'circle');
-    spinnerArc.setAttribute('class', 'playbook-flow-spinner-arc');
-    spinnerArc.setAttribute('cx', String(rightX));
-    spinnerArc.setAttribute('cy', String(cy));
-    spinnerArc.setAttribute('r', '7');
-    spinnerArc.setAttribute('stroke-dasharray', '12 32');
-    group.appendChild(spinnerArc);
-  }}
-
   function appendPlaybookLegend(svg, ns) {{
     const legend = document.createElementNS(ns, 'g');
     legend.setAttribute('class', 'playbook-flow-legend');
+    legend.setAttribute('transform', 'translate(158 0)');
     legend.setAttribute('aria-hidden', 'true');
-    const LEGEND_Y = 618;
-    const LEGEND_H = 108;
-    const LEGEND_W = 248;
+    const LEGEND_Y = PLAYBOOK_LEGEND.y;
+    const LEGEND_H = PLAYBOOK_LEGEND.h;
+    const LEGEND_W = 320;
     const box = document.createElementNS(ns, 'rect');
     box.setAttribute('class', 'playbook-flow-legend-box');
     box.setAttribute('x', '12');
@@ -4492,10 +5090,10 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     shapesHeader.textContent = 'Shapes';
     legend.appendChild(shapesHeader);
     const pathRows = [
-      {{ kind: 'line', cls: 'trunk', label: 'Main Trunk' }},
-      {{ kind: 'line', cls: 'operational', label: 'OP path' }},
-      {{ kind: 'line', cls: 'metadata', label: 'META path' }},
-      {{ kind: 'line', cls: 'security', label: 'SEC path' }},
+      {{ kind: 'line', cls: 'trunk', label: 'Core flow' }},
+      {{ kind: 'line', cls: 'operational', label: 'Operational path' }},
+      {{ kind: 'line', cls: 'metadata', label: 'Metadata path' }},
+      {{ kind: 'line', cls: 'security', label: 'Security path' }},
       {{ kind: 'line', cls: 'blocked', label: 'Blocked' }},
     ];
     const shapeRows = [
@@ -4569,9 +5167,10 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     const svg = document.getElementById('playbook-flowchart-svg');
     if (!svg || playbookFlowchartBuilt) return;
     svg.setAttribute('viewBox', `${{FLOW_VIEWBOX.x}} ${{FLOW_VIEWBOX.y}} ${{FLOW_VIEWBOX.w}} ${{FLOW_VIEWBOX.h}}`);
-    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    svg.setAttribute('preserveAspectRatio', 'xMidYMin meet');
     const ns = 'http://www.w3.org/2000/svg';
     appendPlaybookDefs(svg, ns);
+    appendPlaybookFramework(svg, ns);
     const edgesLayer = document.createElementNS(ns, 'g');
     edgesLayer.setAttribute('class', 'playbook-flow-edges');
     const labelsLayer = document.createElementNS(ns, 'g');
@@ -4586,9 +5185,7 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       path.setAttribute('data-to', to);
       path.setAttribute('data-edge-index', String(PLAYBOOK_EDGES.indexOf(edge)));
       path.setAttribute('d', edgePath(from, to, edge));
-      if (String(edge?.branch || '') !== 'blocked') {{
-        path.setAttribute('marker-end', 'url(#playbook-arrow)');
-      }}
+      path.setAttribute('marker-end', 'url(#playbook-arrow)');
       edgesLayer.appendChild(path);
       const labelText = edgeLabelText(edge);
       if (labelText) {{
@@ -4598,11 +5195,12 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
         labelGroup.setAttribute('data-from', from);
         labelGroup.setAttribute('data-to', to);
         const bg = document.createElementNS(ns, 'rect');
+        const pillW = edgeLabelWidth(labelText);
         bg.setAttribute('class', 'playbook-flow-edge-label-bg pending');
-        bg.setAttribute('x', String(lx - labelText.length * 3.6 - 9));
-        bg.setAttribute('y', String(ly - 11));
-        bg.setAttribute('width', String(labelText.length * 7.2 + 18));
-        bg.setAttribute('height', '18');
+        bg.setAttribute('x', String(lx - pillW / 2));
+        bg.setAttribute('y', String(ly - 12));
+        bg.setAttribute('width', String(pillW));
+        bg.setAttribute('height', '20');
         bg.setAttribute('rx', '6');
         labelGroup.appendChild(bg);
         const label = document.createElementNS(ns, 'text');
@@ -4642,8 +5240,15 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
         title.setAttribute('class', 'playbook-flow-label playbook-flow-label-decision');
         title.setAttribute('text-anchor', 'middle');
         title.setAttribute('x', String(pos.x));
-        title.setAttribute('y', String(pos.y + 4));
-        title.textContent = label;
+        const decisionLines = playbookNodeDisplayLines(label);
+        title.setAttribute('y', String(pos.y + (decisionLines.length > 1 ? -2 : 4)));
+        decisionLines.forEach((line, lineIndex) => {{
+          const span = document.createElementNS(ns, 'tspan');
+          span.setAttribute('x', String(pos.x));
+          span.setAttribute('dy', lineIndex === 0 ? '0' : '11');
+          span.textContent = line;
+          title.appendChild(span);
+        }});
         group.appendChild(title);
       }} else {{
         const rect = document.createElementNS(ns, 'rect');
@@ -4655,14 +5260,13 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
         rect.setAttribute('rx', '16');
         group.appendChild(rect);
         appendProcessIconBadge(group, ns, nodeId, pos);
-        appendNodeStatusChrome(group, ns, pos);
         appendProcessNodeTitle(group, ns, label, pos);
       }}
       const skipLabel = document.createElementNS(ns, 'text');
       skipLabel.setAttribute('class', 'playbook-flow-skip-label');
-      skipLabel.setAttribute('text-anchor', 'middle');
-      skipLabel.setAttribute('x', String(pos.x));
-      skipLabel.setAttribute('y', String(pos.y + (kind === 'decision' ? DECISION_R + 14 : PROCESS_H / 2 + 26)));
+      skipLabel.setAttribute('text-anchor', kind === 'decision' ? 'middle' : 'start');
+      skipLabel.setAttribute('x', String(kind === 'decision' ? pos.x : pos.x - PROCESS_W / 2 + 14));
+      skipLabel.setAttribute('y', String(kind === 'decision' ? pos.y - 24 : pos.y + PROCESS_H / 2 - 7));
       skipLabel.textContent = 'skipped';
       group.appendChild(skipLabel);
       const time = document.createElementNS(ns, 'text');
@@ -4670,13 +5274,14 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       if (kind === 'decision') {{
         time.setAttribute('text-anchor', 'middle');
         time.setAttribute('x', String(pos.x));
-        time.setAttribute('y', String(pos.y + DECISION_R + 16));
+        time.setAttribute('y', String(pos.y + 30));
       }} else {{
-        time.setAttribute('text-anchor', 'middle');
-        time.setAttribute('x', String(pos.x));
-        time.setAttribute('y', String(pos.y + PROCESS_H / 2 + 15));
+        time.setAttribute('text-anchor', 'end');
+        time.setAttribute('x', String(pos.x + PROCESS_W / 2 - 12));
+        time.setAttribute('y', String(pos.y + PROCESS_H / 2 - 7));
       }}
       time.setAttribute('aria-live', 'polite');
+      time.textContent = '0.000s';
       group.appendChild(time);
       nodesLayer.appendChild(group);
     }});
@@ -4684,6 +5289,7 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     svg.appendChild(labelsLayer);
     appendPlaybookLegend(svg, ns);
     bindPlaybookNodeTooltips();
+    bindPlaybookJourneyHoverSync();
     playbookFlowchartBuilt = true;
   }}
 
@@ -4742,36 +5348,73 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     return 'pending';
   }}
 
-  function renderPlaybookTimes() {{
-    buildPlaybookFlowchart();
-    const nodes = document.querySelectorAll('#playbook-flowchart-svg .playbook-flow-node');
-    nodes.forEach((step) => {{
-      const node = step.getAttribute('data-node') || '';
-      const meta = flowNodeMeta(node);
-      if (meta?.kind === 'decision') return;
-      const timeEl = step.querySelector('.playbook-flow-time');
-      if (!timeEl) return;
-      if (skippedPlaybookNodes.has(node) || skippedNodes.has(node) || isBranchSkipped(node)) {{
-        timeEl.textContent = 'skipped';
-        return;
-      }}
-      const resolved = node === 'writer_direct' ? 'validate_final_plan' : node;
-      const isActive = node === activePlaybookNode() && runActive;
-      const isDone = step.classList.contains('done');
-      let seconds = playbookTimingsSec[resolved] ?? playbookTimingsSec[node];
-      if (isActive && (playbookStartAt[node] || playbookStartAt[resolved])) {{
-        const started = playbookStartAt[node] || playbookStartAt[resolved];
-        seconds = (Date.now() - started) / 1000;
-      }}
-      if (seconds != null && seconds >= 0 && (seconds > 0 || isActive || isDone)) {{
-        timeEl.textContent = formatStageSeconds(seconds);
-      }} else {{
-        timeEl.textContent = '';
+  function journeyStageSeconds(node='', nowMs=Date.now()) {{
+    const key = String(node || '').trim();
+    if (!key) return 0;
+    if (runActive && key === activeNode && stageStartAt[key]) {{
+      return Math.max(0, (Number(nowMs) - Number(stageStartAt[key])) / 1000);
+    }}
+    return Math.max(0, Number(stageTimingsSec[key]) || 0);
+  }}
+
+  function playbookTimingNode(node='') {{
+    const key = String(node || '').trim();
+    return String(PLAYBOOK_TIMING_SOURCE[key] || key);
+  }}
+
+  function renderPlaybookPhaseTimes(nowMs=Date.now()) {{
+    PLAYBOOK_PHASES.forEach((phase) => {{
+      const phaseId = String(phase?.id || '');
+      const timingNodes = Array.isArray(phase?.timing_nodes) ? phase.timing_nodes : [];
+      const phaseNodeSkipped = (node) => {{
+        const key = String(node || '');
+        const profiles = branchProfiles(key);
+        return skippedNodes.has(key)
+          || skippedPlaybookNodes.has(key)
+          || (profiles.length > 0 && !profiles.includes(String(reviewProfile || 'operational')));
+      }};
+      const phaseSkipped = timingNodes.length > 0 && timingNodes.every(phaseNodeSkipped);
+      const totalSeconds = timingNodes.reduce(
+        (total, node) => phaseNodeSkipped(node)
+          ? total
+          : total + journeyStageSeconds(String(node || ''), nowMs),
+        0,
+      );
+      const group = document.querySelector(
+        `#playbook-flowchart-svg .playbook-flow-phase[data-phase="${{phaseId}}"]`
+      );
+      const timeEl = group?.querySelector('.playbook-flow-phase-time');
+      if (timeEl) timeEl.textContent = phaseSkipped ? 'skipped' : formatStageSeconds(totalSeconds);
+      if (group) {{
+        const isActive = runActive && timingNodes.includes(activeNode);
+        group.classList.toggle('active', isActive);
+        group.classList.toggle('has-time', totalSeconds > 0);
+        group.classList.toggle('is-skipped', phaseSkipped);
       }}
     }});
   }}
 
-  function renderPlaybookFlowchart() {{
+  function renderPlaybookTimes(nowMs=Date.now()) {{
+    buildPlaybookFlowchart();
+    const nodes = document.querySelectorAll('#playbook-flowchart-svg .playbook-flow-node');
+    nodes.forEach((step) => {{
+      const node = step.getAttribute('data-node') || '';
+      const timeEl = step.querySelector('.playbook-flow-time');
+      if (!timeEl) return;
+      const sourceNode = playbookTimingNode(node);
+      const profiles = branchProfiles(node);
+      const timingBranchSkipped = profiles.length > 0
+        && !profiles.includes(String(reviewProfile || 'operational'));
+      const skipped = skippedPlaybookNodes.has(node)
+        || skippedNodes.has(node)
+        || timingBranchSkipped;
+      timeEl.setAttribute('data-timing-source', sourceNode);
+      timeEl.textContent = skipped ? '' : formatStageSeconds(journeyStageSeconds(sourceNode, nowMs));
+    }});
+    renderPlaybookPhaseTimes(nowMs);
+  }}
+
+  function renderPlaybookFlowchart(nowMs=Date.now()) {{
     buildPlaybookFlowchart();
     if (runActive && !playbookDocMode) syncPlaybookCompletedThrough();
     document.querySelectorAll('#playbook-flowchart-svg .playbook-flow-node').forEach((step) => {{
@@ -4817,22 +5460,277 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       if (labelGroup) labelGroup.classList.add(edgeState);
       if (labelBg) labelBg.classList.add(edgeState);
     }});
-    renderPlaybookTimes();
+    const edgesLayer = document.querySelector('#playbook-flowchart-svg .playbook-flow-edges');
+    if (edgesLayer) {{
+      const paths = Array.from(edgesLayer.querySelectorAll('.playbook-flow-edge'));
+      paths.sort((left, right) => {{
+        const score = (el) => (el.classList.contains('active') || el.classList.contains('done') ? 1 : 0);
+        return score(left) - score(right);
+      }});
+      paths.forEach((path) => edgesLayer.appendChild(path));
+    }}
+    bindPlaybookJourneyHoverSync();
+    renderPlaybookTimes(nowMs);
+  }}
+
+  const PROFILE_PATH_LABELS = {{
+    operational: 'Operational path',
+    metadata: 'Metadata path',
+    security: 'Security path',
+  }};
+
+  function playbookNodesForJourneyStep(node='') {{
+    const key = String(node || '').trim();
+    if (!key) return [];
+    const resolved = resolvePlaybookNode(key);
+    if (resolved) return [resolved];
+    if (key === 'evidence_review') {{
+      if (reviewProfile === 'metadata') return ['deterministic_evidence_pack'];
+      if (reviewProfile === 'security') return ['security_evidence_review'];
+      return ['analyst_evidence_review'];
+    }}
+    return [];
+  }}
+
+  function clearPlaybookHighlight() {{
+    document.querySelectorAll('#playbook-flowchart-svg .is-playbook-highlight').forEach((el) => {{
+      el.classList.remove('is-playbook-highlight', 'is-highlighted');
+    }});
+    document.querySelectorAll('#runtime-journey .runtime-journey-step.is-playbook-highlight').forEach((el) => {{
+      el.classList.remove('is-playbook-highlight');
+    }});
+  }}
+
+  function highlightPlaybookNode(nodeId='', keepOthers=false) {{
+    const node = String(nodeId || '').trim();
+    if (!node) return;
+    if (!keepOthers) clearPlaybookHighlight();
+    const nodeEl = document.querySelector(`#playbook-flowchart-svg .playbook-flow-node[data-node="${{node}}"]`);
+    if (nodeEl) nodeEl.classList.add('is-playbook-highlight', 'is-highlighted');
+    document.querySelectorAll('#playbook-flowchart-svg .playbook-flow-edge').forEach((path) => {{
+      const from = path.getAttribute('data-from') || '';
+      const to = path.getAttribute('data-to') || '';
+      const edge = PLAYBOOK_EDGES.find((item) => item.from === from && item.to === to) || {{}};
+      if (!edgeOnProfilePath(edge)) return;
+      if (from === node || to === node) path.classList.add('is-playbook-highlight', 'is-highlighted');
+    }});
+  }}
+
+  function bindPlaybookJourneyHoverSync() {{
+    document.querySelectorAll('#runtime-journey .runtime-journey-step').forEach((step) => {{
+      if (step.dataset.playbookHoverBound === '1') return;
+      step.dataset.playbookHoverBound = '1';
+      const node = step.getAttribute('data-node') || '';
+      step.addEventListener('mouseenter', () => {{
+        clearPlaybookHighlight();
+        step.classList.add('is-playbook-highlight');
+        playbookNodesForJourneyStep(node).forEach((playbookNode) => highlightPlaybookNode(playbookNode, true));
+      }});
+      step.addEventListener('mouseleave', () => clearPlaybookHighlight());
+      step.addEventListener('focus', () => {{
+        clearPlaybookHighlight();
+        step.classList.add('is-playbook-highlight');
+        playbookNodesForJourneyStep(node).forEach((playbookNode) => highlightPlaybookNode(playbookNode, true));
+      }});
+      step.addEventListener('blur', () => clearPlaybookHighlight());
+    }});
+    document.querySelectorAll('#playbook-flowchart-svg .playbook-flow-node').forEach((nodeEl) => {{
+      if (nodeEl.dataset.playbookHoverBound === '1') return;
+      nodeEl.dataset.playbookHoverBound = '1';
+      const node = nodeEl.getAttribute('data-node') || '';
+      nodeEl.addEventListener('mouseenter', () => highlightPlaybookNode(node));
+      nodeEl.addEventListener('mouseleave', () => clearPlaybookHighlight());
+      nodeEl.addEventListener('focus', () => highlightPlaybookNode(node));
+      nodeEl.addEventListener('blur', () => clearPlaybookHighlight());
+    }});
+  }}
+
+  function clampPlaybookZoom(value) {{
+    return Math.min(
+      PLAYBOOK_ZOOM_MAX,
+      Math.max(PLAYBOOK_ZOOM_MIN, Number(value) || 1),
+    );
+  }}
+
+  function updatePlaybookZoomControls() {{
+    const percent = `${{Math.round(playbookZoom * 100)}}%`;
+    if (playbookZoomValue) playbookZoomValue.textContent = percent;
+    if (playbookZoomOut) playbookZoomOut.disabled = playbookZoom <= PLAYBOOK_ZOOM_MIN + 0.001;
+    if (playbookZoomIn) playbookZoomIn.disabled = playbookZoom >= PLAYBOOK_ZOOM_MAX - 0.001;
+    if (playbookZoomFit) {{
+      playbookZoomFit.setAttribute('aria-pressed', playbookZoomMode === 'fit' ? 'true' : 'false');
+    }}
+    if (playbookCanvas) {{
+      playbookCanvas.dataset.zoom = String(playbookZoom);
+      playbookCanvas.dataset.zoomMode = playbookZoomMode;
+    }}
+  }}
+
+  function playbookViewportAvailableSize() {{
+    if (!playbookViewport) return {{ width: 0, height: 0 }};
+    const style = window.getComputedStyle(playbookViewport);
+    const horizontalPadding = (Number.parseFloat(style.paddingLeft) || 0)
+      + (Number.parseFloat(style.paddingRight) || 0);
+    const verticalPadding = (Number.parseFloat(style.paddingTop) || 0)
+      + (Number.parseFloat(style.paddingBottom) || 0);
+    return {{
+      width: Math.max(1, playbookViewport.clientWidth - horizontalPadding - 2),
+      height: Math.max(1, playbookViewport.clientHeight - verticalPadding - 2),
+    }};
+  }}
+
+  function playbookFitScale() {{
+    const available = playbookViewportAvailableSize();
+    if (!available.width || !available.height) return PLAYBOOK_ZOOM_MIN;
+    return clampPlaybookZoom(Math.min(
+      1,
+      available.width / Number(FLOW_VIEWBOX.w || 1),
+      available.height / Number(FLOW_VIEWBOX.h || 1),
+    ));
+  }}
+
+  function applyPlaybookZoom(scale, options={{}}) {{
+    if (!playbookViewport || !playbookCanvas || !playbookSvg) return;
+    buildPlaybookFlowchart();
+    const nextZoom = clampPlaybookZoom(scale);
+    const nextMode = String(options.mode || 'manual');
+    const viewportRect = playbookViewport.getBoundingClientRect();
+    const canvasRect = playbookCanvas.getBoundingClientRect();
+    const anchorClientX = Number.isFinite(options.clientX)
+      ? Number(options.clientX)
+      : viewportRect.left + playbookViewport.clientWidth / 2;
+    const anchorClientY = Number.isFinite(options.clientY)
+      ? Number(options.clientY)
+      : viewportRect.top + playbookViewport.clientHeight / 2;
+    const targetClientX = options.centerOnAnchor
+      ? viewportRect.left + playbookViewport.clientWidth / 2
+      : anchorClientX;
+    const targetClientY = options.centerOnAnchor
+      ? viewportRect.top + playbookViewport.clientHeight / 2
+      : anchorClientY;
+    const preserveAnchor = nextMode !== 'fit' && canvasRect.width > 0 && canvasRect.height > 0;
+    const graphX = preserveAnchor
+      ? Math.max(0, Math.min(FLOW_VIEWBOX.w, (anchorClientX - canvasRect.left) / playbookZoom))
+      : 0;
+    const graphY = preserveAnchor
+      ? Math.max(0, Math.min(FLOW_VIEWBOX.h, (anchorClientY - canvasRect.top) / playbookZoom))
+      : 0;
+
+    playbookZoom = nextZoom;
+    playbookZoomMode = nextMode;
+    playbookCanvas.style.width = `${{Math.max(1, FLOW_VIEWBOX.w * playbookZoom).toFixed(2)}}px`;
+    playbookCanvas.style.height = `${{Math.max(1, FLOW_VIEWBOX.h * playbookZoom).toFixed(2)}}px`;
+    playbookSvg.style.width = '100%';
+    playbookSvg.style.height = '100%';
+    updatePlaybookZoomControls();
+
+    if (nextMode === 'fit') {{
+      playbookViewport.scrollLeft = 0;
+      playbookViewport.scrollTop = 0;
+      return;
+    }}
+    if (preserveAnchor) {{
+      const nextCanvasRect = playbookCanvas.getBoundingClientRect();
+      playbookViewport.scrollLeft += nextCanvasRect.left + graphX * playbookZoom - targetClientX;
+      playbookViewport.scrollTop += nextCanvasRect.top + graphY * playbookZoom - targetClientY;
+    }}
+  }}
+
+  function fitPlaybookToViewport() {{
+    if (!journeyOverlayOpen || !playbookViewport) return;
+    applyPlaybookZoom(playbookFitScale(), {{ mode: 'fit' }});
+  }}
+
+  function schedulePlaybookFit() {{
+    if (playbookZoomFrame) window.cancelAnimationFrame(playbookZoomFrame);
+    playbookZoomFrame = window.requestAnimationFrame(() => {{
+      playbookZoomFrame = 0;
+      fitPlaybookToViewport();
+    }});
+  }}
+
+  function stepPlaybookZoom(direction) {{
+    const factor = Number(direction) > 0 ? PLAYBOOK_ZOOM_FACTOR : 1 / PLAYBOOK_ZOOM_FACTOR;
+    applyPlaybookZoom(playbookZoom * factor, {{ mode: 'manual' }});
+  }}
+
+  function handlePlaybookViewportWheel(event) {{
+    if (!playbookViewport) return;
+    if (event.ctrlKey || event.metaKey) {{
+      event.preventDefault();
+      const unit = event.deltaMode === 1 ? 16 : (event.deltaMode === 2 ? playbookViewport.clientHeight : 1);
+      const factor = Math.exp(-(Number(event.deltaY) || 0) * unit * 0.0015);
+      applyPlaybookZoom(playbookZoom * factor, {{
+        mode: 'manual',
+        clientX: event.clientX,
+        clientY: event.clientY,
+      }});
+      return;
+    }}
+    if (event.shiftKey && Math.abs(event.deltaY) > Math.abs(event.deltaX)) {{
+      event.preventDefault();
+      playbookViewport.scrollLeft += event.deltaY;
+    }}
+  }}
+
+  function handlePlaybookDoubleClick(event) {{
+    if (!playbookViewport || event.button !== 0) return;
+    event.preventDefault();
+    applyPlaybookZoom(playbookZoom * PLAYBOOK_DOUBLE_CLICK_FACTOR, {{
+      mode: 'manual',
+      clientX: event.clientX,
+      clientY: event.clientY,
+      centerOnAnchor: true,
+    }});
+  }}
+
+  function beginPlaybookPan(event) {{
+    if (!playbookViewport || event.button !== 0 || event.pointerType !== 'mouse') return;
+    if (event.target instanceof Element && event.target.closest('.playbook-flow-node')) return;
+    const canPan = playbookViewport.scrollWidth > playbookViewport.clientWidth
+      || playbookViewport.scrollHeight > playbookViewport.clientHeight;
+    if (!canPan) return;
+    playbookPanState = {{
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      left: playbookViewport.scrollLeft,
+      top: playbookViewport.scrollTop,
+    }};
+    playbookViewport.classList.add('is-panning');
+    playbookViewport.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }}
+
+  function movePlaybookPan(event) {{
+    if (!playbookViewport || !playbookPanState || event.pointerId !== playbookPanState.pointerId) return;
+    playbookViewport.scrollLeft = playbookPanState.left - (event.clientX - playbookPanState.x);
+    playbookViewport.scrollTop = playbookPanState.top - (event.clientY - playbookPanState.y);
+  }}
+
+  function endPlaybookPan(event) {{
+    if (!playbookViewport || !playbookPanState || event.pointerId !== playbookPanState.pointerId) return;
+    if (playbookViewport.hasPointerCapture(event.pointerId)) {{
+      playbookViewport.releasePointerCapture(event.pointerId);
+    }}
+    playbookPanState = null;
+    playbookViewport.classList.remove('is-panning');
   }}
 
   function updateReviewProfilePill() {{
     const pill = document.getElementById('runtime-journey-overlay-profile');
     if (!pill) return;
     if (playbookDocMode) {{
-      pill.textContent = 'ALL PATHS';
+      pill.textContent = 'All paths';
       return;
     }}
-    pill.textContent = String(reviewProfile || 'operational').toUpperCase();
+    const key = String(reviewProfile || 'operational');
+    pill.textContent = PROFILE_PATH_LABELS[key] || key;
   }}
 
-  function renderPlaybookOverlay() {{
+  function renderPlaybookOverlay(nowMs=Date.now()) {{
     updateReviewProfilePill();
-    renderPlaybookFlowchart();
+    renderPlaybookFlowchart(nowMs);
   }}
 
   function setJourneyOverlayOpen(open) {{
@@ -4851,9 +5749,13 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     if (journeyOverlayOpen) {{
       if (rail?.dataset.expanded !== 'true' && canExpand()) setExpanded(true, false);
       playbookDocMode = !runActive;
+      playbookZoomMode = 'fit';
       renderPlaybookOverlay();
+      schedulePlaybookFit();
     }} else {{
       playbookDocMode = false;
+      playbookPanState = null;
+      playbookViewport?.classList.remove('is-panning');
     }}
   }}
 
@@ -4868,8 +5770,6 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   function resetJourneyTimings() {{
     Object.keys(stageTimingsSec).forEach((key) => {{ delete stageTimingsSec[key]; }});
     Object.keys(stageStartAt).forEach((key) => {{ delete stageStartAt[key]; }});
-    Object.keys(playbookTimingsSec).forEach((key) => {{ delete playbookTimingsSec[key]; }});
-    Object.keys(playbookStartAt).forEach((key) => {{ delete playbookStartAt[key]; }});
     stopJourneyLiveTimer();
     renderJourneyTimes();
     renderPlaybookTimes();
@@ -4884,13 +5784,17 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
 
   function noteStageTransition(nextNode) {{
     const target = String(nextNode || '').trim();
-    if (activeNode && activeNode !== target) finalizeActiveStageTiming();
+    if (activeNode && activeNode === target) {{
+      finalizeActiveStageTiming();
+    }} else if (activeNode && activeNode !== target) {{
+      finalizeActiveStageTiming();
+      completedNodes.add(activeNode);
+    }}
     if (target) {{
       if (activeNode !== target || !stageStartAt[target]) {{
         stageStartAt[target] = Date.now();
       }}
     }}
-    notePlaybookTransition(resolvePlaybookNode(target) || '');
     ensureJourneyLiveTimer();
   }}
 
@@ -4904,7 +5808,6 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   function completeGraphSummarizeStep() {{
     const sumIdx = playbookIndex('summarize');
     if (sumIdx >= 0) {{
-      finalizeActivePlaybookTiming('summarize');
       playbookCompletedThrough = Math.max(playbookCompletedThrough, sumIdx - 1);
     }}
     const summarizeIdx = JOURNEY.findIndex((step) => step.node === 'summarize');
@@ -4917,8 +5820,6 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   function completeGraphFinalizeStep() {{
     const finIdx = playbookIndex('finalize');
     if (finIdx >= 0) {{
-      finalizeActivePlaybookTiming('finalize');
-      if (playbookTimingsSec.finalize == null) playbookTimingsSec.finalize = 0;
       playbookCompletedThrough = Math.max(playbookCompletedThrough, finIdx);
     }}
     const journeyFinIdx = JOURNEY.findIndex((step) => step.node === 'finalize');
@@ -4938,9 +5839,10 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
         stopJourneyLiveTimer();
         return;
       }}
-      renderJourneyTimes();
-      renderPlaybookTimes();
-    }}, 250);
+      const nowMs = Date.now();
+      renderJourneyTimes(nowMs);
+      renderPlaybookTimes(nowMs);
+    }}, 50);
   }}
 
   function stopJourneyLiveTimer() {{
@@ -4949,7 +5851,7 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     journeyLiveTimer = null;
   }}
 
-  function renderJourneyTimes() {{
+  function renderJourneyTimes(nowMs=Date.now()) {{
     const steps = document.querySelectorAll('#runtime-journey .runtime-journey-step');
     steps.forEach((step) => {{
       const node = step.getAttribute('data-node') || '';
@@ -4961,15 +5863,16 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       }}
       const isActive = node === activeNode && runActive;
       const isDone = step.classList.contains('done');
-      let seconds = stageTimingsSec[node];
-      if (isActive && stageStartAt[node]) {{
-        seconds = (Date.now() - stageStartAt[node]) / 1000;
-      }}
+      const seconds = journeyStageSeconds(node, nowMs);
       if (isActive) {{
-        timeEl.textContent = formatStageSeconds(Math.max(0, Number(seconds) || 0));
+        timeEl.textContent = formatStageSeconds(seconds);
         return;
       }}
-      if (seconds != null && seconds >= 0 && (seconds > 0 || isDone)) {{
+      if (isDone) {{
+        timeEl.textContent = formatStageSeconds(seconds);
+        return;
+      }}
+      if (seconds > 0) {{
         timeEl.textContent = formatStageSeconds(seconds);
       }} else {{
         timeEl.textContent = '';
@@ -4980,46 +5883,49 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   function hydrateJourneyTimingsFromResult(result) {{
     if (!result || typeof result !== 'object') return false;
     const nodeTimings = result.node_timings_ms;
+    const resolvedTimingsMs = {{}};
     let hydrated = false;
     if (nodeTimings && typeof nodeTimings === 'object' && Object.keys(nodeTimings).length) {{
       JOURNEY.forEach((step) => {{
         const keys = JOURNEY_TIMING_MS_KEYS[step.node] || [step.node];
-        const totalMs = keys.reduce((sum, key) => sum + (Number(nodeTimings[key]) || 0), 0);
-        if (totalMs > 0) {{
-          stageTimingsSec[step.node] = msToSec(totalMs);
-          hydrated = true;
-        }}
-      }});
-      PLAYBOOK_ORDER.forEach((node) => {{
-        const ms = Number(nodeTimings[node]) || 0;
-        if (ms > 0) {{
-          playbookTimingsSec[node] = msToSec(ms);
-          hydrated = true;
-        }}
+        const presentKeys = keys.filter((key) => Object.prototype.hasOwnProperty.call(nodeTimings, key));
+        if (!presentKeys.length) return;
+        resolvedTimingsMs[step.node] = presentKeys.reduce(
+          (sum, key) => sum + (Number(nodeTimings[key]) || 0),
+          0,
+        );
       }});
     }}
-    if (!hydrated) {{
-      const logs = Array.isArray(result.stage_logs) ? result.stage_logs : [];
-      const totals = {{}};
-      logs.forEach((entry) => {{
-        if (!entry || typeof entry !== 'object') return;
-        const stage = String(entry.stage || '').trim();
-        const journeyNode = STAGE_LOG_TO_JOURNEY[stage];
-        if (!journeyNode) return;
-        totals[journeyNode] = (totals[journeyNode] || 0) + (Number(entry.duration_ms) || 0);
-      }});
-      Object.entries(totals).forEach(([node, ms]) => {{
-        if (ms > 0) {{
-          stageTimingsSec[node] = msToSec(ms);
-          hydrated = true;
-        }}
-      }});
-    }}
+    const logs = Array.isArray(result.stage_logs) ? result.stage_logs : [];
+    const logTotals = {{}};
+    logs.forEach((entry) => {{
+      if (!entry || typeof entry !== 'object') return;
+      const stage = String(entry.stage || '').trim();
+      const journeyNode = STAGE_LOG_TO_JOURNEY[stage];
+      if (!journeyNode) return;
+      logTotals[journeyNode] = (logTotals[journeyNode] || 0) + (Number(entry.duration_ms) || 0);
+    }});
+    Object.entries(logTotals).forEach(([node, ms]) => {{
+      if (resolvedTimingsMs[node] == null || Number(resolvedTimingsMs[node]) <= 0) {{
+        resolvedTimingsMs[node] = Number(ms) || 0;
+      }}
+    }});
+    Object.entries(resolvedTimingsMs).forEach(([node, ms]) => {{
+      if (skippedNodes.has(node)) {{
+        delete stageTimingsSec[node];
+        return;
+      }}
+      const finalSeconds = msToSec(ms);
+      if (finalSeconds > 0 || stageTimingsSec[node] == null) {{
+        stageTimingsSec[node] = finalSeconds;
+      }}
+      hydrated = true;
+    }});
     if (hydrated) {{
       Object.keys(stageStartAt).forEach((key) => {{ delete stageStartAt[key]; }});
-      Object.keys(playbookStartAt).forEach((key) => {{ delete playbookStartAt[key]; }});
-      renderJourneyTimes();
-      renderPlaybookTimes();
+      const nowMs = Date.now();
+      renderJourneyTimes(nowMs);
+      renderPlaybookTimes(nowMs);
     }}
     const packMs = Number(result.packaging_duration_ms || result.meta?.packaging_duration_ms || 0);
     if (result.packaging_skipped === true) {{
@@ -5061,11 +5967,99 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     return false;
   }}
 
+  function setModelsExpanded(expanded, persist=false) {{
+    if (!modelsList || !modelsExpand) return;
+    const next = Boolean(expanded);
+    modelsList.dataset.expanded = next ? 'true' : 'false';
+    modelsExpand.setAttribute('aria-expanded', next ? 'true' : 'false');
+    modelsExpand.classList.toggle('is-expanded', next);
+    modelsExpand.title = next ? 'Hide model list' : 'Show all models';
+    if (persist) {{
+      try {{ window.localStorage.setItem(MODELS_STORAGE_KEY, next ? '1' : '0'); }} catch (_e) {{}}
+    }}
+  }}
+
+  function readStoredModelsExpanded() {{
+    try {{ return window.localStorage.getItem(MODELS_STORAGE_KEY) === '1'; }} catch (_e) {{ return false; }}
+  }}
+
   function shortModelName(model) {{
     const text = String(model || '').trim();
     if (!text) return 'n/a';
     const leaf = text.split('/').pop() || text;
     return leaf.length > 28 ? `${{leaf.slice(0, 25)}}...` : leaf;
+  }}
+
+  function normalizeComputeTarget(value) {{
+    const target = String(value || '').trim().toLowerCase();
+    if (target === 'parallel' || target === 'hybrid') return 'hybrid';
+    if (target === 'gpu' || target === 'cpu') return target;
+    return '';
+  }}
+
+  function computeTargetLabel(value) {{
+    const target = normalizeComputeTarget(value);
+    if (target === 'gpu') return 'GPU';
+    if (target === 'cpu') return 'CPU';
+    if (target === 'hybrid') return 'CPU + GPU';
+    return '';
+  }}
+
+  function normalizedModelKey(value) {{
+    const text = String(value || '').trim().toLowerCase();
+    const leaf = text.split('/').pop() || text;
+    return leaf.replace(/:latest$/, '');
+  }}
+
+  function assignmentForModel(model) {{
+    const key = normalizedModelKey(model);
+    if (!key) return null;
+    return MODELS.find((item) => normalizedModelKey(item.model) === key) || null;
+  }}
+
+  function rememberTaskedAssignment(assignment, computeTarget='') {{
+    if (!assignment || !String(assignment.model || '').trim()) return;
+    const model = String(assignment.model || '').trim();
+    const sameModel = normalizedModelKey(lastTaskedSnapshot.model) === normalizedModelKey(model);
+    lastTaskedSnapshot = {{
+      role: String(assignment.role || '').trim(),
+      label: String(assignment.label || 'Model').trim() || 'Model',
+      model,
+      computeTarget: normalizeComputeTarget(computeTarget)
+        || (sameModel ? normalizeComputeTarget(lastTaskedSnapshot.computeTarget) : ''),
+    }};
+  }}
+
+  function clearLastTaskedSnapshot() {{
+    lastTaskedSnapshot = {{ role: '', label: '', model: '', computeTarget: '' }};
+  }}
+
+  function hydrateLastTaskedFromResult(result) {{
+    if (!result || typeof result !== 'object') return false;
+    const candidates = [
+      result,
+      result.result,
+      result.output,
+      result.result && result.result.output,
+    ].filter((item) => item && typeof item === 'object');
+    const logs = candidates
+      .map((item) => Array.isArray(item.stage_logs) ? item.stage_logs : [])
+      .find((items) => items.length) || [];
+    for (let index = logs.length - 1; index >= 0; index -= 1) {{
+      const entry = logs[index];
+      if (!entry || typeof entry !== 'object') continue;
+      const model = String(entry.model || '').trim();
+      if (!model) continue;
+      const stage = String(entry.stage || '').trim();
+      const journeyNode = STAGE_NODE_ALIASES[stage] || stage;
+      const role = String(NODE_ACTIVE_ROLE[journeyNode] || '').trim();
+      const assignment = assignmentForModel(model)
+        || MODELS.find((item) => item.role === role)
+        || {{ role, label: role ? role.charAt(0).toUpperCase() + role.slice(1) : 'Model', model }};
+      rememberTaskedAssignment({{ ...assignment, model }}, lastTaskedSnapshot.computeTarget);
+      return true;
+    }}
+    return false;
   }}
 
   function activeRoleKey() {{
@@ -5098,6 +6092,136 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     if (step) step.textContent = label;
   }}
 
+  function updateModelSummary(roleKey) {{
+    const summary = document.getElementById('runtime-model-summary');
+    const roleEl = document.getElementById('runtime-model-summary-role');
+    const nameEl = document.getElementById('runtime-model-summary-name');
+    if (!summary || !roleEl || !nameEl) return;
+    const active = MODELS.find((item) => item.role === roleKey);
+    if (runActive && active) {{
+      rememberTaskedAssignment(active, lastTaskedSnapshot.computeTarget);
+      roleEl.textContent = active.label;
+      nameEl.textContent = shortModelName(active.model);
+      nameEl.title = active.model;
+      summary.dataset.state = 'active';
+    }} else if (!runActive && lastTaskedSnapshot.model) {{
+      roleEl.textContent = `Last · ${{lastTaskedSnapshot.label || 'Model'}}`;
+      nameEl.textContent = shortModelName(lastTaskedSnapshot.model);
+      nameEl.title = `Last tasked model: ${{lastTaskedSnapshot.model}}`;
+      summary.dataset.state = 'last';
+    }} else {{
+      roleEl.textContent = runActive ? 'No LLM' : 'Idle';
+      nameEl.textContent = '—';
+      nameEl.title = '';
+      summary.dataset.state = 'idle';
+    }}
+  }}
+
+  function updateOpsTaskedModel() {{
+    const modelEl = document.getElementById('runtime-ops-model');
+    const modelLabelEl = document.getElementById('runtime-ops-model-label');
+    if (!modelEl) return;
+    const roleKey = activeRoleKey();
+    const assigned = MODELS.find((item) => item.role === roleKey);
+    const phaseActive = runActive && Boolean(activeNode);
+    const loadedNames = Array.isArray(latestOpsSummary.models_loaded_names)
+      ? latestOpsSummary.models_loaded_names.filter(Boolean)
+      : [];
+    const loadedModel = String(loadedNames[0] || '').trim();
+    const lastModel = !phaseActive ? String(lastTaskedSnapshot.model || '').trim() : '';
+    const taskedModel = assigned?.model || (!phaseActive ? loadedModel || lastModel : '') || '';
+    modelEl.textContent = taskedModel ? shortModelName(taskedModel) : phaseActive ? 'No LLM' : '—';
+    if (modelLabelEl) {{
+      modelLabelEl.textContent = phaseActive
+        ? 'Tasked model'
+        : loadedModel
+          ? 'Loaded model'
+          : lastModel
+            ? 'Last model'
+            : 'Tasked model';
+    }}
+    modelEl.title = taskedModel
+      ? (!phaseActive && !loadedModel ? `Last tasked model: ${{taskedModel}}` : taskedModel)
+      : (phaseActive ? 'Current phase does not task an LLM' : 'No model currently loaded');
+  }}
+
+  function updateOpsPhaseState() {{
+    const opsRoot = document.getElementById('runtime-rail-ops');
+    const statusEl = document.getElementById('runtime-ops-status');
+    const liveDot = document.getElementById('runtime-ops-live-dot');
+    const deviceLabelEl = document.getElementById('runtime-ops-device-label');
+    const gpuDeviceEl = document.getElementById('runtime-ops-device-gpu');
+    const cpuDeviceEl = document.getElementById('runtime-ops-device-cpu');
+    const roleKey = activeRoleKey();
+    const phaseActive = runActive && Boolean(activeNode);
+    const modelPhase = phaseActive && Boolean(roleKey);
+    const loadedNames = Array.isArray(latestOpsSummary.models_loaded_names)
+      ? latestOpsSummary.models_loaded_names.filter(Boolean)
+      : [];
+    const observedTarget = normalizeComputeTarget(latestOpsSummary.compute_target);
+    const inferredTarget = latestOpsSummary.gpu_engaged
+      ? (latestOpsSummary.cpu_engaged ? 'hybrid' : 'gpu')
+      : latestOpsSummary.cpu_engaged
+        ? 'cpu'
+        : '';
+    const parallelCompute = modelPhase
+      && (Boolean(latestOpsSummary.parallel_compute) || observedTarget === 'hybrid');
+    const phaseTarget = modelPhase
+      ? (parallelCompute ? 'hybrid' : observedTarget || inferredTarget || 'cpu')
+      : phaseActive
+        ? 'cpu'
+        : '';
+    const assigned = MODELS.find((item) => item.role === roleKey);
+    if (modelPhase && assigned) rememberTaskedAssignment(assigned, phaseTarget);
+    const retainedTarget = !phaseActive
+      ? (loadedNames.length ? observedTarget || inferredTarget : '')
+        || normalizeComputeTarget(lastTaskedSnapshot.computeTarget)
+      : '';
+    const displayedTarget = phaseActive ? phaseTarget : retainedTarget;
+    const gpuHighlighted = displayedTarget === 'gpu' || displayedTarget === 'hybrid';
+    const cpuHighlighted = displayedTarget === 'cpu' || displayedTarget === 'hybrid';
+    const showingLast = !phaseActive && !loadedNames.length && Boolean(lastTaskedSnapshot.model);
+
+    if (opsRoot) opsRoot.dataset.compute = displayedTarget || 'idle';
+    if (gpuDeviceEl) {{
+      gpuDeviceEl.classList.toggle('is-active', phaseActive && gpuHighlighted);
+      gpuDeviceEl.classList.toggle('is-last', !phaseActive && gpuHighlighted);
+    }}
+    if (cpuDeviceEl) {{
+      cpuDeviceEl.classList.toggle('is-active', phaseActive && cpuHighlighted);
+      cpuDeviceEl.classList.toggle('is-last', !phaseActive && cpuHighlighted);
+    }}
+    if (deviceLabelEl) {{
+      deviceLabelEl.textContent = phaseActive
+        ? 'Active device'
+        : loadedNames.length
+          ? 'Loaded device'
+          : showingLast
+            ? 'Last device'
+            : 'Active device';
+    }}
+    if (statusEl) {{
+      statusEl.textContent = modelPhase
+        ? 'Generating'
+        : phaseActive
+          ? 'CPU phase'
+          : loadedNames.length
+            ? 'Model loaded'
+            : showingLast
+              ? `Last task · ${{computeTargetLabel(retainedTarget) || 'device unknown'}}`
+              : 'Idle';
+      statusEl.dataset.state = phaseActive
+        ? 'active'
+        : loadedNames.length
+          ? 'loaded'
+          : showingLast
+            ? 'last'
+            : 'idle';
+    }}
+    if (liveDot) liveDot.classList.toggle('is-active', phaseActive);
+    updateOpsTaskedModel();
+  }}
+
   function hydrateModels() {{
     const root = document.getElementById('runtime-models');
     if (!root) return;
@@ -5109,31 +6233,44 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       if (nameEl) nameEl.textContent = shortModelName(item.model);
       row.classList.toggle('active', item.role === roleKey);
     }});
+    updateModelSummary(roleKey);
+    updateOpsPhaseState();
   }}
 
   function renderJourney() {{
+    const nowMs = Date.now();
     const steps = document.querySelectorAll('#runtime-journey .runtime-journey-step');
     steps.forEach((step, index) => {{
       const node = step.getAttribute('data-node') || '';
       step.classList.remove('done', 'active', 'pending', 'is-skipped');
+      step.classList.remove('writer-path-library', 'writer-path-deterministic', 'writer-path-llm');
       const timeEl = step.querySelector('.runtime-journey-step-time');
       if (skippedNodes.has(node)) {{
         step.classList.add('is-skipped');
         if (timeEl) timeEl.textContent = 'skipped';
         return;
       }}
-      if (index <= completedThrough) step.classList.add('done');
+      if (completedNodes.has(node)) step.classList.add('done');
       else if (node && node === activeNode) step.classList.add('active');
       else step.classList.add('pending');
+      if (node === 'writer' && writerPathMode) {{
+        step.classList.add(`writer-path-${{writerPathMode}}`);
+        if (writerPathDetail) step.title = writerPathDetail;
+        else step.removeAttribute('title');
+      }} else if (node === 'writer') {{
+        step.removeAttribute('title');
+      }}
     }});
-    renderJourneyTimes();
-    renderPlaybookOverlay();
+    renderJourneyTimes(nowMs);
+    renderPlaybookOverlay(nowMs);
   }}
 
   function markJourneySkipped(node) {{
     const key = String(node || '').trim();
     if (!key) return;
     skippedNodes.add(key);
+    delete stageTimingsSec[key];
+    delete stageStartAt[key];
     if (key === 'security_review') skippedPlaybookNodes.add('security_review');
   }}
 
@@ -5144,6 +6281,8 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       applyEvidenceJourneyLabel(reviewProfile);
       updateReviewProfilePill();
     }}
+    applyWriterPathFromResult(result);
+    hydrateLastTaskedFromResult(result);
     const nodes = Array.isArray(result.skipped_nodes) ? result.skipped_nodes : [];
     nodes.forEach((node) => markJourneySkipped(node));
     if (result.packaging_skipped === true) markJourneySkipped('package_response');
@@ -5153,21 +6292,77 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     }}
   }}
 
+  function updatePlaybookHeaderStatus() {{
+    if (!playbookStatus) return;
+    const state = runActive ? 'running' : (playbookRunCompleted ? 'complete' : 'idle');
+    const label = state === 'running'
+      ? 'Playbook running'
+      : (state === 'complete' ? 'Playbook complete' : 'Playbook idle');
+    playbookStatus.dataset.state = state;
+    playbookStatus.setAttribute('aria-label', label);
+    playbookStatus.title = label;
+  }}
+
   function setRunActive(active) {{
     runActive = Boolean(active);
     if (runActive) playbookDocMode = false;
     if (pulse) pulse.hidden = !runActive;
+    updatePlaybookHeaderStatus();
+    updateModelSummary(activeRoleKey());
+    updateOpsPhaseState();
     if (journeyOverlayOpen) renderPlaybookOverlay();
   }}
 
   function resolveJourneyNode(event={{}}) {{
     const node = String(event.node || '').trim();
+    if (node === 'ingest_question') return '';
     if (node && JOURNEY.some((step) => step.node === node)) return node;
     if (node && STAGE_NODE_ALIASES[node]) return STAGE_NODE_ALIASES[node];
     const stage = String(event.stage || '').trim();
     if (stage && STAGE_NODE_ALIASES[stage]) return STAGE_NODE_ALIASES[stage];
     if (stage && JOURNEY.some((step) => step.node === stage)) return stage;
     return node || stage || '';
+  }}
+
+  function journeyIndex(node='') {{
+    return JOURNEY.findIndex((step) => step.node === String(node || '').trim());
+  }}
+
+  function applyMeasuredStageSeconds(node, durationMs) {{
+    const key = String(node || '').trim();
+    if (!key || skippedNodes.has(key)) return;
+    const measuredMs = Number(durationMs);
+    if (!Number.isFinite(measuredMs) || measuredMs <= 0) return;
+    stageTimingsSec[key] = Math.max(stageTimingsSec[key] || 0, measuredMs / 1000);
+    delete stageStartAt[key];
+  }}
+
+  function recordStageComplete(node, durationMs=null) {{
+    const key = String(node || '').trim();
+    if (!key || skippedNodes.has(key)) return;
+    const measuredMs = Number(durationMs);
+    const hasMeasured = Number.isFinite(measuredMs) && measuredMs > 0;
+    if (activeNode === key) {{
+      if (hasMeasured) {{
+        applyMeasuredStageSeconds(key, measuredMs);
+      }} else {{
+        finalizeActiveStageTiming();
+      }}
+      activeNode = '';
+    }} else if (hasMeasured) {{
+      applyMeasuredStageSeconds(key, measuredMs);
+    }}
+    completedNodes.add(key);
+    const idx = journeyIndex(key);
+    if (idx >= 0) completedThrough = Math.max(completedThrough, idx);
+  }}
+
+  function activateJourneyNode(node) {{
+    const key = String(node || '').trim();
+    if (!key || skippedNodes.has(key) || completedNodes.has(key)) return;
+    noteStageTransition(key);
+    activeNode = key;
+    activeRoleNode = key;
   }}
 
   function updateFromStage(event={{}}) {{
@@ -5182,8 +6377,6 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
           activeRoleNode = '';
         }}
         markJourneySkipped(node);
-        const idx = JOURNEY.findIndex((step) => step.node === node);
-        if (idx >= 0) completedThrough = Math.max(completedThrough, idx);
       }}
       renderJourney();
       hydrateModels();
@@ -5192,7 +6385,16 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     }}
     activeRoleNode = String(event.node || event.stage || '').trim();
     const rawNode = activeRoleNode;
+    const eventPhase = String(event.phase || (event.duration_ms != null ? 'complete' : 'enter')).trim().toLowerCase();
     if (rawNode === 'finalize') {{
+      if (eventPhase === 'complete' && Number(event.progress_pct || 0) < 99) {{
+        recordStageComplete('finalize', event.duration_ms);
+        activeRoleNode = '';
+        renderJourney();
+        hydrateModels();
+        setRunActive(true);
+        return;
+      }}
       const progressPct = Number(event.progress_pct || 0);
       const label = String(event.label || '').toLowerCase();
       const packagingDone = progressPct >= 99 || label.includes('complete');
@@ -5243,10 +6445,11 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     }}
     const node = resolveJourneyNode(event);
     if (node) {{
-      noteStageTransition(node);
-      activeNode = node;
-      const idx = JOURNEY.findIndex((step) => step.node === node);
-      if (idx >= 0) completedThrough = Math.max(completedThrough, idx - 1);
+      if (eventPhase === 'complete') {{
+        recordStageComplete(node, event.duration_ms);
+      }} else {{
+        activateJourneyNode(node);
+      }}
     }}
     renderJourney();
     hydrateModels();
@@ -5285,6 +6488,10 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     packagingWallStart = 0;
     skippedNodes.clear();
     skippedPlaybookNodes.clear();
+    completedNodes.clear();
+    playbookRunCompleted = false;
+    clearLastTaskedSnapshot();
+    clearWriterPath();
     resetJourneyTimings();
     renderJourney();
     hydrateModels();
@@ -5296,6 +6503,9 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     playbookCompletedThrough = -1;
     activeNode = '';
     activeRoleNode = '';
+    playbookRunCompleted = false;
+    clearLastTaskedSnapshot();
+    clearWriterPath();
     resetJourneyTimings();
     renderJourney();
     hydrateModels();
@@ -5305,7 +6515,6 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
 
   function onRunEnd() {{
     finalizeActiveStageTiming();
-    finalizeActivePlaybookTiming(activePlaybookNode());
     stopJourneyLiveTimer();
     setRunActive(false);
     if (completedThrough >= JOURNEY.length - 1) {{
@@ -5319,7 +6528,68 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     renderJourney();
   }}
 
+  function applyJourneyRailState(state, result=null) {{
+    if (!state || typeof state !== 'object') return false;
+    playbookRunCompleted = true;
+    skippedNodes.clear();
+    completedNodes.clear();
+    (Array.isArray(state.skipped_nodes) ? state.skipped_nodes : []).forEach((node) => markJourneySkipped(String(node || '').trim()));
+    (Array.isArray(state.completed_nodes) ? state.completed_nodes : []).forEach((node) => {{
+      const key = String(node || '').trim();
+      if (key) completedNodes.add(key);
+    }});
+    const timings = state.timings_ms && typeof state.timings_ms === 'object' ? state.timings_ms : {{}};
+    Object.entries(timings).forEach(([node, ms]) => {{
+      const key = String(node || '').trim();
+      if (!key) return;
+      if (skippedNodes.has(key)) {{
+        delete stageTimingsSec[key];
+        return;
+      }}
+      const finalSeconds = msToSec(Number(ms) || 0);
+      if (finalSeconds > 0 || stageTimingsSec[key] == null) {{
+        stageTimingsSec[key] = finalSeconds;
+      }}
+    }});
+    const writerMode = String(state.writer_path_mode || '').trim();
+    if (writerMode) {{
+      writerPathMode = writerMode;
+      writerPathDetail = state.short_path
+        ? 'Deterministic MCP short path (no LLM planner/writer/reviewer)'
+        : (writerMode === 'library' ? 'Reused saved query from library' : '');
+    }}
+    if (result && typeof result === 'object') {{
+      hydrateLastTaskedFromResult(result);
+      if (result.review_profile) {{
+        reviewProfile = String(result.review_profile || 'operational');
+        applyEvidenceJourneyLabel(reviewProfile);
+        updateReviewProfilePill();
+      }}
+      if (!writerPathMode) applyWriterPathFromResult(result);
+      if (result.packaging_skipped === true) markJourneySkipped('package_response');
+      const packMs = Number(result.packaging_duration_ms || result.meta?.packaging_duration_ms || 0);
+      if (!result.packaging_skipped && packMs > 0) {{
+        stageTimingsSec.package_response = msToSec(packMs);
+        completedNodes.add('package_response');
+      }}
+    }}
+    completedThrough = Number(state.completed_through ?? completedThrough);
+    activeNode = '';
+    activeRoleNode = '';
+    Object.keys(stageStartAt).forEach((key) => {{ delete stageStartAt[key]; }});
+    stopJourneyLiveTimer();
+    renderJourney();
+    hydrateModels();
+    setRunActive(false);
+    return true;
+  }}
+
   function completeFromWorkflow(workflow, result=null) {{
+    hydrateLastTaskedFromResult(result);
+    if (result && typeof result === 'object' && result.journey_rail) {{
+      applyJourneyRailState(result.journey_rail, result);
+      return;
+    }}
     if (!Array.isArray(workflow) || !workflow.length) {{
       onRunEnd();
       return;
@@ -5333,21 +6603,33 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       packagingWallStart = 0;
     }} else if (activeNode === 'package_response') {{
       finalizeActiveStageTiming();
+      completedNodes.add('package_response');
     }}
     const packMs = Number(result?.packaging_duration_ms || result?.meta?.packaging_duration_ms || 0);
     if (!packagingSkipped && packMs > 0) {{
       stageTimingsSec.package_response = msToSec(packMs);
+      completedNodes.add('package_response');
     }} else if (!packagingSkipped && packagingWallStart > 0) {{
       stageTimingsSec.package_response = msToSec(Date.now() - packagingWallStart);
+      completedNodes.add('package_response');
     }}
     packagingWallStart = 0;
-    const lastNode = JOURNEY[JOURNEY.length - 1]?.node || '';
-    activeNode = lastNode;
-    activeRoleNode = 'package_response';
-    completedThrough = JOURNEY.length - 1;
-    playbookCompletedThrough = PLAYBOOK_ORDER.length - 1;
+    if (hydrateJourneyTimingsFromResult(result)) {{
+      Object.keys(stageTimingsSec).forEach((node) => {{
+        if (!skippedNodes.has(node)) completedNodes.add(node);
+      }});
+    }}
+    let maxIdx = -1;
+    JOURNEY.forEach((step, index) => {{
+      const node = step.node || '';
+      if (completedNodes.has(node) || skippedNodes.has(node)) maxIdx = Math.max(maxIdx, index);
+    }});
+    completedThrough = maxIdx;
+    activeNode = '';
+    activeRoleNode = '';
+    playbookRunCompleted = true;
     stopJourneyLiveTimer();
-    if (!hydrateJourneyTimingsFromResult(result)) renderJourneyTimes();
+    renderJourneyTimes();
     renderJourney();
     hydrateModels();
     setRunActive(false);
@@ -5394,7 +6676,8 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       }}
       if (eventName === 'error') {{
         const message = String(payload?.message || payload?.code || `${{streamLabel}} stream failed`);
-        streamError = new Error(message);
+        streamError = new Error(payload?.hint ? `${{message}} \u2014 ${{payload.hint}}` : message);
+        if (payload?.hint) streamError.hint = payload.hint;
       }}
     }}
 
@@ -5433,10 +6716,37 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     return `Updated ${{Math.round(delta / 60)}}m ago`;
   }}
 
+  async function setOllamaKeepWarm(enabled) {{
+    if (!keepWarmToggle) return;
+    keepWarmToggle.disabled = true;
+    try {{
+      const resp = await fetch('/api/runtime/ollama-keep-warm', {{
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ enabled: Boolean(enabled) }}),
+      }});
+      const data = await resp.json().catch(() => ({{}}));
+      if (!resp.ok) throw new Error(String(data?.error || `http_${{resp.status}}`));
+      keepWarmToggle.checked = Boolean(data.enabled);
+      await refreshOpsSummary();
+    }} catch (_err) {{
+      keepWarmToggle.checked = !enabled;
+    }} finally {{
+      keepWarmToggle.disabled = false;
+    }}
+  }}
+
   async function refreshOpsSummary() {{
+    const opsRoot = document.getElementById('runtime-rail-ops');
     const statusEl = document.getElementById('runtime-ops-status');
-    const loadedEl = document.getElementById('runtime-ops-loaded');
-    const hostEl = document.getElementById('runtime-ops-host');
+    const liveDot = document.getElementById('runtime-ops-live-dot');
+    const gpuDeviceEl = document.getElementById('runtime-ops-device-gpu');
+    const cpuDeviceEl = document.getElementById('runtime-ops-device-cpu');
+    const gpuUtilEl = document.getElementById('runtime-ops-gpu-util');
+    const gpuBar = document.getElementById('runtime-ops-gpu-bar');
+    const cpuUtilEl = document.getElementById('runtime-ops-cpu-util');
+    const cpuBar = document.getElementById('runtime-ops-cpu-bar');
     const vramLabel = document.getElementById('runtime-ops-vram-label');
     const vramBar = document.getElementById('runtime-ops-vram-bar');
     const updatedEl = document.getElementById('runtime-ops-updated');
@@ -5444,24 +6754,70 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
       const resp = await fetch('/api/runtime/ops-summary', {{ credentials: 'same-origin' }});
       if (!resp.ok) throw new Error(`http_${{resp.status}}`);
       const data = await resp.json();
-      if (statusEl) {{
-        const state = String(data.connection_state || (data.connected ? 'connected' : 'offline')).toLowerCase();
-        statusEl.textContent = state === 'connected' ? 'Connected' : state === 'degraded' ? 'Degraded' : 'Offline';
+      latestOpsSummary = data && typeof data === 'object' ? data : {{}};
+      if (!runActive && !lastTaskedSnapshot.model) {{
+        const loadedNames = Array.isArray(data.models_loaded_names)
+          ? data.models_loaded_names.filter(Boolean)
+          : [];
+        const loadedModel = String(loadedNames[0] || '').trim();
+        if (loadedModel) {{
+          const assignment = assignmentForModel(loadedModel)
+            || {{ role: '', label: 'Model', model: loadedModel }};
+          rememberTaskedAssignment(
+            {{ ...assignment, model: loadedModel }},
+            data.compute_target,
+          );
+          updateModelSummary(activeRoleKey());
+        }}
       }}
-      if (loadedEl) loadedEl.textContent = String(data.models_loaded ?? '—');
-      if (hostEl) hostEl.textContent = String(data.host || '—');
+      updateOpsPhaseState();
+      if (gpuUtilEl) {{
+        gpuUtilEl.textContent = data.gpu_utilization_pct == null ? 'n/a' : `${{data.gpu_utilization_pct}}%`;
+        gpuUtilEl.title = String(data.gpu_metrics_reason || '');
+      }}
+      if (gpuBar) {{
+        const pct = data.gpu_utilization_pct == null ? 0 : Math.max(0, Math.min(100, Number(data.gpu_utilization_pct) || 0));
+        gpuBar.style.width = `${{pct}}%`;
+      }}
+      if (cpuUtilEl) {{
+        cpuUtilEl.textContent = data.cpu_utilization_pct == null ? 'n/a' : `${{data.cpu_utilization_pct}}%`;
+        cpuUtilEl.title = String(data.cpu_metrics_reason || 'Host CPU utilization');
+      }}
+      if (cpuBar) {{
+        const pct = data.cpu_utilization_pct == null ? 0 : Math.max(0, Math.min(100, Number(data.cpu_utilization_pct) || 0));
+        cpuBar.style.width = `${{pct}}%`;
+      }}
       const used = data.gpu_vram_used_gb;
       const total = data.gpu_vram_total_gb;
       if (vramLabel) {{
-        vramLabel.textContent = (used != null && total != null) ? `${{used}} / ${{total}} GB` : 'n/a';
+        vramLabel.textContent = used != null
+          ? (total != null ? `${{used}} / ${{total}} GB` : `${{used}} GB`)
+          : 'n/a';
+        vramLabel.title = String(data.gpu_metrics_reason || '');
       }}
       if (vramBar) {{
         const pct = (used != null && total) ? Math.max(0, Math.min(100, (used / total) * 100)) : 0;
         vramBar.style.width = `${{pct}}%`;
       }}
       if (updatedEl) updatedEl.textContent = formatUpdatedAt(data.updated_at);
+      if (keepWarmRow) keepWarmRow.hidden = !Boolean(data.keep_warm_available);
+      if (keepWarmToggle) {{
+        keepWarmToggle.disabled = !Boolean(data.keep_warm_available);
+        keepWarmToggle.checked = Boolean(data.keep_warm_enabled);
+      }}
     }} catch (_err) {{
-      if (statusEl) statusEl.textContent = 'Unavailable';
+      if (opsRoot) opsRoot.dataset.compute = 'unavailable';
+      if (statusEl) {{
+        statusEl.textContent = 'Unavailable';
+        statusEl.dataset.state = 'unavailable';
+      }}
+      if (liveDot) liveDot.classList.remove('is-active');
+      if (gpuDeviceEl) gpuDeviceEl.classList.remove('is-active');
+      if (cpuDeviceEl) cpuDeviceEl.classList.remove('is-active');
+      if (gpuUtilEl) gpuUtilEl.textContent = 'n/a';
+      if (cpuUtilEl) cpuUtilEl.textContent = 'n/a';
+      if (gpuBar) gpuBar.style.width = '0%';
+      if (cpuBar) cpuBar.style.width = '0%';
       if (updatedEl) updatedEl.textContent = 'Snapshot unavailable';
     }}
   }}
@@ -5484,6 +6840,7 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   window.notifyRuntimeRailRunStart = onRunStart;
   window.notifyRuntimeRailRunEnd = onRunEnd;
   window.completeRuntimeRailJourneyFromWorkflow = completeFromWorkflow;
+  window.applyRuntimeRailJourneyState = applyJourneyRailState;
   window.hydrateRuntimeRailJourneyTimings = hydrateJourneyTimingsFromResult;
   window.consumeAskStream = consumeAskStream;
   window.handleAskStreamStage = handleAskStreamStage;
@@ -5503,6 +6860,14 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
     collapse.addEventListener('click', () => setExpanded(false, true));
   }}
 
+  setModelsExpanded(readStoredModelsExpanded(), false);
+  if (modelsExpand) {{
+    modelsExpand.addEventListener('click', () => {{
+      const next = modelsList?.dataset.expanded !== 'true';
+      setModelsExpanded(next, true);
+    }});
+  }}
+
   if (journeyExpand) {{
     journeyExpand.addEventListener('click', (event) => {{
       event.stopPropagation();
@@ -5512,16 +6877,53 @@ def _runtime_rail_script(*, show_ops_link: bool) -> str:
   }}
   if (journeyOverlayClose) journeyOverlayClose.addEventListener('click', closeJourneyOverlay);
   if (journeyOverlayBackdrop) journeyOverlayBackdrop.addEventListener('click', closeJourneyOverlay);
+  if (playbookZoomOut) playbookZoomOut.addEventListener('click', () => stepPlaybookZoom(-1));
+  if (playbookZoomIn) playbookZoomIn.addEventListener('click', () => stepPlaybookZoom(1));
+  if (playbookZoomFit) playbookZoomFit.addEventListener('click', fitPlaybookToViewport);
+  if (playbookViewport) {{
+    playbookViewport.addEventListener('wheel', handlePlaybookViewportWheel, {{ passive: false }});
+    playbookViewport.addEventListener('dblclick', handlePlaybookDoubleClick);
+    playbookViewport.addEventListener('pointerdown', beginPlaybookPan);
+    playbookViewport.addEventListener('pointermove', movePlaybookPan);
+    playbookViewport.addEventListener('pointerup', endPlaybookPan);
+    playbookViewport.addEventListener('pointercancel', endPlaybookPan);
+    playbookViewport.addEventListener('keydown', (event) => {{
+      if (event.key === '+' || event.key === '=') {{
+        event.preventDefault();
+        stepPlaybookZoom(1);
+      }} else if (event.key === '-' || event.key === '_') {{
+        event.preventDefault();
+        stepPlaybookZoom(-1);
+      }} else if (event.key === '0') {{
+        event.preventDefault();
+        fitPlaybookToViewport();
+      }}
+    }});
+    if (typeof window.ResizeObserver === 'function') {{
+      playbookResizeObserver = new window.ResizeObserver(() => {{
+        if (journeyOverlayOpen && playbookZoomMode === 'fit') schedulePlaybookFit();
+      }});
+      playbookResizeObserver.observe(playbookViewport);
+    }}
+  }}
   document.addEventListener('keydown', (event) => {{
     if (event.key === 'Escape' && journeyOverlayOpen) closeJourneyOverlay();
   }});
 
   window.addEventListener('resize', () => {{
     if (!canExpand() && rail?.dataset.expanded === 'true') setExpanded(false, false);
+    if (journeyOverlayOpen && playbookZoomMode === 'fit') schedulePlaybookFit();
   }});
+
+  if (keepWarmToggle) {{
+    keepWarmToggle.addEventListener('change', () => {{
+      setOllamaKeepWarm(keepWarmToggle.checked);
+    }});
+  }}
 
   hydrateModels();
   renderJourney();
+  updatePlaybookZoomControls();
 }})();
 </script>
 """
@@ -5531,7 +6933,7 @@ def _runtime_rail_stylesheet() -> str:
     return """
     @property --runtime-rail-width { syntax:'<length>'; inherits:true; initial-value:28px; }
     .app-shell { --runtime-rail-width:28px; grid-template-columns:64px minmax(0,1fr) var(--runtime-rail-width); transition:--runtime-rail-width .18s ease; }
-    .app-shell.runtime-rail-expanded { --runtime-rail-width: 312px; }
+    .app-shell.runtime-rail-expanded { --runtime-rail-width: 248px; }
     .runtime-rail { position:sticky; top:0; align-self:start; width:var(--runtime-rail-width); min-width:var(--runtime-rail-width); height:100vh; background:#0f172a; border-left:1px solid #1e293b; z-index:410; box-sizing:border-box; display:flex; flex-direction:row-reverse; overflow:hidden; }
     .runtime-rail-panel, .runtime-rail-tab { position:relative; z-index:2; background:#0f172a; }
     .runtime-rail-tab { appearance:none; border:0; margin:0; padding:0; width:28px; min-width:28px; height:100%; display:flex; flex-direction:column; align-items:center; gap:10px; background:linear-gradient(180deg,#0f172a,#08111d); color:#94a3b8; cursor:pointer; position:relative; box-shadow:none; }
@@ -5541,34 +6943,26 @@ def _runtime_rail_stylesheet() -> str:
     .runtime-rail-tab-label { writing-mode:vertical-rl; transform:rotate(180deg); font-size:11px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; color:#dbeafe; }
     .runtime-rail-pulse { width:8px; height:8px; border-radius:999px; background:#38bdf8; box-shadow:0 0 0 0 rgba(56,189,248,.55); animation:runtime-rail-pulse 1.6s ease-out infinite; }
     @keyframes runtime-rail-pulse { 0% { box-shadow:0 0 0 0 rgba(56,189,248,.55); } 70% { box-shadow:0 0 0 8px rgba(56,189,248,0); } 100% { box-shadow:0 0 0 0 rgba(56,189,248,0); } }
-    .runtime-rail-panel { display:none; flex:1 1 auto; min-width:0; padding:14px 12px 16px; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; }
+    .runtime-rail-panel { display:none; flex:1 1 auto; min-width:0; padding:10px 8px 12px; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; }
     .runtime-rail[data-expanded="true"] .runtime-rail-panel { display:block; }
-    .runtime-rail-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:12px; color:#e5eef8; font-size:13px; font-weight:800; }
+    .runtime-rail-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; color:#e5eef8; font-size:12px; font-weight:800; }
     .runtime-rail-collapse { appearance:none; border:0; margin:0; padding:2px 4px; background:transparent; color:#38bdf8; font-size:12px; font-weight:900; cursor:pointer; box-shadow:none; }
-    .runtime-rail-section { margin-bottom:14px; }
-    .runtime-rail-kicker { font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; color:#7ea2c1; margin-bottom:8px; }
-    .runtime-journey { list-style:none; margin:0; padding:0; display:grid; gap:0; position:relative; }
-    .runtime-journey-step { display:grid; grid-template-columns:18px minmax(0,1fr); gap:8px; align-items:center; position:relative; padding:6px 0; color:#9fb4cc; font-size:12px; }
-    .runtime-journey-label-wrap { display:flex; align-items:baseline; justify-content:space-between; gap:8px; min-width:0; }
-    .runtime-journey-label { min-width:0; }
-    .runtime-journey-step-time { flex:0 0 auto; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:10px; color:#94a3b8; font-weight:600; font-variant-numeric:tabular-nums; }
-    .runtime-journey-step.active .runtime-journey-step-time { color:#7dd3fc; }
-    .runtime-journey-step.done .runtime-journey-step-time { color:#86efac; }
-    .runtime-journey-step:not(:last-child)::after { content:""; position:absolute; left:8px; top:22px; bottom:-6px; width:2px; background:#1e3348; }
-    .runtime-journey-dot { width:14px; height:14px; border-radius:999px; border:2px solid #2a445c; background:#0f172a; box-sizing:border-box; position:relative; z-index:1; }
-    .runtime-journey-step.done .runtime-journey-dot { border-color:#22c55e; background:#22c55e; }
-    .runtime-journey-step.active .runtime-journey-dot { border-color:#38bdf8; box-shadow:0 0 0 3px rgba(56,189,248,.18); background:radial-gradient(circle at center,#38bdf8 0 35%,#0f172a 36%); }
-    .runtime-journey-step.active { color:#dbeafe; font-weight:700; }
-    .runtime-journey-step.done { color:#bbf7d0; }
-    .runtime-journey-step.is-skipped { color:#64748b; font-weight:500; }
-    .runtime-journey-step.is-skipped .runtime-journey-dot {
-      border-color:#475569;
-      border-style:dashed;
-      background:#0f172a;
-      box-shadow:none;
-    }
-    .runtime-journey-step.is-skipped .runtime-journey-step-time { color:#64748b; font-weight:600; }
+    .runtime-rail-section { margin-bottom:10px; }
+    .runtime-rail-kicker { font-size:10px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; color:#7ea2c1; margin-bottom:4px; }
+    __RUNTIME_JOURNEY_COMPACT_STYLES__
+    .runtime-models-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .runtime-models-expand { appearance:none; border:1px solid #27415a; margin:0; padding:2px 6px; border-radius:8px; background:#071523; color:#38bdf8; font-size:11px; font-weight:900; cursor:pointer; line-height:1.2; box-shadow:none; display:inline-flex; align-items:center; }
+    .runtime-models-expand:hover { background:#0b2034; border-color:#38bdf8; }
+    .runtime-models-expand-chevron { display:inline-block; transition:transform .15s ease; }
+    .runtime-models-expand.is-expanded .runtime-models-expand-chevron { transform:rotate(180deg); }
+    .runtime-model-summary { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:11px; min-width:0; margin-bottom:8px; }
+    .runtime-model-summary-role { color:#9fb4cc; font-weight:700; flex:0 0 auto; }
+    .runtime-model-summary[data-state="active"] .runtime-model-summary-role { color:#7dd3fc; }
+    .runtime-model-summary[data-state="active"] .runtime-model-chip { border-color:#38bdf8; background:#0b2034; }
+    .runtime-model-summary[data-state="last"] .runtime-model-summary-role { color:#94a3b8; }
+    .runtime-model-summary[data-state="last"] .runtime-model-chip { border-color:#2f536d; background:#091a2a; }
     .runtime-models { display:grid; gap:8px; }
+    .runtime-models[data-expanded="false"] { display:none; }
     .runtime-model-row { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:11px; min-width:0; }
     .runtime-model-role { color:#9fb4cc; font-weight:700; flex:0 0 auto; }
     .runtime-model-chip { display:inline-flex; align-items:center; gap:6px; min-width:0; max-width:100%; padding:4px 8px; border-radius:999px; border:1px solid #27415a; background:#071523; color:#dbeafe; font-size:10px; font-weight:700; }
@@ -5576,18 +6970,39 @@ def _runtime_rail_stylesheet() -> str:
     .runtime-model-active { display:none; padding:2px 6px; border-radius:999px; background:#38bdf8; color:#041723; font-size:9px; font-weight:900; letter-spacing:.04em; }
     .runtime-model-row.active .runtime-model-chip { border-color:#38bdf8; background:#0b2034; }
     .runtime-model-row.active .runtime-model-active { display:inline-flex; }
+    .runtime-rail-ops { padding:9px; border:1px solid rgba(56,189,248,.55); border-radius:10px; background:linear-gradient(160deg,rgba(8,29,49,.98),rgba(6,20,35,.98)); box-shadow:inset 0 1px 0 rgba(125,211,252,.08),0 0 18px rgba(14,165,233,.06); }
+    .runtime-ops-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+    .runtime-ops-head .runtime-rail-kicker { margin-bottom:0; color:#8dc8e8; }
+    .runtime-ops-live-dot { width:8px; height:8px; border-radius:999px; background:#334155; box-shadow:none; transition:background .18s ease,box-shadow .18s ease; }
+    .runtime-ops-live-dot.is-active { background:#2dd4bf; box-shadow:0 0 0 3px rgba(45,212,191,.14),0 0 10px rgba(45,212,191,.7); }
     .runtime-ops-body { display:grid; gap:8px; font-size:11px; }
     .runtime-ops-row { display:flex; align-items:center; justify-content:space-between; gap:8px; color:#9fb4cc; }
     .runtime-ops-row strong { color:#e5eef8; font-size:11px; font-weight:800; }
-    .runtime-ops-vram { display:flex; align-items:center; gap:8px; min-width:0; }
-    .runtime-ops-vram-track { width:72px; height:6px; border-radius:999px; background:#13263a; overflow:hidden; }
-    .runtime-ops-vram-bar { height:100%; width:0; border-radius:999px; background:linear-gradient(90deg,#38bdf8,#0ea5e9); }
-    .runtime-ops-updated { font-size:10px; margin-top:2px; }
+    .runtime-ops-devices { display:inline-flex; align-items:center; padding:2px; border-radius:999px; background:#13263a; }
+    .runtime-ops-device-pill { min-width:34px; padding:3px 7px; border-radius:999px; color:#7891aa; font-size:10px; font-weight:900; text-align:center; transition:color .18s ease,background .18s ease,box-shadow .18s ease; }
+    .runtime-ops-device-pill.is-active { color:#041723; background:#38bdf8; box-shadow:0 0 10px rgba(56,189,248,.28); }
+    .runtime-ops-device-pill.is-last { color:#bae6fd; background:#102a40; box-shadow:inset 0 0 0 1px #3b647f; }
+    .runtime-ops-model-row strong { max-width:118px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .runtime-ops-meter { display:grid; grid-template-columns:55px minmax(0,1fr); align-items:center; gap:8px; }
+    .runtime-ops-meter-label { display:flex; justify-content:space-between; gap:5px; color:#9fb4cc; font-size:10px; }
+    .runtime-ops-meter-label strong { color:#dbeafe; font-size:10px; font-variant-numeric:tabular-nums; }
+    .runtime-ops-meter-track { height:6px; border-radius:999px; background:#13263a; overflow:hidden; }
+    .runtime-ops-meter-bar { height:100%; width:0; border-radius:999px; background:linear-gradient(90deg,#38bdf8,#0ea5e9); transition:width .25s ease; }
+    .runtime-ops-cpu-bar { background:linear-gradient(90deg,#2dd4bf,#14b8a6); }
+    .runtime-ops-state { color:#94a3b8; font-size:10px; font-weight:800; }
+    .runtime-ops-state[data-state="active"] { color:#38bdf8; }
+    .runtime-ops-state[data-state="loaded"] { color:#5eead4; }
+    .runtime-ops-state[data-state="last"] { color:#94a3b8; }
+    .runtime-ops-state[data-state="unavailable"] { color:#fca5a5; }
+    .runtime-ops-hint { color:#71869c; font-size:9px; line-height:1.35; }
+    .runtime-ops-keep-warm-label { color:#9fb4cc; font-size:11px; font-weight:700; cursor:help; }
+    .runtime-ops-keep-warm input { width:14px; height:14px; accent-color:#38bdf8; cursor:pointer; }
+    .runtime-ops-updated { font-size:9px; margin-top:-4px; }
     .runtime-ops-full-link { display:inline-flex; margin-top:8px; color:#38bdf8; font-size:11px; font-weight:700; text-decoration:none; }
     .runtime-ops-full-link:hover { text-decoration:underline; }
     __RUNTIME_JOURNEY_OVERLAY_STYLES__
     @media (max-width: 1280px) { .app-shell.runtime-rail-expanded { --runtime-rail-width: 28px; } .runtime-rail[data-expanded="true"] .runtime-rail-panel { display:none; } }
-    """.replace("__RUNTIME_JOURNEY_OVERLAY_STYLES__", _runtime_journey_overlay_styles())
+    """.replace("__RUNTIME_JOURNEY_COMPACT_STYLES__", _runtime_journey_compact_styles()).replace("__RUNTIME_JOURNEY_OVERLAY_STYLES__", _runtime_journey_overlay_styles())
 
 
 def _investigation_page_html(user: dict[str, Any] | None) -> str:
@@ -5599,6 +7014,7 @@ def _investigation_page_html(user: dict[str, Any] | None) -> str:
         .replace("__GLOBAL_NAV__", _global_nav("investigation"))
         .replace("__SMITH_ROLE__", html.escape(role))
         .replace("__RUNTIME_JOURNEY_OVERLAY_STYLES__", _runtime_journey_overlay_styles())
+        .replace("__RUNTIME_JOURNEY_COMPACT_STYLES__", _runtime_journey_compact_styles())
         .replace("__RUNTIME_RAIL__", _runtime_rail_html())
         .replace("__RUNTIME_RAIL_SCRIPT__", _runtime_rail_script(show_ops_link=show_ops_link))
     )
@@ -5634,7 +7050,7 @@ APP_HTML = """<!doctype html>
     }
     @property --runtime-rail-width { syntax:'<length>'; inherits:true; initial-value:28px; }
     .app-shell { display:grid; --runtime-rail-width:28px; grid-template-columns:64px minmax(0,1fr) var(--runtime-rail-width); min-height:100vh; transition:--runtime-rail-width .18s ease; }
-    .app-shell.runtime-rail-expanded { --runtime-rail-width: 312px; }
+    .app-shell.runtime-rail-expanded { --runtime-rail-width: 248px; }
     .app-main { min-width:0; min-height:100vh; }
     .wrap { max-width: 1740px; min-height:calc(100vh - 48px); margin: 24px auto; padding: 0 28px 32px; box-sizing:border-box; }
     .sidebar-rail {
@@ -5830,90 +7246,48 @@ APP_HTML = """<!doctype html>
       color:#7ea2c1;
       margin-bottom:8px;
     }
-    .runtime-journey {
-      list-style:none;
-      margin:0;
-      padding:0;
-      display:grid;
-      gap:0;
-      position:relative;
-    }
-    .runtime-journey-step {
-      display:grid;
-      grid-template-columns:18px minmax(0,1fr);
-      gap:8px;
-      align-items:center;
-      position:relative;
-      padding:6px 0;
-      color:#9fb4cc;
-      font-size:12px;
-    }
-    .runtime-journey-label-wrap {
+    __RUNTIME_JOURNEY_COMPACT_STYLES__
+    .runtime-models-head {
       display:flex;
-      align-items:baseline;
+      align-items:center;
       justify-content:space-between;
       gap:8px;
-      min-width:0;
     }
-    .runtime-journey-label { min-width:0; }
-    .runtime-journey-step-time {
-      flex:0 0 auto;
-      font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
-      font-size:10px;
-      color:#94a3b8;
-      font-weight:600;
-      font-variant-numeric:tabular-nums;
-    }
-    .runtime-journey-step.active .runtime-journey-step-time { color:#7dd3fc; }
-    .runtime-journey-step.done .runtime-journey-step-time { color:#86efac; }
-    .runtime-journey-step:not(:last-child)::after {
-      content:"";
-      position:absolute;
-      left:8px;
-      top:22px;
-      bottom:-6px;
-      width:2px;
-      background:#1e3348;
-    }
-    .runtime-journey-dot {
-      width:14px;
-      height:14px;
-      border-radius:999px;
-      border:2px solid #2a445c;
-      background:#0f172a;
-      box-sizing:border-box;
-      position:relative;
-      z-index:1;
-    }
-    .runtime-journey-step.done .runtime-journey-dot {
-      border-color:#22c55e;
-      background:#22c55e;
-    }
-    .runtime-journey-step.done .runtime-journey-dot::after {
-      content:"";
-      position:absolute;
-      inset:3px 4px 4px 3px;
-      border:2px solid #052e16;
-      border-top:none;
-      border-right:none;
-      transform:rotate(-45deg);
-    }
-    .runtime-journey-step.active .runtime-journey-dot {
-      border-color:#38bdf8;
-      box-shadow:0 0 0 3px rgba(56,189,248,.18);
-      background:radial-gradient(circle at center,#38bdf8 0 35%,#0f172a 36%);
-    }
-    .runtime-journey-step.active { color:#dbeafe; font-weight:700; }
-    .runtime-journey-step.done { color:#bbf7d0; }
-    .runtime-journey-step.is-skipped { color:#64748b; font-weight:500; }
-    .runtime-journey-step.is-skipped .runtime-journey-dot {
-      border-color:#475569;
-      border-style:dashed;
-      background:#0f172a;
+    .runtime-models-expand {
+      appearance:none;
+      border:1px solid #27415a;
+      margin:0;
+      padding:2px 6px;
+      border-radius:8px;
+      background:#071523;
+      color:#38bdf8;
+      font-size:11px;
+      font-weight:900;
+      cursor:pointer;
+      line-height:1.2;
       box-shadow:none;
+      display:inline-flex;
+      align-items:center;
     }
-    .runtime-journey-step.is-skipped .runtime-journey-step-time { color:#64748b; font-weight:600; }
+    .runtime-models-expand:hover { background:#0b2034; border-color:#38bdf8; }
+    .runtime-models-expand-chevron { display:inline-block; transition:transform .15s ease; }
+    .runtime-models-expand.is-expanded .runtime-models-expand-chevron { transform:rotate(180deg); }
+    .runtime-model-summary {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+      font-size:11px;
+      min-width:0;
+      margin-bottom:8px;
+    }
+    .runtime-model-summary-role { color:#9fb4cc; font-weight:700; flex:0 0 auto; }
+    .runtime-model-summary[data-state="active"] .runtime-model-summary-role { color:#7dd3fc; }
+    .runtime-model-summary[data-state="active"] .runtime-model-chip { border-color:#38bdf8; background:#0b2034; }
+    .runtime-model-summary[data-state="last"] .runtime-model-summary-role { color:#94a3b8; }
+    .runtime-model-summary[data-state="last"] .runtime-model-chip { border-color:#2f536d; background:#091a2a; }
     .runtime-models { display:grid; gap:8px; }
+    .runtime-models[data-expanded="false"] { display:none; }
     .runtime-model-row {
       display:flex;
       align-items:center;
@@ -5959,6 +7333,27 @@ APP_HTML = """<!doctype html>
       background:#0b2034;
     }
     .runtime-model-row.active .runtime-model-active { display:inline-flex; }
+    .runtime-rail-ops {
+      padding:9px;
+      border:1px solid rgba(56,189,248,.55);
+      border-radius:10px;
+      background:linear-gradient(160deg,rgba(8,29,49,.98),rgba(6,20,35,.98));
+      box-shadow:inset 0 1px 0 rgba(125,211,252,.08),0 0 18px rgba(14,165,233,.06);
+    }
+    .runtime-ops-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+    .runtime-ops-head .runtime-rail-kicker { margin-bottom:0; color:#8dc8e8; }
+    .runtime-ops-live-dot {
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      background:#334155;
+      box-shadow:none;
+      transition:background .18s ease,box-shadow .18s ease;
+    }
+    .runtime-ops-live-dot.is-active {
+      background:#2dd4bf;
+      box-shadow:0 0 0 3px rgba(45,212,191,.14),0 0 10px rgba(45,212,191,.7);
+    }
     .runtime-ops-body { display:grid; gap:8px; font-size:11px; }
     .runtime-ops-row {
       display:flex;
@@ -5968,21 +7363,47 @@ APP_HTML = """<!doctype html>
       color:#9fb4cc;
     }
     .runtime-ops-row strong { color:#e5eef8; font-size:11px; font-weight:800; }
-    .runtime-ops-vram { display:flex; align-items:center; gap:8px; min-width:0; }
-    .runtime-ops-vram-track {
-      width:72px;
-      height:6px;
+    .runtime-ops-devices { display:inline-flex; align-items:center; padding:2px; border-radius:999px; background:#13263a; }
+    .runtime-ops-device-pill {
+      min-width:34px;
+      padding:3px 7px;
       border-radius:999px;
-      background:#13263a;
-      overflow:hidden;
+      color:#7891aa;
+      font-size:10px;
+      font-weight:900;
+      text-align:center;
+      transition:color .18s ease,background .18s ease,box-shadow .18s ease;
     }
-    .runtime-ops-vram-bar {
+    .runtime-ops-device-pill.is-active {
+      color:#041723;
+      background:#38bdf8;
+      box-shadow:0 0 10px rgba(56,189,248,.28);
+    }
+    .runtime-ops-device-pill.is-last {
+      color:#bae6fd;
+      background:#102a40;
+      box-shadow:inset 0 0 0 1px #3b647f;
+    }
+    .runtime-ops-model-row strong { max-width:118px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .runtime-ops-meter { display:grid; grid-template-columns:55px minmax(0,1fr); align-items:center; gap:8px; }
+    .runtime-ops-meter-label { display:flex; justify-content:space-between; gap:5px; color:#9fb4cc; font-size:10px; }
+    .runtime-ops-meter-label strong { color:#dbeafe; font-size:10px; font-variant-numeric:tabular-nums; }
+    .runtime-ops-meter-track { height:6px; border-radius:999px; background:#13263a; overflow:hidden; }
+    .runtime-ops-meter-bar {
       height:100%;
       width:0;
       border-radius:999px;
       background:linear-gradient(90deg,#38bdf8,#0ea5e9);
+      transition:width .25s ease;
     }
-    .runtime-ops-updated { font-size:10px; margin-top:2px; }
+    .runtime-ops-cpu-bar { background:linear-gradient(90deg,#2dd4bf,#14b8a6); }
+    .runtime-ops-state { color:#94a3b8; font-size:10px; font-weight:800; }
+    .runtime-ops-state[data-state="active"] { color:#38bdf8; }
+    .runtime-ops-state[data-state="loaded"] { color:#5eead4; }
+    .runtime-ops-state[data-state="last"] { color:#94a3b8; }
+    .runtime-ops-state[data-state="unavailable"] { color:#fca5a5; }
+    .runtime-ops-hint { color:#71869c; font-size:9px; line-height:1.35; }
+    .runtime-ops-updated { font-size:9px; margin-top:-4px; }
     .runtime-ops-full-link {
       display:inline-flex;
       margin-top:8px;
@@ -9800,7 +11221,7 @@ APP_HTML = """<!doctype html>
                 <div class=\"drawer-panel-shell drawer-panel-shell-spl\">
                   <div class=\"drawer-panel-main\">
                     <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Search Intent</div><div id=\"drawer-spl-summary\" class=\"drawer-clone-copy\">Run an investigation to see the search intent and evidence strategy.</div></div>
-                    <div class=\"drawer-clone-card\"><div style=\"display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;\"><div class=\"drawer-clone-title\" style=\"margin-bottom:0;\">Executed Query</div><a id=\"drawer-spl-inline-link\" class=\"btn-splunk drawer-spl-toggle\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none;text-decoration:none;align-items:center;justify-content:center;\">Open In Splunk</a></div><pre id=\"drawer-spl-query\" class=\"drawer-spl-pre\">(No Splunk query captured yet)</pre></div>
+                    <div class=\"drawer-clone-card\"><div style=\"display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;\"><div class=\"drawer-clone-title\" style=\"margin-bottom:0;\">Executed Query</div><div style=\"display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;\"><button id=\"drawer-save-query-btn\" class=\"btn-secondary drawer-spl-toggle\" type=\"button\" style=\"display:none;\">Save To Query Library</button><a id=\"drawer-spl-inline-link\" class=\"btn-splunk drawer-spl-toggle\" href=\"#\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"display:none;text-decoration:none;align-items:center;justify-content:center;\">Open In Splunk</a></div></div><div id=\"drawer-save-query-status\" class=\"drawer-inline-note\" style=\"display:none;margin-bottom:8px;\"></div><div id=\"drawer-saved-query-suggestion\" class=\"drawer-inline-note\" style=\"display:none;margin-bottom:8px;\"></div><pre id=\"drawer-spl-query\" class=\"drawer-spl-pre\">(No Splunk query captured yet)</pre></div>
                   </div>
                   <aside class=\"drawer-panel-side\">
                     <div class=\"drawer-clone-card\"><div class=\"drawer-clone-title\">Sample Results</div><pre id=\"drawer-spl-results\" class=\"drawer-spl-pre\">(No SPL result rows captured yet)</pre></div>
@@ -10062,6 +11483,9 @@ APP_HTML = """<!doctype html>
     }
 
     let lastAskResult = null;
+    let lastSavedQueryRecordId = '';
+    let dismissedSavedQuerySuggestionId = '';
+    let pendingForceSavedQueryId = '';
     let pendingContinuationState = null;
     let selectedFollowup = null;
     let latestCaseRef = null;
@@ -13375,6 +14799,110 @@ APP_HTML = """<!doctype html>
       } catch (_err) {}
     }
 
+    function renderSavedQuerySuggestionBanner(result, suggestion) {
+      const shell = $('drawer-saved-query-suggestion');
+      if (!shell) return;
+      if (!suggestion || typeof suggestion !== 'object') {
+        shell.style.display = 'none';
+        shell.innerHTML = '';
+        return;
+      }
+      const recordId = String(suggestion.record_id || '').trim();
+      if (!recordId || dismissedSavedQuerySuggestionId === recordId) {
+        shell.style.display = 'none';
+        shell.innerHTML = '';
+        return;
+      }
+      const score = Number(suggestion.score || 0);
+      const scoreLabel = Number.isFinite(score) ? score.toFixed(2) : 'n/a';
+      const savedQuestion = String(suggestion.supporting_question || '').trim();
+      shell.style.display = 'block';
+      shell.innerHTML = `
+        <strong>Similar saved query available</strong> (score ${esc(scoreLabel)}).
+        ${savedQuestion ? `<span style="display:block;margin-top:4px;">Saved as: ${esc(savedQuestion)}</span>` : ''}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <button type="button" class="btn-secondary" id="drawer-use-saved-query-btn">Use Saved Query</button>
+          <button type="button" class="btn-secondary" id="drawer-dismiss-saved-query-btn">Dismiss</button>
+        </div>`;
+      const useBtn = $('drawer-use-saved-query-btn');
+      const dismissBtn = $('drawer-dismiss-saved-query-btn');
+      if (useBtn) {
+        useBtn.onclick = () => {
+          pendingForceSavedQueryId = recordId;
+          dismissedSavedQuerySuggestionId = '';
+          runInvestigation({ question: $('question').value, force_saved_query_id: recordId });
+        };
+      }
+      if (dismissBtn) {
+        dismissBtn.onclick = () => {
+          dismissedSavedQuerySuggestionId = recordId;
+          shell.style.display = 'none';
+          shell.innerHTML = '';
+        };
+      }
+    }
+
+    async function saveCurrentQueryToLibrary() {
+      const result = (lastAskResult && typeof lastAskResult === 'object') ? lastAskResult : null;
+      const btn = $('drawer-save-query-btn');
+      const status = $('drawer-save-query-status');
+      if (!result || result.supported === false) {
+        if (status) {
+          status.style.display = 'block';
+          status.textContent = 'This investigation did not produce a savable query path.';
+        }
+        return;
+      }
+      const query = extractExecutedSPL(result);
+      if (!query) {
+        if (status) {
+          status.style.display = 'block';
+          status.textContent = 'No executed SPL was captured for this run.';
+        }
+        return;
+      }
+      const rows = Number(result.rows_returned || 0);
+      if (rows <= 0) {
+        const ok = window.confirm('This query returned no rows. Save it to the library anyway?');
+        if (!ok) return;
+      }
+      const alias = window.prompt('Optional alias or alternate phrasing for this query (leave blank to skip):', '') || '';
+      const aliases = alias.trim() ? [alias.trim()] : [];
+      if (btn) btn.disabled = true;
+      if (status) {
+        status.style.display = 'block';
+        status.textContent = 'Saving query to library...';
+      }
+      try {
+        const resp = await fetch('/api/saved-queries', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question: String(result.effective_question || result.question || $('question').value || '').trim(),
+            query,
+            intent: String(result.intent || '').trim(),
+            aliases,
+            rows_returned: rows,
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error(String(data.error || `save failed (${resp.status})`));
+        }
+        lastSavedQueryRecordId = String(data?.record?.id || '').trim();
+        if (status) {
+          status.innerHTML = `Saved to the query library. <a href="${esc(data.library_url || '/spl-assets?source=analyst_saved')}">View library</a>`;
+        }
+        if (btn) {
+          btn.textContent = 'Saved To Query Library';
+          btn.disabled = true;
+        }
+      } catch (err) {
+        if (status) status.textContent = `Save failed: ${String(err?.message || err)}`;
+        if (btn) btn.disabled = false;
+      }
+    }
+
     function syncDrawerMirrors() {
       const result = (lastAskResult && typeof lastAskResult === 'object') ? lastAskResult : null;
       const spl = extractExecutedSPL(result || {});
@@ -13419,6 +14947,23 @@ APP_HTML = """<!doctype html>
       if (drawerSplResults) {
         drawerSplResults.textContent = splModel.results;
       }
+      const saveBtn = $('drawer-save-query-btn');
+      const saveStatus = $('drawer-save-query-status');
+      const canSave = Boolean(result && result.supported !== false && spl && String(result.selected_tool || '') === 'splunk_run_query');
+      if (saveBtn) {
+        saveBtn.style.display = canSave ? 'inline-flex' : 'none';
+        saveBtn.disabled = Boolean(lastSavedQueryRecordId);
+        saveBtn.textContent = lastSavedQueryRecordId ? 'Saved To Query Library' : 'Save To Query Library';
+        saveBtn.onclick = () => { saveCurrentQueryToLibrary(); };
+      }
+      if (saveStatus && !canSave) {
+        saveStatus.style.display = 'none';
+        saveStatus.textContent = '';
+      }
+      const suggestion = (result && result.saved_query_suggestion && typeof result.saved_query_suggestion === 'object')
+        ? result.saved_query_suggestion
+        : null;
+      renderSavedQuerySuggestionBanner(result, suggestion);
       const rawSplHref = splLink ? String(splLink.getAttribute('href') || '').trim() : '';
       const splLinkVisible = splLink ? splLink.style.display !== 'none' : false;
       const hasDrawerSpl = Boolean(($('spl-query')?.textContent || '').trim());
@@ -13578,6 +15123,8 @@ APP_HTML = """<!doctype html>
 
     function clearContinuationControls() {
       lastAskResult = null;
+      lastSavedQueryRecordId = '';
+      dismissedSavedQuerySuggestionId = '';
       pendingContinuationState = null;
       $('continue-shell').style.display = 'none';
       $('continue-copy').textContent = '';
@@ -13732,11 +15279,12 @@ APP_HTML = """<!doctype html>
           finalPayload = payload || null;
           if (typeof options.onComplete === 'function') options.onComplete(finalPayload);
         }
-        if (eventName === 'error') {
-          const message = String(payload?.message || payload?.code || `${streamLabel} stream failed`);
-          streamError = new Error(message);
-        }
+      if (eventName === 'error') {
+        const message = String(payload?.message || payload?.code || `${streamLabel} stream failed`);
+        streamError = new Error(payload?.hint ? `${message} \u2014 ${payload.hint}` : message);
+        if (payload?.hint) streamError.hint = payload.hint;
       }
+    }
 
       while (true) {
         const { done, value } = await reader.read();
@@ -13888,6 +15436,8 @@ APP_HTML = """<!doctype html>
       syncInvestRunButtons(true);
       syncRunButtonPriority('question');
       lastAskResult = null;
+      lastSavedQueryRecordId = '';
+      dismissedSavedQuerySuggestionId = '';
       $('status').textContent = 'Starting investigation...';
       startRunProgress();
       updateExecutionMonitor({
@@ -13960,7 +15510,9 @@ APP_HTML = """<!doctype html>
           continuation_state: options.continuation_state || null,
           pivot_context: options.pivot_context || null,
           pivot_candidate: options.pivot_candidate || null,
+          force_saved_query_id: String(options.force_saved_query_id || pendingForceSavedQueryId || '').trim(),
         };
+        pendingForceSavedQueryId = '';
         runAbortController = new AbortController();
         const resp = await fetch('/api/ask/stream', {
           method:'POST',
@@ -13971,10 +15523,16 @@ APP_HTML = """<!doctype html>
         if (!resp.ok) {
           let errPayload = null;
           try { errPayload = await resp.json(); } catch (_e) {}
-          throw new Error(String(errPayload?.error || errPayload?.message || `Investigation request failed (${resp.status})`));
+          const baseMsg = String(errPayload?.error || errPayload?.message || `Investigation request failed (${resp.status})`);
+          const err = new Error(errPayload?.hint ? `${baseMsg} \u2014 ${errPayload.hint}` : baseMsg);
+          if (errPayload?.hint) err.hint = errPayload.hint;
+          throw err;
         }
         const data = await consumeAskStream(resp, setRunProgressFromStageEvent);
         lastAskResult = data.result || {};
+        if (data.saved_query_suggestion && typeof data.saved_query_suggestion === 'object') {
+          lastAskResult.saved_query_suggestion = data.saved_query_suggestion;
+        }
         if (lastAskResult && typeof lastAskResult === 'object') {
           lastAskResult = {
             ...lastAskResult,
@@ -14220,7 +15778,7 @@ DOCS_SHELL_HTML = """<!doctype html>
       min-height:100vh;
       transition:--runtime-rail-width .18s ease;
     }}
-    .app-shell.runtime-rail-expanded {{ --runtime-rail-width: 312px; }}
+    .app-shell.runtime-rail-expanded {{ --runtime-rail-width: 248px; }}
     .app-main {{
       min-width:0;
       min-height:100vh;
@@ -16011,7 +17569,7 @@ def _docs_index_body() -> str:
         <h2>Start Here</h2>
         <p>If you are new to A.G.E.N.T. Smith, begin with the business overview and then move into the technical architecture only if you need deeper detail.</p>
         <p><a href=\"/docs\">Open the business overview</a></p>
-        <p><a href=\"/docs/view?path=project/v1_5_1_delta.md\">Open the v1.5.1 release highlights</a></p>
+        <p><a href=\"/docs/view?path=project/v1_5_2_delta.md\">Open the v1.5.2 release highlights</a></p>
       </div>
       <div class=\"card\">
         <h2>How To Use This Section</h2>
@@ -16024,6 +17582,7 @@ def _docs_index_body() -> str:
         <h2>What Is This?</h2>
         <p>Use these if you want the business story, problem statement, current value, and roadmap direction.</p>
         <div class=\"guide-links\">
+          <a class=\"guide-link\" href=\"/docs/view?path=project/v1_5_2_delta.md\"><strong>v1.5.2 Release Highlights</strong><span>SPL quality programs, ten-domain loop, writer hardening, Docker deploy contract.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=project/v1_5_1_delta.md\"><strong>v1.5.1 Release Highlights</strong><span>Short operator-facing summary of what changed in the v1.5.1 release.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=project/v1_5_0_delta.md\"><strong>v1.5.0 Release Highlights</strong><span>Writer and peer model promotion; superseded planner default in v1.5.1.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=project/v1_4_2_delta.md\"><strong>v1.4.2 Release Highlights</strong><span>Short operator-facing summary of what changed in the v1.4.2 release.</span></a>
@@ -16808,6 +18367,79 @@ def _active_spl_asset_matches_for_intent(intent: str) -> list[dict[str, Any]]:
         return []
 
 
+_ENV_PAGE_STYLE = """
+<style>
+  .envx-shell{display:grid;gap:16px;padding-bottom:24px;}
+  .envx-kicker{margin:0 0 8px;color:#7dd3fc;text-transform:uppercase;letter-spacing:.9px;font-size:11px;font-weight:800;}
+  .envx-hero{position:relative;overflow:hidden;border:1px solid #244660;border-radius:18px;background:linear-gradient(160deg,#08182a,#091726 55%,#0a1d17);padding:20px 22px 18px;box-shadow:0 16px 34px rgba(0,0,0,.26), inset 0 0 0 1px rgba(255,255,255,.02);}
+  .envx-hero::before{content:"";position:absolute;inset:0 0 auto 0;height:4px;background:linear-gradient(90deg,#22c55e,#38bdf8);}
+  .envx-hero-title-row{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;}
+  .envx-hero-title-row h1{margin:0;font-size:28px;line-height:1.1;color:#f8fbff;}
+  .envx-hero .muted{margin-top:10px;max-width:900px;font-size:13px;line-height:1.65;}
+  .envx-scheduler-badge{display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border-radius:999px;border:1px solid #33506a;background:#081525;color:#9fb4cc;font-size:12px;font-weight:800;white-space:nowrap;flex:0 0 auto;}
+  .envx-scheduler-badge .envx-dot{width:9px;height:9px;border-radius:999px;background:#64748b;box-shadow:0 0 0 3px rgba(100,116,139,.16);}
+  .envx-scheduler-badge.on{border-color:#1f7a44;color:#c7f9dc;background:#07201a;}
+  .envx-scheduler-badge.on .envx-dot{background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.16);}
+  .envx-scheduler-badge.off{border-color:#5a4522;color:#fde9c7;background:#241a08;}
+  .envx-scheduler-badge.off .envx-dot{background:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.16);}
+  .envx-status-board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}
+  .envx-stat-card{position:relative;overflow:hidden;border:1px solid #27415a;border-radius:16px;background:linear-gradient(180deg,rgba(11,22,38,.96),rgba(7,17,31,.92));padding:15px 16px;box-shadow:0 14px 28px rgba(0,0,0,.2);}
+  .envx-stat-card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:linear-gradient(90deg,#38bdf8,#7dd3fc);opacity:.85;}
+  .envx-stat-title{font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:7px;}
+  .envx-stat-value{font-size:20px;font-weight:900;color:#f8fafc;}
+  .envx-stat-copy{margin-top:5px;color:#9fb4cc;font-size:12px;line-height:1.5;}
+  .envx-section-card{border:1px solid #23445f;border-radius:18px;background:linear-gradient(180deg,#081525,#06111d);padding:18px 20px;box-shadow:0 12px 26px rgba(0,0,0,.18), inset 0 0 0 1px rgba(255,255,255,.015);}
+  .envx-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:6px;}
+  .envx-section-title{margin:0;font-size:17px;color:#eef4fb;}
+  .envx-dot-badge{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;border:1px solid #33506a;background:#0a2034;color:#cbe4ff;font-size:12px;font-weight:800;white-space:nowrap;}
+  .envx-dot-badge .envx-dot{width:9px;height:9px;border-radius:999px;background:#64748b;}
+  .envx-dot-badge.fresh{border-color:#1f7a44;color:#c7f9dc;}
+  .envx-dot-badge.fresh .envx-dot{background:#22c55e;}
+  .envx-dot-badge.stale{border-color:#5a4522;color:#fde9c7;}
+  .envx-dot-badge.stale .envx-dot{background:#f59e0b;}
+  .envx-diagnostics{border:1px solid #23445f;border-radius:14px;background:#06111d;padding:2px 16px;margin-top:14px;}
+  .envx-diagnostics summary{cursor:pointer;padding:11px 2px;color:#9fb4cc;font-weight:800;font-size:12.5px;letter-spacing:.02em;list-style:none;}
+  .envx-diagnostics summary::-webkit-details-marker{display:none;}
+  .envx-diagnostics summary::before{content:"▸ ";color:#7dd3fc;}
+  .envx-diagnostics[open] summary::before{content:"▾ ";}
+  .envx-diagnostics-body{padding:2px 2px 14px;}
+  .envx-meta-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;}
+  .envx-raw-json{border:1px solid #23445f;border-radius:14px;background:#06111d;padding:2px 14px;margin-top:0;}
+  .envx-raw-json summary{cursor:pointer;padding:10px 2px;color:#9fb4cc;font-weight:700;font-size:13px;}
+  .env-summary-copy{margin:2px 0 0;color:#9fb4cc;font-size:12.5px;line-height:1.55;max-width:900px;}
+  .env-work-panel{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px;margin:12px 0;}
+  .env-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;}
+  .env-action-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:12px 18px;border-radius:14px;border:0;background:linear-gradient(135deg,#38bdf8,#0ea5e9);color:#041723;font-size:13.5px;font-weight:900;cursor:pointer;box-shadow:0 12px 24px rgba(14,165,233,.22), inset 0 1px 0 rgba(255,255,255,.16);transition:transform .16s ease, filter .16s ease;}
+  .env-action-btn:hover{transform:translateY(-1px);filter:brightness(1.05);}
+  .env-action-btn:disabled{cursor:not-allowed;opacity:.55;transform:none;filter:none;}
+  .env-action-btn.secondary{background:linear-gradient(180deg,#16324a,#102435);color:#e0f2fe;border:1px solid #33506a;box-shadow:0 12px 24px rgba(8,23,37,.22), inset 0 1px 0 rgba(255,255,255,.05);}
+  .env-action-btn.secondary:hover{border-color:#60a5fa;}
+  .env-action-btn.green{background:linear-gradient(135deg,#22c55e,#15803d);color:#04140c;box-shadow:0 12px 24px rgba(21,128,61,.24), inset 0 1px 0 rgba(255,255,255,.18);}
+  .env-refresh-status{margin-top:12px;color:#9fb4cc;font-size:13px;line-height:1.55;}
+  .env-refresh-status strong{color:#f8fafc;}
+  .envx-domain-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:14px;}
+  .envx-domain-toolbar-copy{color:#9fb4cc;font-size:12.5px;line-height:1.55;max-width:640px;}
+  .envx-domain-search{width:260px;max-width:100%;box-sizing:border-box;background:#0b1626;color:#f8fafc;border:1px solid #2e4a64;border-radius:12px;padding:10px 14px;font-size:13px;}
+  .envx-domain-search:focus{outline:none;border-color:#38bdf8;box-shadow:0 0 0 3px rgba(56,189,248,.16);}
+  .envx-domain-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;align-items:start;}
+  .envx-domain-card{min-width:0;border-radius:16px;border:1px solid #234159;background:linear-gradient(180deg,rgba(11,22,38,.96),rgba(7,17,31,.92));box-shadow:0 12px 24px rgba(0,0,0,.2);position:relative;overflow:hidden;}
+  .envx-domain-card::before{content:"";position:absolute;inset:0 0 auto 0;height:3px;background:linear-gradient(90deg,#22c55e,#38bdf8);opacity:.9;}
+  .envx-domain-card[open]{box-shadow:0 16px 32px rgba(0,0,0,.3);}
+  .envx-domain-card summary{cursor:pointer;list-style:none;padding:14px 16px;display:flex;flex-direction:column;gap:6px;}
+  .envx-domain-card summary::-webkit-details-marker{display:none;}
+  .envx-domain-kicker{font-size:10.5px;font-weight:900;letter-spacing:.09em;text-transform:uppercase;color:#8fd8ff;display:flex;align-items:center;justify-content:space-between;gap:8px;}
+  .envx-domain-chevron{color:#5c7a96;font-size:11px;transition:transform .16s ease;}
+  .envx-domain-card[open] .envx-domain-chevron{transform:rotate(90deg);}
+  .envx-domain-title{font-family:"Consolas","SFMono-Regular",Menlo,monospace;font-weight:800;color:#f5f9ff;font-size:15px;overflow-wrap:anywhere;}
+  .envx-domain-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px;}
+  .envx-domain-body{padding:0 16px 16px;border-top:1px solid rgba(36,64,88,.7);margin-top:2px;}
+  .envx-domain-body .env-sublist{padding-top:12px;}
+  @media (max-width:1100px){.envx-status-board{grid-template-columns:1fr 1fr;}}
+  @media (max-width:620px){.envx-status-board{grid-template-columns:1fr;} .envx-hero-title-row{flex-direction:column;align-items:flex-start;} .envx-domain-toolbar{flex-direction:column;align-items:stretch;} .envx-domain-search{width:100%;}}
+</style>
+"""
+
+
 def _environment_page_body() -> str:
     profile = _load_environment_profile_payload()
     if not profile:
@@ -16815,28 +18447,28 @@ def _environment_page_body() -> str:
         if _running_in_container():
             return f"""
 <div class=\"card\">
-  <style>
-    .env-work-panel{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px;margin:12px 0;}}
-    .env-actions{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px;}}
-    .env-action-btn{{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 16px;border-radius:14px;border:1px solid #33506a;background:linear-gradient(180deg,#16324a,#102435);color:#e0f2fe;font-size:13px;font-weight:800;cursor:pointer;box-shadow:0 12px 24px rgba(8,23,37,.22), inset 0 1px 0 rgba(255,255,255,.05);transition:transform .16s ease, filter .16s ease, border-color .16s ease;}}
-    .env-action-btn:hover{{transform:translateY(-1px);filter:brightness(1.04);border-color:#60a5fa;}}
-    .env-action-btn:disabled{{cursor:not-allowed;opacity:.6;transform:none;filter:none;}}
-    .env-action-btn.green{{border-color:#1f7a44;background:linear-gradient(180deg,#22c55e,#15803d);color:#04140c;box-shadow:0 12px 24px rgba(21,128,61,.22), inset 0 1px 0 rgba(255,255,255,.16);}}
-    .env-action-btn.green:hover{{border-color:#4ade80;filter:brightness(1.03);}}
-    .env-refresh-status{{margin-top:10px;color:#9fb4cc;font-size:13px;line-height:1.55;}}
-  </style>
-  <h1>Data Domains</h1>
-  <p class=\"muted\">Container deployments do not expose Data Domains until Splunk MCP has been validated and the initial environment profile has finished building.</p>
-  <p>Current profile path: <code>{html.escape(str(ENV_PROFILE_PATH.relative_to(PROJECT_ROOT)))}</code></p>
-  <p>Next step: open <a href=\"/configure\">Configuration</a>, validate the Splunk MCP connection, then wait for the first environment profile build to complete.</p>
-  <div class=\"env-work-panel\">
+  {_ENV_PAGE_STYLE}
+  <div class=\"envx-shell\">
+  <div class=\"envx-hero\">
+    <p class=\"envx-kicker\">Data Domains</p>
+    <div class=\"envx-hero-title-row\">
+      <h1>Understand Your Hunt Surface</h1>
+    </div>
+    <p class=\"muted\">Container deployments do not expose Data Domains until Splunk MCP has been validated and the initial environment profile has finished building.</p>
+  </div>
+  <div class=\"envx-section-card\">
+    <p>Current profile path: <code>{html.escape(str(ENV_PROFILE_PATH.relative_to(PROJECT_ROOT)))}</code></p>
+    <p style=\"margin-bottom:0;\">Next step: open <a href=\"/configure\">Configuration</a>, validate the Splunk MCP connection, then wait for the first environment profile build to complete.</p>
+  </div>
+  <div class=\"envx-section-card\">
     <strong>Fresh Start Controls</strong>
-    <div class=\"env-summary-copy\" style=\"margin-top:6px;\">Need to rebuild Data Domains from scratch for this new system? Use the green button below after validating the runtime.</div>
+    <div class=\"env-summary-copy\">Need to rebuild Data Domains from scratch for this new system? Use the green button below after validating the runtime.</div>
     <div class=\"env-actions\">
       <button id=\"env-wipe-refresh-btn\" class=\"env-action-btn green\" type=\"button\">Wipe And Refresh</button>
       <span id=\"env-refresh-inline-status\" class=\"badge\">state={html.escape(str(refresh_meta.get('state', 'pending')))}</span>
     </div>
     <div id=\"env-refresh-inline-detail\" class=\"env-refresh-status\"><strong>Status:</strong> {html.escape(str(refresh_meta.get('detail', 'Ready to refresh Data Domains.')))}</div>
+  </div>
   </div>
   <script>
     (() => {{
@@ -16867,16 +18499,39 @@ def _environment_page_body() -> str:
 """
         return f"""
 <div class=\"card\">
-  <h1>Data Domains</h1>
-  <p class=\"muted\">Environment profile is missing or unreadable.</p>
-  <p>Expected file: <code>{html.escape(str(ENV_PROFILE_PATH.relative_to(PROJECT_ROOT)))}</code></p>
-  <p>Build it with:</p>
-  <pre>make env-profile-refresh</pre>
+  {_ENV_PAGE_STYLE}
+  <div class=\"envx-shell\">
+  <div class=\"envx-hero\">
+    <p class=\"envx-kicker\">Data Domains</p>
+    <div class=\"envx-hero-title-row\">
+      <h1>Understand Your Hunt Surface</h1>
+    </div>
+    <p class=\"muted\">Environment profile is missing or unreadable.</p>
+  </div>
+  <div class=\"envx-section-card\">
+    <p>Expected file: <code>{html.escape(str(ENV_PROFILE_PATH.relative_to(PROJECT_ROOT)))}</code></p>
+    <p>Build it with:</p>
+    <pre>make env-profile-refresh</pre>
+  </div>
+  </div>
 </div>
 """
 
     timestamp = str(profile.get("timestamp_utc", "unknown"))
     refresh_meta = _environment_profile_refresh_status()
+    maintenance = (
+        refresh_meta.get("maintenance", {})
+        if isinstance(refresh_meta.get("maintenance"), dict)
+        else {}
+    )
+    profile_age = maintenance.get("profile_age_minutes")
+    profile_freshness = "stale" if maintenance.get("profile_stale") else "fresh"
+    rag_freshness = (
+        "stale"
+        if maintenance.get("offline_docs_rag_stale")
+        else ("fresh" if maintenance.get("offline_docs_rag_available") else "unavailable")
+    )
+    next_refresh_due = str(maintenance.get("next_refresh_due_utc", "") or "unknown")
     counts = profile.get("counts", {}) if isinstance(profile.get("counts"), dict) else {}
     index_count = counts.get("index_count", 0)
     sourcetype_count = counts.get("sourcetype_count", 0)
@@ -17011,84 +18666,124 @@ def _environment_page_body() -> str:
             details = "".join(sourcetype_cards) if sourcetype_cards else "<p class=\"muted\">No sourcetypes discovered.</p>"
             if error:
                 details += f"<p class=\"kv\"><span class=\"badge\">metadata_error</span> {html.escape(error)}</p>"
+            total_events = sum(
+                int(v) for v in st_counts.values() if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit())
+            ) if isinstance(st_counts, dict) else 0
+            event_badge = f"<span class=\"badge\">events≈{total_events:,}</span>" if total_events else ""
             cards.append(
-                "<details class=\"env-card\">"
+                f"<details class=\"envx-domain-card\" data-index-name=\"{html.escape(idx.lower())}\">"
                 "<summary>"
-                f"<span class=\"env-title\">index={html.escape(idx)}</span>"
+                "<span class=\"envx-domain-kicker\">Index<span class=\"envx-domain-chevron\">▸</span></span>"
+                f"<span class=\"envx-domain-title\">{html.escape(idx)}</span>"
+                "<span class=\"envx-domain-meta\">"
                 f"<span class=\"badge\">sourcetypes={len(sourcetypes)}</span>"
+                f"{event_badge}"
+                "</span>"
                 "</summary>"
-                "<div class=\"env-body\">"
+                "<div class=\"envx-domain-body\">"
                 f"<div class=\"env-sublist\">{details}</div>"
                 "</div>"
                 "</details>"
             )
-        return "".join(cards) if cards else "<div class=\"env-card\"><div class=\"env-body\"><p class=\"muted\">No index rows available.</p></div></div>"
+        return "".join(cards) if cards else "<div class=\"envx-domain-card\"><div class=\"envx-domain-body\"><p class=\"muted\">No index rows available.</p></div></div>"
 
     cards_html = _render_index_cards(indexes)
 
     profile_json = html.escape(json.dumps(profile, indent=2))
+    auto_refresh_enabled = bool(maintenance.get("auto_refresh_enabled", True))
+    refresh_interval_minutes = maintenance.get("refresh_interval_minutes", 60)
+    if refresh_interval_minutes == 1440:
+        interval_label = "once a day"
+    elif refresh_interval_minutes == 240:
+        interval_label = "every 4 hours"
+    else:
+        interval_label = f"every {html.escape(str(refresh_interval_minutes))} min"
+    scheduler_class = "on" if auto_refresh_enabled else "off"
+    scheduler_text = f"Auto-refresh {interval_label}" if auto_refresh_enabled else "Auto-refresh off"
+    freshness_class = "stale" if profile_freshness == "stale" else "fresh"
     return f"""
 <div class=\"card\">
-  <style>
-    .env-summary-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0;}}
-    .env-summary-card{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px;}}
-    .env-summary-title{{font-size:12px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;margin-bottom:6px;}}
-    .env-summary-value{{font-size:18px;font-weight:900;color:#f8fafc;}}
-    .env-summary-copy{{margin-top:4px;color:#9fb4cc;font-size:12px;line-height:1.45;}}
-    .env-work-panel{{border:1px solid #27415a;border-radius:14px;background:#071523;padding:14px;margin:12px 0;}}
-    .env-actions{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px;}}
-    .env-action-btn{{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 16px;border-radius:14px;border:1px solid #33506a;background:linear-gradient(180deg,#16324a,#102435);color:#e0f2fe;font-size:13px;font-weight:800;cursor:pointer;box-shadow:0 12px 24px rgba(8,23,37,.22), inset 0 1px 0 rgba(255,255,255,.05);transition:transform .16s ease, filter .16s ease, border-color .16s ease;}}
-    .env-action-btn:hover{{transform:translateY(-1px);filter:brightness(1.04);border-color:#60a5fa;}}
-    .env-action-btn:disabled{{cursor:not-allowed;opacity:.6;transform:none;filter:none;}}
-    .env-action-btn.green{{border-color:#1f7a44;background:linear-gradient(180deg,#22c55e,#15803d);color:#04140c;box-shadow:0 12px 24px rgba(21,128,61,.22), inset 0 1px 0 rgba(255,255,255,.16);}}
-    .env-action-btn.green:hover{{border-color:#4ade80;filter:brightness(1.03);}}
-    .env-refresh-status{{margin-top:10px;color:#9fb4cc;font-size:13px;line-height:1.55;}}
-    .env-refresh-status strong{{color:#f8fafc;}}
-    @media (max-width:900px){{.env-summary-grid{{grid-template-columns:1fr 1fr;}}}}
-    @media (max-width:620px){{.env-summary-grid{{grid-template-columns:1fr;}}}}
-  </style>
-  <h1>Data Domains</h1>
-  <p class=\"muted\">Use this page to understand what telemetry is available for hunting in this environment: which indexes exist, which sourcetypes are present, and which fields have enough signal to support grounded SPL.</p>
-  <div class=\"env-summary-grid\">
-    <div class=\"env-summary-card\"><div class=\"env-summary-title\">Current Coverage</div><div class=\"env-summary-value\">{html.escape(str(index_count))}</div><div class=\"env-summary-copy\">Indexes currently represented in the environment profile.</div></div>
-    <div class=\"env-summary-card\"><div class=\"env-summary-title\">Source Variety</div><div class=\"env-summary-value\">{html.escape(str(sourcetype_count))}</div><div class=\"env-summary-copy\">Sourcetypes available for planning and grounding.</div></div>
-    <div class=\"env-summary-card\"><div class=\"env-summary-title\">Field Fit</div><div class=\"env-summary-value\">{html.escape(str(counts.get('field_inventory_sourcetypes', 0)))}</div><div class=\"env-summary-copy\">Sourcetypes with field inventory captured for higher-confidence SPL.</div></div>
-    <div class=\"env-summary-card\"><div class=\"env-summary-title\">Time Window</div><div class=\"env-summary-value\">{html.escape(earliest)}</div><div class=\"env-summary-copy\">Profile window ending at {html.escape(latest)}.</div></div>
+  {_ENV_PAGE_STYLE}
+  <div class=\"envx-shell\">
+  <div class=\"envx-hero\">
+    <p class=\"envx-kicker\">Data Domains</p>
+    <div class=\"envx-hero-title-row\">
+      <h1>Understand Your Hunt Surface</h1>
+      <span class=\"envx-scheduler-badge {scheduler_class}\"><span class=\"envx-dot\"></span>{html.escape(scheduler_text)}</span>
+    </div>
+    <p class=\"muted\">See what telemetry is available for hunting in this environment: which indexes exist, which sourcetypes are present, and which fields have enough signal to support grounded SPL.</p>
   </div>
-  <div class=\"env-work-panel\"><strong>How to use this page:</strong> Start here when you want to know whether the environment actually has the telemetry needed for a hunt. The detailed index and sourcetype cards below are the proof surface. Most users can ignore maintenance internals unless a refresh is still catching up.</div>
-  <div class=\"env-work-panel\">
-    <strong>Fresh Start Controls</strong>
-    <div class=\"env-summary-copy\" style=\"margin-top:6px;\">When you connect A.G.E.N.T. Smith to a new system, use <strong>Wipe And Refresh</strong> to clear the current Data Domains profile and rebuild it from scratch against the new environment.</div>
+  <div class=\"envx-status-board\">
+    <div class=\"envx-stat-card\"><div class=\"envx-stat-title\">Current Coverage</div><div class=\"envx-stat-value\">{html.escape(str(index_count))}</div><div class=\"envx-stat-copy\">Indexes currently represented in the environment profile.</div></div>
+    <div class=\"envx-stat-card\"><div class=\"envx-stat-title\">Source Variety</div><div class=\"envx-stat-value\">{html.escape(str(sourcetype_count))}</div><div class=\"envx-stat-copy\">Sourcetypes available for planning and grounding.</div></div>
+    <div class=\"envx-stat-card\"><div class=\"envx-stat-title\">Field Fit</div><div class=\"envx-stat-value\">{html.escape(str(counts.get('field_inventory_sourcetypes', 0)))}</div><div class=\"envx-stat-copy\">Sourcetypes with field inventory captured for higher-confidence SPL.</div></div>
+    <div class=\"envx-stat-card\"><div class=\"envx-stat-title\">Time Window</div><div class=\"envx-stat-value\">{html.escape(earliest)}</div><div class=\"envx-stat-copy\">Profile window ending at {html.escape(latest)}.</div></div>
+  </div>
+  <div class=\"envx-section-card\">
+    <div class=\"envx-section-head\">
+      <h3 class=\"envx-section-title\">Refresh Controls</h3>
+      <span class=\"envx-dot-badge {freshness_class}\"><span class=\"envx-dot\"></span>profile {html.escape(profile_freshness)} · age {html.escape(str(profile_age if profile_age is not None else 'unknown'))}m</span>
+    </div>
+    <p class=\"env-summary-copy\">When you connect A.G.E.N.T. Smith to a new system, use <strong>Wipe And Refresh</strong> to clear the current Data Domains profile and rebuild it from scratch against the new environment. Change the auto-refresh cadence on the <a href=\"/configure#ground\">Configure page</a>.</p>
     <div class=\"env-actions\">
       <button id=\"env-refresh-btn\" class=\"env-action-btn\" type=\"button\">Refresh Data Domains</button>
-      <button id=\"env-wipe-refresh-btn\" class=\"env-action-btn green\" type=\"button\">Wipe And Refresh</button>
+      <button id=\"env-wipe-refresh-btn\" class=\"env-action-btn secondary\" type=\"button\">Wipe And Refresh</button>
       <span id=\"env-refresh-inline-status\" class=\"badge\">state={html.escape(str(refresh_meta.get('state', 'pending')))}</span>
     </div>
     <div id=\"env-refresh-inline-detail\" class=\"env-refresh-status\"><strong>Status:</strong> {html.escape(str(refresh_meta.get('detail', 'Ready to refresh Data Domains.')))}</div>
-  </div>
-  <div class=\"statline\">
-    <span class=\"badge\">indexes={html.escape(str(index_count))}</span>
-    <span class=\"badge\">sourcetypes={html.escape(str(sourcetype_count))}</span>
-    <span class=\"badge\">field_inventory={html.escape(str(counts.get('field_inventory_sourcetypes', 0)))}</span>
-    <span class=\"badge\">window={html.escape(earliest)} -> {html.escape(latest)}</span>
-    <span class=\"badge\">timestamp={html.escape(timestamp)}</span>
-  </div>
-  <p class=\"muted\">The cards below show the hunt coverage the platform currently knows about. Maintenance refreshes happen in the background to keep the profile current; most operators only need the two status lines below if they are checking whether a refresh is still catching up.</p>
-  <div class=\"env-card\" style=\"margin-bottom:12px;\">
-    <div class=\"env-body\">
-      <p class=\"muted\" style=\"margin:0 0 6px;\"><strong>Most recently refreshed:</strong> <code>{html.escape(_friendly_sourcetype_label(field_meta.get('last_refreshed_sourcetype', '')))}</code></p>
-      <p class=\"muted\" style=\"margin:0;\"><strong>Queued next:</strong> <code>{html.escape(_friendly_sourcetype_label(field_meta.get('next_sourcetype', '')))}</code></p>
-    </div>
-  </div>
-  <p>Maintenance commands:</p>
-  <pre>make env-profile-refresh
+    <details class=\"envx-diagnostics\">
+      <summary>Show refresh diagnostics</summary>
+      <div class=\"envx-diagnostics-body\">
+        <p class=\"muted\" style=\"margin:0 0 6px;\"><strong>Most recently refreshed:</strong> <code>{html.escape(_friendly_sourcetype_label(field_meta.get('last_refreshed_sourcetype', '')))}</code></p>
+        <p class=\"muted\" style=\"margin:0 0 10px;\"><strong>Queued next:</strong> <code>{html.escape(_friendly_sourcetype_label(field_meta.get('next_sourcetype', '')))}</code></p>
+        <div class=\"envx-meta-row\">
+          <span class=\"badge\">indexes={html.escape(str(index_count))}</span>
+          <span class=\"badge\">sourcetypes={html.escape(str(sourcetype_count))}</span>
+          <span class=\"badge\">field_inventory={html.escape(str(counts.get('field_inventory_sourcetypes', 0)))}</span>
+          <span class=\"badge\">window={html.escape(earliest)} -> {html.escape(latest)}</span>
+          <span class=\"badge\">timestamp={html.escape(timestamp)}</span>
+          <span class=\"badge\">offline_docs_rag={html.escape(rag_freshness)}</span>
+          <span class=\"badge\">next_refresh_due={html.escape(next_refresh_due)}</span>
+        </div>
+        <p style=\"margin:12px 0 4px;\">Maintenance commands:</p>
+        <pre style=\"margin:0;\">make env-profile-refresh
 make env-profile-check</pre>
-  <h2>All Domains (Global)</h2>
-  <div class=\"env-list\">{cards_html}</div>
-  <details class=\"guided\" style=\"margin-top:12px;\">
-    <summary>Show Raw Environment Profile JSON</summary>
-    <pre>{profile_json}</pre>
-  </details>
+      </div>
+    </details>
+  </div>
+  <div class=\"envx-section-card\">
+    <div class=\"envx-domain-toolbar\">
+      <div>
+        <h3 class=\"envx-section-title\">All Domains (Global)</h3>
+        <p class=\"envx-domain-toolbar-copy\">The cards below show the hunt coverage the platform currently knows about. Maintenance refreshes happen in the background to keep this current.</p>
+      </div>
+      <input id=\"envx-domain-filter\" class=\"envx-domain-search\" type=\"search\" placeholder=\"Filter indexes…\" autocomplete=\"off\" />
+    </div>
+    <div id=\"envx-domain-grid\" class=\"envx-domain-grid\">{cards_html}</div>
+    <p id=\"envx-domain-empty\" class=\"muted\" style=\"display:none;margin-top:10px;\">No indexes match that filter.</p>
+    <details class=\"envx-raw-json\">
+      <summary>Show Raw Environment Profile JSON</summary>
+      <pre>{profile_json}</pre>
+    </details>
+  </div>
+  </div>
+  <script>
+    (() => {{
+      const filterInput = document.getElementById('envx-domain-filter');
+      const grid = document.getElementById('envx-domain-grid');
+      const emptyNote = document.getElementById('envx-domain-empty');
+      filterInput?.addEventListener('input', () => {{
+        const term = filterInput.value.trim().toLowerCase();
+        let visible = 0;
+        grid?.querySelectorAll('.envx-domain-card').forEach((card) => {{
+          const match = !term || String(card.dataset.indexName || '').includes(term);
+          card.style.display = match ? '' : 'none';
+          if (match) visible += 1;
+        }});
+        if (emptyNote) emptyNote.style.display = visible === 0 ? '' : 'none';
+      }});
+    }})();
+  </script>
   <script>
     (() => {{
       const statusBadge = document.getElementById('env-refresh-inline-status');
@@ -18012,6 +19707,33 @@ def _configure_page_body() -> str:
           </div>
         </div>
         <div class="cfg-section-card accent-ground" style="margin-top:14px;">
+          <div class="cfg-personalize-status">
+            <div>
+              <h3 class="cfg-section-title" style="margin-top:0;">Keep Data Domains Fresh</h3>
+              <p class="cfg-help">Automatically re-run the refresh above on a schedule so hunts always reflect current indexes, sourcetypes, and fields.</p>
+            </div>
+          </div>
+          <div class="toggle-row">
+            <label class="switch" aria-label="Auto-refresh Data Domains toggle">
+              <input id="cfg-env-auto-refresh-enabled" type="checkbox" checked />
+              <span class="slider"></span>
+            </label>
+            <span id="cfg-env-auto-refresh-label" class="toggle-copy">Auto-refresh on</span>
+          </div>
+          <div id="cfg-env-auto-refresh-interval-row" class="cfg-row" style="margin-top:10px;">
+            <label for="cfg-env-auto-refresh-interval">Refresh every</label>
+            <div class="cfg-example">Choose how often Data Domains rebuilds itself in the background.</div>
+            <div class="cfg-select-wrap">
+              <select id="cfg-env-auto-refresh-interval">
+                <option value="60">60 minutes</option>
+                <option value="240">Every 4 hours</option>
+                <option value="1440">Once a day</option>
+              </select>
+            </div>
+          </div>
+          <div class="cfg-note">Turn this off to only refresh Data Domains manually with the button above.</div>
+        </div>
+        <div class="cfg-section-card accent-ground" style="margin-top:14px;">
           <h3 class="cfg-section-title" style="margin-top:0;">Index Alias Mapping</h3>
           <p class="cfg-help">Map legacy or logical index names (for example <code>windows</code>, <code>main</code>) to the canonical indexes discovered in your Splunk environment. Aliases apply immediately to SPL generation and validation.</p>
           <label class="cfg-model-label" for="cfg-index-alias-json">Alias map (JSON object)</label>
@@ -18098,6 +19820,16 @@ def _configure_page_body() -> str:
   function cfgReadValue(id){
     const el = cfg$(id);
     return el ? String(el.value || '').trim() : '';
+  }
+  function cfgUpdateAutoRefreshUi(){
+    const box = cfg$('cfg-env-auto-refresh-enabled');
+    const label = cfg$('cfg-env-auto-refresh-label');
+    const intervalRow = cfg$('cfg-env-auto-refresh-interval-row');
+    const intervalSelect = cfg$('cfg-env-auto-refresh-interval');
+    const enabled = Boolean(box && box.checked);
+    if(label){ label.textContent = enabled ? 'Auto-refresh on' : 'Auto-refresh off'; }
+    if(intervalRow){ intervalRow.style.opacity = enabled ? '1' : '.5'; }
+    if(intervalSelect){ intervalSelect.disabled = !enabled; }
   }
   function cfgEscape(v){return String(v ?? '');}
   function cfgTruncateText(text, maxLen){
@@ -18197,12 +19929,19 @@ def _configure_page_body() -> str:
     }
     el.innerHTML = pills.join('<span class="cfg-lane-health-sep" aria-hidden="true">·</span>');
   }
-  function cfgSetStatus(text){
+  function cfgSetStatus(text, kind){
     const msg = String(text ?? '');
+    const decorated = kind === 'ok' ? `\u2713 ${msg}` : msg;
     const legacy = cfg$('cfg-status');
-    if(legacy){ legacy.textContent = msg; }
+    if(legacy){ legacy.textContent = decorated; }
     const sticky = cfg$('cfg-sticky-status');
-    if(sticky){ sticky.textContent = msg; }
+    if(sticky){
+      sticky.textContent = decorated;
+      if(kind === 'ok' || kind === 'warn' || kind === 'error'){
+        sticky.classList.remove('ok','warn','error');
+        sticky.classList.add(kind);
+      }
+    }
   }
   let cfgLastValidation = null;
   let cfgLastExpectedModels = [];
@@ -18905,6 +20644,10 @@ def _configure_page_body() -> str:
     cfgSetValue('cfg-auth-enabled', payload.SOC_UI_AUTH_ENABLED || '1');
     cfgSetValue('cfg-session-timeout', payload.SOC_UI_SESSION_TIMEOUT_MIN || '60');
     cfgSetValue('cfg-session-remember-timeout', payload.SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN || '480');
+    const autoRefreshBox = cfg$('cfg-env-auto-refresh-enabled');
+    if(autoRefreshBox){ autoRefreshBox.checked = String(payload.ENV_PROFILE_AUTO_REFRESH_ENABLED ?? '1') !== '0'; }
+    cfgSetValue('cfg-env-auto-refresh-interval', payload.ENV_PROFILE_REFRESH_INTERVAL_MINUTES || '60');
+    cfgUpdateAutoRefreshUi();
     cfgSetValue('cfg-edge-enabled', payload.EDGE_LLM_ENABLED || '0');
     cfgSetValue('cfg-edge-host', payload.EDGE_LLM_HOST || '');
     cfgSetValue('cfg-edge-model', payload.EDGE_LLM_MODEL || '');
@@ -19146,6 +20889,8 @@ def _configure_page_body() -> str:
       SOC_UI_AUTH_ENABLED: cfgReadValue('cfg-auth-enabled'),
       SOC_UI_SESSION_TIMEOUT_MIN: cfgReadValue('cfg-session-timeout'),
       SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN: cfgReadValue('cfg-session-remember-timeout'),
+      ENV_PROFILE_AUTO_REFRESH_ENABLED: (cfg$('cfg-env-auto-refresh-enabled')?.checked) ? '1' : '0',
+      ENV_PROFILE_REFRESH_INTERVAL_MINUTES: cfgReadValue('cfg-env-auto-refresh-interval') || '60',
       EDGE_LLM_ENABLED: cfgReadValue('cfg-edge-enabled'),
       EDGE_LLM_HOST: cfgReadValue('cfg-edge-host'),
       EDGE_LLM_MODEL: cfgReadValue('cfg-edge-model'),
@@ -19370,11 +21115,12 @@ def _configure_page_body() -> str:
     if(typeof payload.rows_returned !== 'undefined'){ extras.push(`rows_returned: ${payload.rows_returned}`); }
     if(payload.http_status){ extras.push(`http_status: ${payload.http_status}`); }
     if(payload.raw_excerpt){ extras.push(`excerpt: ${payload.raw_excerpt}`); }
+    const badgeText = status === 'ok' ? `\u2713 ${status}` : status;
     cfg$('cfg-mcp-probe-results').innerHTML = `
       <div class="cfg-check ${cfgEscape(status)}">
         <div class="cfg-check-head">
           <div class="cfg-check-name"><span class="cfg-check-dot"></span>mcp_query_probe</div>
-          <span class="cfg-badge">${cfgEscape(status)}</span>
+          <span class="cfg-badge">${cfgEscape(badgeText)}</span>
         </div>
         <div class="cfg-check-detail">${cfgEscape(payload.detail || 'No MCP probe result available.')}</div>
         ${extras.length ? `<div class="cfg-check-meta">${cfgEscape(extras.join('\\n'))}</div>` : ''}
@@ -19475,7 +21221,7 @@ def _configure_page_body() -> str:
     const data = await resp.json();
     if(!resp.ok){
       cfgApplyPayload(draft, {skipToken: tokenSeqAtStart !== cfgTokenEditSeq});
-      cfgSetStatus(data.error || `validation failed (${resp.status})`);
+      cfgSetStatus(data.error || `validation failed (${resp.status})`, 'error');
       cfg$('cfg-edge-status').textContent = data.error || `edge validation failed (${resp.status})`;
       return;
     }
@@ -19535,12 +21281,13 @@ def _configure_page_body() -> str:
         status: 'error',
         detail: data.error || `MCP probe failed (${resp.status})`
       });
-      cfgSetStatus(data.error || `MCP probe failed (${resp.status})`);
+      cfgSetStatus(data.error || `MCP probe failed (${resp.status})`, 'error');
       return;
     }
     cfgApplyPayload(draft, {skipToken: tokenSeqAtStart !== cfgTokenEditSeq});
     cfgRenderMcpProbe(data);
-    cfgSetStatus(data.detail || 'MCP probe complete.');
+    const probeKind = String(data.status || '') === 'ok' ? 'ok' : (String(data.status || '') === 'warn' ? 'warn' : 'error');
+    cfgSetStatus(data.detail || 'MCP probe complete.', probeKind);
   }
   async function cfgSave(mode='full'){
     const edgeOnly = mode === 'edge';
@@ -19564,7 +21311,7 @@ def _configure_page_body() -> str:
       const validationData = await validationResp.json();
       if(!validationResp.ok){
         const detail = validationData.error || `pre-save validation failed (${validationResp.status})`;
-        cfgSetStatus(detail);
+        cfgSetStatus(detail, 'error');
         if(edgeOnly){
           cfg$('cfg-edge-status').textContent = detail;
         }
@@ -19584,14 +21331,14 @@ def _configure_page_body() -> str:
       const data = await resp.json();
       if(!resp.ok){
         const detail = data.error || `save failed (${resp.status})`;
-        cfgSetStatus(detail);
+        cfgSetStatus(detail, 'error');
         if(edgeOnly){
           cfg$('cfg-edge-status').textContent = detail;
         }
         return;
       }
       const savedStatus = edgeOnly ? 'Saved edge helper settings to config/ui.env.' : 'Saved to config/ui.env.';
-      cfgSetStatus(savedStatus);
+      cfgSetStatus(savedStatus, 'ok');
       if(edgeOnly){
         cfg$('cfg-edge-status').textContent = 'Edge helper saved to config/ui.env.';
       }
@@ -19599,18 +21346,18 @@ def _configure_page_body() -> str:
         cfgRender(data);
       } catch (renderErr) {
         console.error('cfgRender failed after save', renderErr);
-        cfgSetStatus(`${savedStatus} UI refresh was partial; reload if fields look stale.`);
+        cfgSetStatus(`${savedStatus} UI refresh was partial; reload if fields look stale.`, 'warn');
       }
       try {
         await cfgValidate();
       } catch (validateErr) {
         console.error('cfgValidate failed after save', validateErr);
-        cfgSetStatus(`${savedStatus} Validation refresh failed; use Validate to retry.`);
+        cfgSetStatus(`${savedStatus} Validation refresh failed; use Validate to retry.`, 'warn');
       }
     } catch (err) {
       console.error('cfgSave failed', err);
       const detail = err?.message ? `save failed: ${err.message}` : 'save failed';
-      cfgSetStatus(detail);
+      cfgSetStatus(detail, 'error');
       if(edgeOnly){
         cfg$('cfg-edge-status').textContent = detail;
       }
@@ -19661,6 +21408,7 @@ def _configure_page_body() -> str:
     cfg$('cfg-env-refresh-status').textContent = data.detail || 'Data Domains refresh started.';
     await cfgPollEnvRefresh();
   };
+  cfg$('cfg-env-auto-refresh-enabled')?.addEventListener('change', cfgUpdateAutoRefreshUi);
   if(cfg$('cfg-env-wipe-refresh')){
     cfg$('cfg-env-wipe-refresh').onclick = async () => {
       const confirmed = window.confirm('Wipe the current Data Domains profile and rebuild it from scratch for this system? This clears the existing profile artifacts before refreshing.');
@@ -19925,18 +21673,28 @@ def _ollama_ops_page_body() -> str:
       return n >= 1024 ? `${(n / 1024).toFixed(1)} GiB` : `${Math.round(n)} MiB`;
     }
 
+    function opsEsc(value){
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
     function opsPushHistory(gpuRow){
       if (!gpuRow) return;
       const total = Number(gpuRow.memory_total_mib || 0);
       const used = Number(gpuRow.memory_used_mib || 0);
       const vramPct = total > 0 ? (used / total) * 100 : null;
-      const gpuUtil = Number(gpuRow.utilization_gpu_pct);
+      const rawGpuUtil = gpuRow.utilization_gpu_pct;
+      const gpuUtil = rawGpuUtil === null || rawGpuUtil === undefined ? null : Number(rawGpuUtil);
       opsHistory.push({
         t: Date.now(),
         vramPct: Number.isFinite(vramPct) ? vramPct : null,
         vramUsed: Number.isFinite(used) ? used : null,
         vramTotal: Number.isFinite(total) ? total : null,
-        gpuUtil: Number.isFinite(gpuUtil) ? gpuUtil : null,
+        gpuUtil: gpuUtil !== null && Number.isFinite(gpuUtil) ? gpuUtil : null,
       });
       while (opsHistory.length > OPS_HISTORY_MAX) opsHistory.shift();
     }
@@ -20063,17 +21821,21 @@ def _ollama_ops_page_body() -> str:
       const gpu = payload?.gpu || {};
       const logSource = payload?.log_source || {};
       const cards = [];
-      cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">Ollama</div><div class="ops-metric-value">${ollama.connected ? 'Connected' : 'Offline'}</div><div class="ops-metric-copy">${ollama.host || 'OLLAMA_HOST not set'}${ollama.version ? ` · v${ollama.version}` : ''}</div></div>`);
+      const ollamaHost = opsEsc(ollama.host || 'OLLAMA_HOST not set');
+      const ollamaVersion = ollama.version ? ` · v${opsEsc(ollama.version)}` : '';
+      cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">Ollama</div><div class="ops-metric-value">${ollama.connected ? 'Connected' : 'Offline'}</div><div class="ops-metric-copy">${ollamaHost}${ollamaVersion}</div></div>`);
       const gpuRow = Array.isArray(gpu.gpus) && gpu.gpus.length ? gpu.gpus[0] : null;
       if (gpuRow) {
         const usedPct = gpuRow.memory_total_mib ? Math.round((gpuRow.memory_used_mib / gpuRow.memory_total_mib) * 100) : 0;
-        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">VRAM</div><div class="ops-metric-value">${usedPct}%</div><div class="ops-metric-copy">${opsFmtMiB(gpuRow.memory_used_mib)} / ${opsFmtMiB(gpuRow.memory_total_mib)} · ${gpuRow.name || 'GPU'}</div></div>`);
-        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">GPU Util</div><div class="ops-metric-value">${gpuRow.utilization_gpu_pct ?? 'n/a'}%</div><div class="ops-metric-copy">mem util ${gpuRow.utilization_memory_pct ?? 'n/a'}% · ${gpuRow.temperature_c ?? 'n/a'}°C</div></div>`);
+        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">VRAM</div><div class="ops-metric-value">${usedPct}%</div><div class="ops-metric-copy">${opsFmtMiB(gpuRow.memory_used_mib)} / ${opsFmtMiB(gpuRow.memory_total_mib)} · ${opsEsc(gpuRow.name || 'GPU')}</div></div>`);
+        const gpuUtil = gpuRow.utilization_gpu_pct;
+        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">GPU Util</div><div class="ops-metric-value">${gpuUtil == null ? 'n/a' : `${gpuUtil}%`}</div><div class="ops-metric-copy">mem util ${gpuRow.utilization_memory_pct ?? 'n/a'}% · ${gpuRow.temperature_c ?? 'n/a'}°C</div></div>`);
       } else {
-        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">VRAM</div><div class="ops-metric-value">n/a</div><div class="ops-metric-copy">${gpu.reason || 'nvidia-smi unavailable in this runtime'}</div></div>`);
-        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">GPU Util</div><div class="ops-metric-value">n/a</div><div class="ops-metric-copy">Use host CLI: watch -n 1 nvidia-smi</div></div>`);
+        const gpuReason = opsEsc(gpu.reason || 'nvidia-smi unavailable in this runtime');
+        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">VRAM</div><div class="ops-metric-value">n/a</div><div class="ops-metric-copy">${gpuReason}</div></div>`);
+        cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">GPU Util</div><div class="ops-metric-value">n/a</div><div class="ops-metric-copy">${gpuReason}</div></div>`);
       }
-      cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">Models</div><div class="ops-metric-value">${ollama.models_installed ?? 0}</div><div class="ops-metric-copy">installed · log source ${logSource.mode || 'disabled'}</div></div>`);
+      cards.push(`<div class="ops-metric"><div class="ops-metric-kicker">Models</div><div class="ops-metric-value">${Number(ollama.models_installed || 0)}</div><div class="ops-metric-copy">installed · log source ${opsEsc(logSource.mode || 'disabled')}</div></div>`);
       ops$('ops-metrics').innerHTML = cards.join('');
       opsRenderCharts(gpuRow);
       ops$('ops-status').textContent = ollama.connected
@@ -20082,7 +21844,7 @@ def _ollama_ops_page_body() -> str:
 
       const loaded = Array.isArray(ollama.models_loaded) ? ollama.models_loaded : [];
       ops$('ops-loaded').innerHTML = loaded.length
-        ? loaded.map((row) => `<div class="ops-loaded-item">${row.name || 'model'} · vram=${row.size_vram ?? 'n/a'} · size=${row.size ?? 'n/a'}</div>`).join('')
+        ? loaded.map((row) => `<div class="ops-loaded-item">${opsEsc(row.name || 'model')} · vram=${opsEsc(row.size_vram ?? 'n/a')} · size=${opsEsc(row.size ?? 'n/a')}</div>`).join('')
         : '<div class="ops-loaded-item">No models loaded in VRAM yet. Run a prompt in Open WebUI or AGTSmith to load one.</div>';
 
       const hints = logSource.cli_hints || {};
@@ -21112,8 +22874,26 @@ def _learning_page_body() -> str:
 """
 
 
+def _learning_registry_by_id() -> dict[str, dict[str, Any]]:
+    from local_learning import load_learning_registry
+
+    data = load_learning_registry()
+    records = data.get("records", [])
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(records, list):
+        return out
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        record_id = str(row.get("id", "")).strip()
+        if record_id:
+            out[record_id] = row
+    return out
+
+
 def _spl_asset_repository_page_body() -> str:
     summary = learning_registry_summary()
+    registry_by_id = _learning_registry_by_id()
     repository = summary.get("repository", {}) if isinstance(summary, dict) else {}
     active_rows = repository.get("records", []) if isinstance(repository, dict) else []
     active_rows = active_rows if isinstance(active_rows, list) else []
@@ -21175,7 +22955,17 @@ def _spl_asset_repository_page_body() -> str:
             return "pending"
         return "recorded"
 
-    def _asset_row(row: dict[str, Any], state_label: str, row_key: str, actions: bool = False) -> str:
+    def _asset_row(
+        row: dict[str, Any],
+        state_label: str,
+        row_key: str,
+        actions: bool = False,
+        registry_row: dict[str, Any] | None = None,
+    ) -> str:
+        meta = registry_row if isinstance(registry_row, dict) else {}
+        source = str(meta.get("source", "")).strip()
+        source_label = "Analyst saved" if source == "analyst_saved" else "Optimization AI"
+        source_filter = "analyst_saved" if source == "analyst_saved" else "optimization_ai"
         intent = html.escape(str(row.get("intent", "")).strip() or "unknown_intent")
         use_when = html.escape(str(row.get("use_when", "")).strip() or "No use case recorded")
         why = html.escape(str(row.get("why", "")).strip() or str(row.get("reason", "")).strip() or "No rationale recorded")
@@ -21184,6 +22974,9 @@ def _spl_asset_repository_page_body() -> str:
         row_id = html.escape(str(row.get("id", "")).strip())
         updated_at = html.escape(str(row.get("updated_at", "")).strip() or str(row.get("created_at", "")).strip() or "Unknown")
         selection_reason = html.escape(str(row.get("selection_reason", "")).strip().replace("_", " ") or "Awaiting review")
+        supporting_question = html.escape(str(meta.get("supporting_question", "")).strip())
+        saved_by = html.escape(str(meta.get("saved_by", "")).strip())
+        saved_at = html.escape(str(meta.get("saved_at", "")).strip())
         action_html = '<span class="splrepo-row-actions-empty">This asset is already active in runtime.</span>'
         if actions and row_id:
             action_html = (
@@ -21192,8 +22985,25 @@ def _spl_asset_repository_page_body() -> str:
                 f'<button class="learning-item-btn splrepo-action-reject" data-repo-action="reject" data-id="{row_id}">Reject</button>'
                 f'</div>'
             )
+        elif source == "analyst_saved" and row_id:
+            action_html = (
+                f'<div class="splrepo-row-actions">'
+                f'<button class="learning-item-btn" data-repo-action="stale" data-id="{row_id}">Mark stale</button>'
+                f'</div>'
+            )
         tone = _state_tone(state_label)
         preview_label = "Review draft" if actions else "View full SPL"
+        analyst_meta = ""
+        if source == "analyst_saved":
+            analyst_bits = []
+            if supporting_question:
+                analyst_bits.append(f"<strong>Saved question:</strong> {supporting_question}")
+            if saved_by:
+                analyst_bits.append(f"<strong>Saved by:</strong> {saved_by}")
+            if saved_at:
+                analyst_bits.append(f"<strong>Saved at:</strong> {saved_at}")
+            if analyst_bits:
+                analyst_meta = f'<div class="splrepo-detail-copy" style="margin-top:8px;">{"<br>".join(analyst_bits)}</div>'
         detail_extra = (
             f"""
             <section class="splrepo-detail-block splrepo-detail-block-review">
@@ -21204,14 +23014,27 @@ def _spl_asset_repository_page_body() -> str:
             </section>
             """
             if actions
-            else ""
+            else (
+                f"""
+            <section class="splrepo-detail-block">
+              <div class="splrepo-guide-title">Library actions</div>
+              {analyst_meta}
+              <div style="margin-top:12px;">{action_html}</div>
+            </section>
+            """
+                if source == "analyst_saved"
+                else ""
+            )
         )
         return f"""
-        <tr class="splrepo-summary-row" data-asset-summary="{row_key}">
+        <tr class="splrepo-summary-row" data-asset-summary="{row_key}" data-source-filter="{source_filter}">
           <td>
             <div class="splrepo-row-head">
               <div class="splrepo-cell-title">{intent}</div>
-              <span class="splrepo-state-badge {tone}">{html.escape(state_label)}</span>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <span class="splrepo-state-badge {tone}">{html.escape(state_label)}</span>
+                <span class="splrepo-detail-pill">{html.escape(source_label)}</span>
+              </div>
             </div>
             <div class="splrepo-cell-sub">{use_when}</div>
           </td>
@@ -21276,9 +23099,23 @@ def _spl_asset_repository_page_body() -> str:
         """
 
     recent_history = sorted(draft_rows, key=lambda row: str(row.get("updated_at", "") or row.get("created_at", "")), reverse=True)[:8]
-    active_table_rows = "".join(_asset_row(row, "ACTIVE", f"active-{idx}") for idx, row in enumerate(active_rows))
+    active_table_rows = "".join(
+        _asset_row(
+            row,
+            "ACTIVE",
+            f"active-{idx}",
+            registry_row=registry_by_id.get(str(row.get("id", "")).strip(), {}),
+        )
+        for idx, row in enumerate(active_rows)
+    )
     draft_table_rows = "".join(
-        _asset_row(row, str(row.get("status", "")).strip().upper() or "RECORDED", f"draft-{idx}", actions=True)
+        _asset_row(
+            row,
+            str(row.get("status", "")).strip().upper() or "RECORDED",
+            f"draft-{idx}",
+            actions=True,
+            registry_row=registry_by_id.get(str(row.get("id", "")).strip(), {}),
+        )
         for idx, row in enumerate(recent_history)
     )
     repo_path = html.escape(str(summary.get("repository_path", "")).strip() or "Not created yet")
@@ -21547,6 +23384,11 @@ def _spl_asset_repository_page_body() -> str:
             </div>
             <a class="btn-secondary splrepo-top-link" href="/learning">Back to SPL Optimization</a>
           </div>
+          <div class="splrepo-filter-bar" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+            <button type="button" class="btn-secondary splrepo-source-filter active" data-source-filter="all">All</button>
+            <button type="button" class="btn-secondary splrepo-source-filter" data-source-filter="analyst_saved">Analyst saved</button>
+            <button type="button" class="btn-secondary splrepo-source-filter" data-source-filter="optimization_ai">Optimization drafts</button>
+          </div>
           <div class="splrepo-table-wrap">
             <table class="splrepo-table">
               {table_colgroup}
@@ -21650,10 +23492,16 @@ def _spl_asset_repository_page_body() -> str:
         const action = String(btn.getAttribute('data-repo-action') || '').trim();
         const id = String(btn.getAttribute('data-id') || '').trim();
         btn.disabled = true;
-        const resp = await fetch('/api/config/local-learning', {{
+        const endpoint = action === 'stale'
+          ? `/api/saved-queries/${{encodeURIComponent(id)}}/stale`
+          : '/api/config/local-learning';
+        const body = action === 'stale'
+          ? null
+          : JSON.stringify({{action, id}});
+        const resp = await fetch(endpoint, {{
           method:'POST',
-          headers:{{'Content-Type':'application/json'}},
-          body: JSON.stringify({{action, id}})
+          headers: body ? {{'Content-Type':'application/json'}} : undefined,
+          body: body || undefined,
         }});
         const data = await resp.json();
         if(!resp.ok){{
@@ -21664,6 +23512,27 @@ def _spl_asset_repository_page_body() -> str:
         location.reload();
       }};
     }});
+    const initialFilter = new URLSearchParams(window.location.search).get('source') || 'all';
+    function applySplrepoSourceFilter(filterValue) {{
+      const wanted = String(filterValue || 'all').trim().toLowerCase();
+      document.querySelectorAll('.splrepo-source-filter').forEach((chip) => {{
+        chip.classList.toggle('active', String(chip.getAttribute('data-source-filter') || '') === wanted);
+      }});
+      document.querySelectorAll('[data-source-filter]').forEach((row) => {{
+        const source = String(row.getAttribute('data-source-filter') || '').trim().toLowerCase();
+        const show = wanted === 'all' || source === wanted;
+        row.style.display = show ? '' : 'none';
+        const detailKey = String(row.getAttribute('data-asset-summary') || '').trim();
+        if (!show && detailKey) {{
+          const detail = document.querySelector(`[data-asset-detail="${{detailKey}}"]`);
+          if (detail) detail.hidden = true;
+        }}
+      }});
+    }}
+    document.querySelectorAll('.splrepo-source-filter').forEach((chip) => {{
+      chip.onclick = () => applySplrepoSourceFilter(chip.getAttribute('data-source-filter') || 'all');
+    }});
+    applySplrepoSourceFilter(initialFilter);
   </script>
 </div>
 """
@@ -22700,6 +24569,105 @@ def _mcp_page_body() -> str:
       background: #22c55e;
       box-shadow: 0 0 8px rgba(34,197,94,.65);
     }
+    .mcp-metric-time {
+      color: #bae6fd;
+      border-color: #164e63;
+      background: #062430;
+    }
+    .mcp-spl-time-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 0 0 10px;
+      flex-wrap: wrap;
+    }
+    .mcp-spl-time-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .mcp-save-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: rgba(2, 6, 23, .72);
+      backdrop-filter: blur(8px);
+      z-index: 1200;
+    }
+    .mcp-save-modal-backdrop.open { display: flex; }
+    .mcp-save-modal {
+      width: min(560px, 94vw);
+      border: 1px solid #294560;
+      border-radius: 18px;
+      padding: 20px;
+      background: linear-gradient(165deg, #091727, #07111f 58%, #0b1d17);
+      box-shadow: 0 28px 60px rgba(0, 0, 0, .42);
+      display: grid;
+      gap: 12px;
+    }
+    .mcp-save-modal-title {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.15;
+      color: #f8fafc;
+    }
+    .mcp-save-modal-copy {
+      margin: 0;
+      color: #a8bfd7;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    .mcp-save-modal-warning {
+      margin: 0;
+      color: #fcd34d;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .mcp-save-modal-preview {
+      margin: 0;
+      max-height: 180px;
+      overflow: auto;
+      white-space: pre-wrap;
+      background: #020617;
+      border: 1px solid #26435c;
+      border-radius: 10px;
+      padding: 10px;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #dbeafe;
+    }
+    .mcp-save-modal-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .mcp-save-modal-status {
+      color: #93c5fd;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .mcp-time-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid #164e63;
+      background: #062430;
+      color: #bae6fd;
+      font-size: 12px;
+      font-weight: 800;
+      font-family: "Consolas","SFMono-Regular",Menlo,monospace;
+      cursor: help;
+    }
+    .mcp-time-icon { font-size: 12px; }
     .mcp-results-shell {
       border: 1px solid #26435c;
       border-radius: 12px;
@@ -22843,6 +24811,7 @@ def _mcp_page_body() -> str:
               <span id="mcp-intent" class="mcp-metric">intent=n/a</span>
               <span id="mcp-tool" class="mcp-metric">tool=n/a</span>
               <span id="mcp-rows" class="mcp-metric">rows=0</span>
+              <span id="mcp-time-window" class="mcp-metric mcp-metric-time" title="Search time window actually dispatched to Splunk">time=n/a</span>
             </div>
             <div class="mcp-answer-actions">
               <a id="mcp-answer-splunk-link" class="mcp-tool-btn btn-splunk" href="#" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;">View in Splunk</a>
@@ -22865,6 +24834,15 @@ def _mcp_page_body() -> str:
               <button id="mcp-spl-history" class="mcp-tool-btn" type="button">History</button>
               <button id="mcp-spl-copy" class="mcp-tool-btn" type="button">Copy</button>
               <a id="mcp-spl-link" class="mcp-tool-btn btn-splunk" href="#" target="_blank" rel="noopener noreferrer" style="display:none;text-decoration:none;">View in Splunk</a>
+            </div>
+          </div>
+          <div id="mcp-spl-time-row" class="mcp-spl-time-row" hidden>
+            <span id="mcp-spl-time-badge" class="mcp-time-badge" title="This time window is dispatched to Splunk as separate earliest_time/latest_time search parameters -- it is not embedded in the SPL text above.">
+              <span class="mcp-time-icon" aria-hidden="true">&#9201;</span>
+              Time window: <span id="mcp-spl-time-window-value">n/a</span>
+            </span>
+            <div class="mcp-spl-time-actions">
+              <button id="mcp-save-query-btn" class="mcp-tool-btn" type="button" style="display:none;">Save to Library</button>
             </div>
           </div>
           <div id="mcp-spl-shell" class="mcp-spl-shell">
@@ -22973,6 +24951,20 @@ def _mcp_page_body() -> str:
       </div>
     </div>
   </div>
+
+  <div id="mcp-save-query-modal" class="mcp-save-modal-backdrop" aria-hidden="true">
+    <div class="mcp-save-modal" role="dialog" aria-modal="true" aria-labelledby="mcp-save-query-modal-title">
+      <h2 id="mcp-save-query-modal-title" class="mcp-save-modal-title">Save to Query Library?</h2>
+      <p class="mcp-save-modal-copy">This will commit the current question and SPL to the reusable query library for future investigations.</p>
+      <p id="mcp-save-query-zero-rows-note" class="mcp-save-modal-warning" hidden>This query returned no rows. It will still be saved if you confirm.</p>
+      <pre id="mcp-save-query-preview" class="mcp-save-modal-preview"></pre>
+      <div class="mcp-save-modal-actions">
+        <button id="mcp-save-query-cancel" class="mcp-tool-btn" type="button">Cancel</button>
+        <button id="mcp-save-query-confirm" class="mcp-tool-btn btn-splunk" type="button">Save to Library</button>
+      </div>
+      <div id="mcp-save-query-status" class="mcp-save-modal-status" hidden></div>
+    </div>
+  </div>
 </div>
 <script>
   const q = document.getElementById('mcp-question');
@@ -23064,6 +25056,8 @@ def _mcp_page_body() -> str:
   let currentSplText = '';
   let lastMcpRows = [];
   let lastMcpColumns = [];
+  let lastMcpChatResult = null;
+  let lastMcpSavedQueryRecordId = '';
   const datasetStorageKey = 'agtsmith_mcp_dataset_mode';
   const pipelineStorageKey = 'agtsmith_mcp_pipeline_mode';
   const splHistoryStorageKey = 'agtsmith_mcp_spl_history';
@@ -23413,8 +25407,8 @@ def _mcp_page_body() -> str:
   }
 
   function finalizeMcpRuntimeRail(data) {
-    const workflow = data?.result?.model_workflow;
-    const resultPayload = data?.result && typeof data.result === 'object' ? { ...data.result } : {};
+    const nested = data?.result && typeof data.result === 'object' ? data.result : {};
+    const resultPayload = { ...nested };
     if (data?.packaging_duration_ms != null && resultPayload.packaging_duration_ms == null) {
       resultPayload.packaging_duration_ms = data.packaging_duration_ms;
     }
@@ -23424,8 +25418,12 @@ def _mcp_page_body() -> str:
     if (data?.packaging_skip_reason && !resultPayload.packaging_skip_reason) {
       resultPayload.packaging_skip_reason = data.packaging_skip_reason;
     }
+    if (data?.journey_rail && typeof window.applyRuntimeRailJourneyState === 'function') {
+      window.applyRuntimeRailJourneyState(data.journey_rail, { ...resultPayload, ...data });
+      return;
+    }
     if (typeof window.completeRuntimeRailJourneyFromWorkflow === 'function') {
-      window.completeRuntimeRailJourneyFromWorkflow(workflow, resultPayload);
+      window.completeRuntimeRailJourneyFromWorkflow(nested?.model_workflow, { ...resultPayload, journey_rail: data?.journey_rail });
     } else if (typeof window.notifyRuntimeRailRunEnd === 'function') {
       window.notifyRuntimeRailRunEnd();
     }
@@ -23543,6 +25541,220 @@ def _mcp_page_body() -> str:
     spl.innerHTML = highlightSpl(currentSplText || '(no SPL yet)');
   }
 
+  // Time is dispatched to Splunk as separate earliest_time/latest_time search
+  // parameters, never embedded in the SPL text itself (see query_policy.py).
+  // These helpers translate that pair into a human-readable label so the
+  // actual searched window is always visible next to the query, independent
+  // of what the SPL string shows.
+  const MCP_RELATIVE_TIME_LABELS = {
+    '0': 'All available time',
+    'now': 'now',
+    '@d': 'Today so far', '@w0': 'This week so far', '@mon': 'This month so far',
+    '@q': 'This quarter so far', '@y': 'This year so far',
+    '-1d@d': 'Yesterday', '-2d@d': 'Day before yesterday',
+    '-7d@w0': 'Previous calendar week', '-1mon@mon': 'Previous month',
+    '-1q@q': 'Previous quarter', '-1y@y': 'Previous year',
+  };
+  const MCP_TIME_UNIT_LABELS = { s: 'second', m: 'minute', h: 'hour', d: 'day', w: 'week', mon: 'month', q: 'quarter', y: 'year' };
+
+  function humanizeMcpSplTime(value) {
+    const v = String(value ?? '').trim();
+    if (!v) return '';
+    if (Object.prototype.hasOwnProperty.call(MCP_RELATIVE_TIME_LABELS, v)) return MCP_RELATIVE_TIME_LABELS[v];
+    const m = /^-(\d+)(s|m|h|d|w|mon|q|y)$/.exec(v);
+    if (m) {
+      const n = Number(m[1]);
+      const unit = MCP_TIME_UNIT_LABELS[m[2]] || m[2];
+      return `Last ${n} ${unit}${n === 1 ? '' : 's'}`;
+    }
+    return v; // absolute epoch/date/snap-to literal -- show it verbatim
+  }
+
+  function resolveMcpTimeWindow(data) {
+    const qArgs = data?.query_args && typeof data.query_args === 'object' ? data.query_args : {};
+    const selectedArgs = data?.final_adjudication?.selected_args && typeof data.final_adjudication.selected_args === 'object' ? data.final_adjudication.selected_args : {};
+    const evidenceWindow = data?.evidence?.time_window && typeof data.evidence.time_window === 'object' ? data.evidence.time_window : {};
+    const rawEarliest = String(qArgs.earliest_time || selectedArgs.earliest_time || evidenceWindow.earliest_time || '').trim();
+    const rawLatest = String(qArgs.latest_time || selectedArgs.latest_time || evidenceWindow.latest_time || '').trim();
+    if (!rawEarliest && !rawLatest) return null;
+    const earliest = rawEarliest || '-7d';
+    const latest = rawLatest || 'now';
+    const earliestLabel = humanizeMcpSplTime(earliest);
+    const latestLabel = humanizeMcpSplTime(latest);
+    const label = (latest === 'now' || !latestLabel)
+      ? earliestLabel
+      : `${earliestLabel} \u2192 ${latestLabel}`;
+    return { earliest, latest, label };
+  }
+
+  function extractExecutedMcpSpl(data) {
+    if (!data || typeof data !== 'object') return '';
+    const nested = data.result && typeof data.result === 'object' ? data.result : {};
+    const qArgs = data.query_args && typeof data.query_args === 'object' ? data.query_args : {};
+    const nestedArgs = nested.query_args && typeof nested.query_args === 'object' ? nested.query_args : {};
+    const fromPayload = String(
+      data.generated_spl ||
+      nested.generated_spl ||
+      qArgs.query ||
+      nestedArgs.query ||
+      ''
+    ).trim();
+    if (fromPayload) return fromPayload;
+    const details = Array.isArray(data.selected_spl_details)
+      ? data.selected_spl_details
+      : (Array.isArray(nested.selected_spl_details) ? nested.selected_spl_details : []);
+    for (let i = details.length - 1; i >= 0; i -= 1) {
+      const row = details[i];
+      if (row && row.query) {
+        const text = String(row.query).trim();
+        if (text) return text;
+      }
+    }
+    const evidence = data.evidence && typeof data.evidence === 'object'
+      ? data.evidence
+      : (nested.evidence && typeof nested.evidence === 'object' ? nested.evidence : {});
+    const queryOrArgs = evidence.query_or_args && typeof evidence.query_or_args === 'object' ? evidence.query_or_args : {};
+    if (queryOrArgs.query) return String(queryOrArgs.query).trim();
+    const writerOut = data.query_writer_output && typeof data.query_writer_output === 'object'
+      ? data.query_writer_output
+      : (nested.query_writer_output && typeof nested.query_writer_output === 'object' ? nested.query_writer_output : {});
+    const writerArgs = writerOut.tool_args && typeof writerOut.tool_args === 'object' ? writerOut.tool_args : {};
+    if (writerArgs.query) return String(writerArgs.query).trim();
+    const adjudication = data.final_adjudication && typeof data.final_adjudication === 'object'
+      ? data.final_adjudication
+      : (nested.final_adjudication && typeof nested.final_adjudication === 'object' ? nested.final_adjudication : {});
+    const selectedArgs = adjudication.selected_args && typeof adjudication.selected_args === 'object' ? adjudication.selected_args : {};
+    if (selectedArgs.query) return String(selectedArgs.query).trim();
+    return '';
+  }
+
+  function extractSavableMcpQuery(data) {
+    if (!data || typeof data !== 'object') return '';
+    const fromPayload = extractExecutedMcpSpl(data);
+    if (fromPayload && fromPayload !== '(no query executed)') return fromPayload;
+    const fromEditor = String(currentSplText || '').trim();
+    if (fromEditor && fromEditor !== '(no query executed)' && !fromEditor.startsWith('(no ')) return fromEditor;
+    return '';
+  }
+
+  function mcpCanSaveQuery(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    if (payload.supported === false) return false;
+    return Boolean(extractSavableMcpQuery(payload));
+  }
+
+  function updateMcpTimeWindowUI(data) {
+    const payload = data || lastMcpChatResult;
+    const window_ = resolveMcpTimeWindow(payload);
+    const stripChip = document.getElementById('mcp-time-window');
+    const splRow = document.getElementById('mcp-spl-time-row');
+    const splValue = document.getElementById('mcp-spl-time-window-value');
+    const timeBadge = document.getElementById('mcp-spl-time-badge');
+    const saveBtn = document.getElementById('mcp-save-query-btn');
+    if (stripChip) {
+      stripChip.textContent = window_ ? `time=${window_.label}` : 'time=n/a';
+      stripChip.title = window_ ? `earliest_time=${window_.earliest} latest_time=${window_.latest}` : 'Search time window actually dispatched to Splunk';
+    }
+    if (timeBadge) timeBadge.hidden = !window_;
+    if (splValue && window_) {
+      splValue.textContent = window_.label;
+      if (timeBadge) {
+        timeBadge.title = `earliest_time=${window_.earliest} latest_time=${window_.latest} -- dispatched to Splunk as search parameters, not embedded in the SPL text above.`;
+      }
+    }
+    const query = extractSavableMcpQuery(payload);
+    const canSave = mcpCanSaveQuery(payload);
+    if (splRow) splRow.hidden = !window_ && !canSave;
+    if (saveBtn) {
+      saveBtn.style.display = canSave ? 'inline-flex' : 'none';
+      saveBtn.disabled = Boolean(lastMcpSavedQueryRecordId);
+      saveBtn.textContent = lastMcpSavedQueryRecordId ? 'Saved to Library' : 'Save to Library';
+    }
+  }
+
+  function openMcpSaveQueryModal() {
+    const modal = document.getElementById('mcp-save-query-modal');
+    const preview = document.getElementById('mcp-save-query-preview');
+    const zeroRowsNote = document.getElementById('mcp-save-query-zero-rows-note');
+    const status = document.getElementById('mcp-save-query-status');
+    const result = lastMcpChatResult && typeof lastMcpChatResult === 'object' ? lastMcpChatResult : null;
+    const query = extractSavableMcpQuery(result);
+    if (!modal || !result || !query) return;
+    const question = String(result.effective_question || result.question || q?.value || '').trim();
+    if (preview) {
+      preview.textContent = `${question ? `Question: ${question}\n\n` : ''}SPL:\n${query}`;
+    }
+    const rows = Number(result.rows_returned || 0);
+    if (zeroRowsNote) zeroRowsNote.hidden = rows > 0;
+    if (status) {
+      status.hidden = true;
+      status.textContent = '';
+    }
+    const confirmBtn = document.getElementById('mcp-save-query-confirm');
+    if (confirmBtn) confirmBtn.disabled = false;
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeMcpSaveQueryModal() {
+    const modal = document.getElementById('mcp-save-query-modal');
+    if (!modal) return;
+    modal.classList.remove('open');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+
+  async function commitMcpSaveQuery() {
+    const result = lastMcpChatResult && typeof lastMcpChatResult === 'object' ? lastMcpChatResult : null;
+    const confirmBtn = document.getElementById('mcp-save-query-confirm');
+    const status = document.getElementById('mcp-save-query-status');
+    if (!result || result.supported === false) {
+      if (status) {
+        status.hidden = false;
+        status.textContent = 'This MCP run did not produce a savable query path.';
+      }
+      return;
+    }
+    const query = extractSavableMcpQuery(result);
+    if (!query) {
+      if (status) {
+        status.hidden = false;
+        status.textContent = 'No executed SPL was captured for this run.';
+      }
+      return;
+    }
+    if (confirmBtn) confirmBtn.disabled = true;
+    if (status) {
+      status.hidden = false;
+      status.textContent = 'Saving query to library...';
+    }
+    try {
+      const resp = await fetch('/api/saved-queries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: String(result.effective_question || result.question || q?.value || '').trim(),
+          query,
+          intent: String(result.intent || '').trim(),
+          aliases: [],
+          rows_returned: Number(result.rows_returned || 0),
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(String(data.error || `save failed (${resp.status})`));
+      }
+      lastMcpSavedQueryRecordId = String(data?.record?.id || '').trim();
+      updateMcpTimeWindowUI(result);
+      if (status) {
+        status.innerHTML = `Saved to the query library. <a href="${escHtml(data.library_url || '/spl-assets?source=analyst_saved')}">View library</a>`;
+      }
+      window.setTimeout(() => closeMcpSaveQueryModal(), 900);
+    } catch (err) {
+      if (status) status.textContent = `Save failed: ${String(err?.message || err)}`;
+      if (confirmBtn) confirmBtn.disabled = false;
+    }
+  }
+
   function loadSplHistory() {
     try {
       const parsed = JSON.parse(window.localStorage.getItem(splHistoryStorageKey) || '[]');
@@ -23603,6 +25815,7 @@ def _mcp_page_body() -> str:
 
   function applyMcpChatResult(data) {
     if (!data || typeof data !== 'object') return;
+    lastMcpChatResult = data;
     setStatus('complete', 'ok');
     statusEl.textContent = 'Complete';
     effectiveDatasetMode = String(data?.mode?.effective_mode || activeDatasetMode()) === 'demo' ? 'demo' : 'live';
@@ -23630,10 +25843,11 @@ def _mcp_page_body() -> str:
     rag.textContent = `rag=${data.rag_enabled ? 'enabled' : 'disabled'} max_chars=${String(data.rag_max_chars ?? 'n/a')}`;
     updateTimingBadge(data.spl_run_time_ms);
     const qArgs = data.query_args && typeof data.query_args === 'object' ? data.query_args : {};
-    const splQuery = String(data.generated_spl || qArgs.query || '').trim() || '(no query executed)';
+    const splQuery = extractExecutedMcpSpl(data) || '(no query executed)';
     renderSplBlock(splQuery);
     pushSplHistory(splQuery);
     updateMcpSplunkLinks(data);
+    updateMcpTimeWindowUI(data);
     renderMcpResultsTable(data);
     const rowCount = Array.isArray(data?.sample_rows) ? data.sample_rows.length : Number(data?.rows_returned ?? 0);
     switchMcpTab(rowCount > 0 ? 'results' : 'answer');
@@ -23798,11 +26012,36 @@ def _mcp_page_body() -> str:
     }
   });
   document.addEventListener('keydown', (event) => {
+    const saveModal = document.getElementById('mcp-save-query-modal');
+    if (event.key === 'Escape' && saveModal && saveModal.classList.contains('open')) {
+      event.preventDefault();
+      closeMcpSaveQueryModal();
+      return;
+    }
     if (event.key === 'Escape' && mcpRunActive) {
       event.preventDefault();
       cancelMcpRun();
     }
   });
+
+  const mcpSaveQueryBtn = document.getElementById('mcp-save-query-btn');
+  const mcpSaveQueryModal = document.getElementById('mcp-save-query-modal');
+  const mcpSaveQueryCancel = document.getElementById('mcp-save-query-cancel');
+  const mcpSaveQueryConfirm = document.getElementById('mcp-save-query-confirm');
+  if (mcpSaveQueryBtn) {
+    mcpSaveQueryBtn.onclick = () => openMcpSaveQueryModal();
+  }
+  if (mcpSaveQueryCancel) {
+    mcpSaveQueryCancel.onclick = () => closeMcpSaveQueryModal();
+  }
+  if (mcpSaveQueryConfirm) {
+    mcpSaveQueryConfirm.onclick = () => { commitMcpSaveQuery(); };
+  }
+  if (mcpSaveQueryModal) {
+    mcpSaveQueryModal.addEventListener('click', (event) => {
+      if (event.target === mcpSaveQueryModal) closeMcpSaveQueryModal();
+    });
+  }
 
   send.onclick = async () => {
     const question = (q.value || '').trim();
@@ -23810,6 +26049,10 @@ def _mcp_page_body() -> str:
     syncMcpRunButtons(true);
     mcpAbortController = new AbortController();
     mcpStreamPreview = null;
+    lastMcpChatResult = null;
+    lastMcpSavedQueryRecordId = '';
+    closeMcpSaveQueryModal();
+    updateMcpTimeWindowUI(null);
     updateMcpSplunkLinks({});
     setStatus('running');
     statusEl.textContent = 'Running MCP query...';
@@ -23845,18 +26088,24 @@ def _mcp_page_body() -> str:
         if (!resp.ok) {
           let errPayload = null;
           try { errPayload = await resp.json(); } catch (_e) {}
-          throw new Error(String(errPayload?.error || errPayload?.message || `http_${resp.status}`));
+          const baseMsg = String(errPayload?.error || errPayload?.message || `http_${resp.status}`);
+          const err = new Error(errPayload?.hint ? `${baseMsg} \u2014 ${errPayload.hint}` : baseMsg);
+          if (errPayload?.hint) err.hint = errPayload.hint;
+          throw err;
         }
         data = await window.consumeAskStream(resp, mcpStageHandler, {
           context: 'MCP',
           onSplReady: (preview) => {
             mcpStreamPreview = preview && typeof preview === 'object' ? { ...preview } : null;
-            const qArgs = preview?.query_args && typeof preview.query_args === 'object' ? preview.query_args : {};
-            const splQuery = String(qArgs.query || preview?.generated_spl || '').trim();
+            if (mcpStreamPreview) {
+              lastMcpChatResult = { ...(lastMcpChatResult || {}), ...mcpStreamPreview };
+            }
+            const splQuery = extractExecutedMcpSpl(preview || {});
             if (!splQuery) return;
             renderSplBlock(splQuery);
             if (preview?.spl_run_time_ms != null) updateTimingBadge(preview.spl_run_time_ms);
             updateMcpSplunkLinks(preview);
+            updateMcpTimeWindowUI(lastMcpChatResult);
             switchMcpTab('spl', { silent: true });
           },
         });
@@ -23864,7 +26113,8 @@ def _mcp_page_body() -> str:
         setProgress(95, 'Finalizing MCP output...');
         data = await resp.json();
         if (!resp.ok) {
-          statusEl.textContent = `error: ${data.error || `http_${resp.status}`}`;
+          const baseMsg = data.error || `http_${resp.status}`;
+          statusEl.textContent = data.hint ? `error: ${baseMsg} \u2014 ${data.hint}` : `error: ${baseMsg}`;
           setStatus('error', 'bad');
           if (summaryTitle) summaryTitle.textContent = 'MCP query failed';
           if (summaryCopy) summaryCopy.textContent = statusEl.textContent;
@@ -23906,6 +26156,7 @@ def _mcp_page_body() -> str:
   };
 
   renderSplBlock('');
+  updateMcpTimeWindowUI(null);
 </script>
 """
     return (
@@ -23971,6 +26222,7 @@ def _summarize_mcp_rows(
 def _run_mcp_chat_query_deterministic(question: str, *, mode_payload: dict[str, Any]) -> dict[str, Any]:
     from langgraph_minimal_flow import determine_splunk_tool
 
+    run_started = time.monotonic()
     template = map_question_to_template(question)
     selected_tool, _reason, metadata_args, _chain_mode = determine_splunk_tool(question, template.intent)
     effective_question = question
@@ -24043,7 +26295,7 @@ def _run_mcp_chat_query_deterministic(question: str, *, mode_payload: dict[str, 
         "selected_spl_details": [
             {
                 "tool": selected_tool,
-                "query": str(query_args.get("query", "")).strip(),
+                "query": "",
                 "rows_returned": len(rows),
                 "total_rows": total_rows,
                 "writer_model": "deterministic_mcp_template",
@@ -24068,7 +26320,13 @@ def _run_mcp_chat_query_deterministic(question: str, *, mode_payload: dict[str, 
         "mode": result_mode,
         "pipeline": _mcp_chat_pipeline_payload(MCP_CHAT_PIPELINE_DETERMINISTIC),
     }
-    return {"result": result, "meta": {"pipeline": "mcp_direct"}}
+    executed_spl = executed_spl_from_result(result)
+    result["generated_spl"] = executed_spl
+    if result["selected_spl_details"] and isinstance(result["selected_spl_details"][0], dict):
+        result["selected_spl_details"][0]["query"] = executed_spl
+    run_wall_ms = int((time.monotonic() - run_started) * 1000)
+    result["mcp_run_wall_ms"] = run_wall_ms
+    return {"result": result, "meta": {"pipeline": "mcp_direct", "run_wall_ms": run_wall_ms}}
 
 
 def _run_mcp_chat_query_assisted(
@@ -24113,8 +26371,22 @@ def _run_mcp_chat_query_assisted(
     return {"result": result, "meta": meta_payload}
 
 
-def _release_ollama_vram_after_run() -> None:
-    """Unload Ollama models so GPU VRAM is free between lab runs (non-blocking)."""
+def _ollama_keep_warm_from_cookie(cookie_header: str) -> bool:
+    text = str(cookie_header or "")
+    token = f"{OLLAMA_KEEP_WARM_COOKIE}="
+    for part in text.split(";"):
+        item = part.strip()
+        if item.startswith(token):
+            value = item[len(token) :].strip().lower()
+            return value in {"1", "true", "yes", "on"}
+    return False
+
+
+def _release_ollama_vram_after_run(*, cookie_header: str = "") -> None:
+    """Unload Ollama models unless keep-warm is enabled for a local Ollama host."""
+
+    if _ollama_keep_warm_from_cookie(cookie_header) and is_local_ollama_host(get_ollama_host()):
+        return
 
     def _run() -> None:
         try:
@@ -24135,10 +26407,21 @@ def _run_mcp_chat_query(
     progress_cb: Any | None = None,
 ) -> dict[str, Any]:
     mode_payload = _mcp_chat_mode_payload(mode)
-    pipeline_payload = _mcp_chat_pipeline_payload(pipeline)
-    if pipeline_payload.get("effective_pipeline") == MCP_CHAT_PIPELINE_DETERMINISTIC:
-        return _run_mcp_chat_query_deterministic(question, mode_payload=mode_payload)
-    return _run_mcp_chat_query_assisted(question, mode_payload=mode_payload, progress_cb=progress_cb)
+    effective_pipeline, routing = resolve_mcp_chat_pipeline(question, pipeline)
+    if effective_pipeline == MCP_CHAT_PIPELINE_DETERMINISTIC:
+        payload = _run_mcp_chat_query_deterministic(question, mode_payload=mode_payload)
+        result = payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}
+        result = dict(result)
+        result["pipeline"] = _mcp_chat_pipeline_payload(MCP_CHAT_PIPELINE_DETERMINISTIC, routing=routing)
+        payload["result"] = result
+        return payload
+    payload = _run_mcp_chat_query_assisted(question, mode_payload=mode_payload, progress_cb=progress_cb)
+    result = payload.get("result", {}) if isinstance(payload.get("result"), dict) else {}
+    if isinstance(result, dict):
+        result = dict(result)
+        result["pipeline"] = _mcp_chat_pipeline_payload(MCP_CHAT_PIPELINE_ASSISTED, routing=routing)
+        payload["result"] = result
+    return payload
 
 
 def _fast_mcp_domain_hints(
@@ -24203,7 +26486,7 @@ def _mcp_spl_preview_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}
     query_args = result.get("query_args", {}) if isinstance(result.get("query_args"), dict) else {}
-    generated_spl = str(result.get("generated_spl", "") or query_args.get("query", "")).strip()
+    generated_spl = executed_spl_from_result(result)
     selected_tool = str(result.get("selected_tool", "")).strip()
     node_timings = result.get("node_timings_ms", {}) if isinstance(result.get("node_timings_ms"), dict) else {}
     selected_spl_details = result.get("selected_spl_details", [])
@@ -24256,7 +26539,14 @@ def _mcp_should_skip_packaging_ui(question: str, payload: dict[str, Any]) -> tup
     return False, "needs_assembly"
 
 
-def _build_mcp_chat_response(question: str, payload: dict[str, Any], *, lightweight: bool = False) -> dict[str, Any]:
+def _build_mcp_chat_response(
+    question: str,
+    payload: dict[str, Any],
+    *,
+    lightweight: bool = False,
+    packaging_skipped: bool | None = None,
+    packaging_duration_ms: int = 0,
+) -> dict[str, Any]:
     result = payload.get("result", {}) if isinstance(payload, dict) else {}
     if not isinstance(result, dict):
         result = {}
@@ -24324,6 +26614,21 @@ def _build_mcp_chat_response(question: str, payload: dict[str, Any], *, lightwei
         hint_question = str(result.get("effective_question", question)).strip() or question
         domain_hints = _fast_mcp_domain_hints(hint_question, result)
 
+    pipeline_effective = str(pipeline_payload.get("effective_pipeline", "")).strip().lower()
+    if packaging_skipped is None:
+        packaging_skipped, _pack_reason = _mcp_should_skip_packaging_ui(
+            question,
+            payload if isinstance(payload, dict) else {},
+        )
+    journey_rail = journey_rail_state_from_result(
+        result,
+        pipeline_effective=pipeline_effective,
+        spl_run_time_ms=int(spl_run_time_ms) if spl_run_time_ms is not None else None,
+        run_wall_ms=int(result.get("mcp_run_wall_ms") or 0) or None,
+        packaging_skipped=bool(packaging_skipped),
+        packaging_duration_ms=int(packaging_duration_ms or 0),
+    )
+
     return {
         "question": question,
         "effective_question": result.get("effective_question", question),
@@ -24332,7 +26637,7 @@ def _build_mcp_chat_response(question: str, payload: dict[str, Any], *, lightwei
         "supported": result.get("supported"),
         "selected_tool": selected_tool,
         "query_args": query_args,
-        "generated_spl": str(result.get("generated_spl", "") or query_args.get("query", "")).strip(),
+        "generated_spl": executed_spl_from_result(result),
         "rows_returned": result.get("rows_returned"),
         "total_rows": result.get("total_rows"),
         "spl_writer_model": spl_writer_model,
@@ -24349,6 +26654,7 @@ def _build_mcp_chat_response(question: str, payload: dict[str, Any], *, lightwei
         "selected_spl_details": selected_spl_details,
         "result": result_compact,
         "meta": payload.get("meta", {}) if isinstance(payload, dict) else {},
+        "journey_rail": journey_rail,
     }
 
 
@@ -24389,6 +26695,7 @@ def _parse_ask_request_data(data: dict[str, Any]) -> tuple[dict[str, Any], str |
         "pivot_context": pivot_context,
         "pivot_candidate": pivot_candidate,
         "pipeline": pipeline,
+        "force_saved_query_id": str(data.get("force_saved_query_id", "")).strip(),
     }, None
 
 
@@ -24422,6 +26729,7 @@ def _run_parsed_ask_investigation(parsed: dict[str, Any], progress_cb: Any | Non
         session_id=session_id,
         write_artifact=write_artifact,
         progress_cb=progress_cb,
+        force_saved_query_id=str(parsed.get("force_saved_query_id", "")).strip(),
     )
 
 
@@ -24600,12 +26908,51 @@ def _finalize_ask_response(result: dict[str, Any], parsed: dict[str, Any], user:
     result["mode"] = mode_payload
     result["effective_question"] = effective_question
     if isinstance(result_body, dict):
+        suggestion = result_body.get("saved_query_suggestion")
+        if isinstance(suggestion, dict) and suggestion:
+            result["saved_query_suggestion"] = suggestion
+    if isinstance(result_body, dict):
         coverage = result_body.get("platform_coverage")
         if not isinstance(coverage, dict):
             evidence = result_body.get("evidence", {})
             coverage = evidence.get("platform_coverage") if isinstance(evidence, dict) else {}
         result["platform_coverage"] = coverage if isinstance(coverage, dict) else {}
     return result
+
+
+def _investigation_stage_sse_payload(
+    node: str,
+    pct: int,
+    label: str,
+    title: str,
+    *,
+    source: str,
+    skipped: bool = False,
+    phase: str = "enter",
+    duration_ms: int | None = None,
+) -> dict[str, Any]:
+    info = progress_for_multi_model_node(node)
+    if int(info.get("pct") or 0) <= 0:
+        info = progress_for_stage_log(node)
+    normalized_phase = str(phase or "enter").strip().lower()
+    if normalized_phase not in {"enter", "complete"}:
+        normalized_phase = "enter"
+    payload: dict[str, Any] = {
+        "type": "stage",
+        "source": source,
+        "node": node,
+        "progress_pct": pct,
+        "title": title or info.get("title", ""),
+        "label": label or info.get("label", ""),
+        "note": info.get("note", ""),
+        "indeterminate": False,
+        "skipped": bool(skipped),
+        "status": "skipped" if skipped else ("complete" if normalized_phase == "complete" else "active"),
+        "phase": normalized_phase,
+    }
+    if duration_ms is not None and int(duration_ms) >= 0:
+        payload["duration_ms"] = int(duration_ms)
+    return payload
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -24701,6 +27048,19 @@ class Handler(BaseHTTPRequestHandler):
             f"{SESSION_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax{secure}",
         )
 
+    def _set_ollama_keep_warm_cookie(self, enabled: bool) -> None:
+        secure = "; Secure" if getattr(self.server, "tls_enabled", False) else ""
+        if enabled:
+            self.send_header(
+                "Set-Cookie",
+                f"{OLLAMA_KEEP_WARM_COOKIE}=1; Max-Age=31536000; Path=/; SameSite=Lax{secure}",
+            )
+        else:
+            self.send_header(
+                "Set-Cookie",
+                f"{OLLAMA_KEEP_WARM_COOKIE}=0; Max-Age=0; Path=/; SameSite=Lax{secure}",
+            )
+
     def _redirect(self, location: str) -> None:
         self.send_response(HTTPStatus.FOUND)
         self.send_header("Location", location)
@@ -24792,9 +27152,9 @@ class Handler(BaseHTTPRequestHandler):
             f"{error_html}"
             "<form class=\"login-form\" method=\"post\" action=\"/login\">"
             "<label for=\"login-username\">Username</label>"
-            "<input id=\"login-username\" name=\"username\" autocomplete=\"username\" required />"
+            "<input id=\"login-username\" name=\"username\" autocomplete=\"username\" value=\"admin\" required />"
             "<label for=\"login-password\">Password</label>"
-            "<input id=\"login-password\" type=\"password\" name=\"password\" autocomplete=\"current-password\" required />"
+            "<input id=\"login-password\" type=\"password\" name=\"password\" autocomplete=\"current-password\" value=\"changeme\" required />"
             "<label class=\"login-remember\">"
             "<input id=\"login-remember\" class=\"login-remember-input\" type=\"checkbox\" name=\"remember\" value=\"1\" />"
             "<span class=\"login-toggle-track\" aria-hidden=\"true\"><span class=\"login-toggle-knob\"></span></span>"
@@ -25422,6 +27782,86 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def _api_saved_queries_get(self) -> None:
+        if not self._require_auth(api_mode=True):
+            return
+        parsed = parse_qs(urlparse(self.path).query)
+        status = str(parsed.get("status", ["approved"])[0]).strip().lower() or "approved"
+        source = str(parsed.get("source", ["analyst_saved"])[0]).strip().lower() or "analyst_saved"
+        rows = list_saved_queries(status=status, source="" if source == "all" else source)
+        self._json(
+            HTTPStatus.OK,
+            {
+                "items": rows,
+                "count": len(rows),
+            },
+        )
+
+    def _api_saved_queries_post(self) -> None:
+        if not self._require_auth(api_mode=True):
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except Exception:
+            length = 0
+        raw = self.rfile.read(length)
+        payload = json.loads(raw.decode("utf-8")) if raw else {}
+        if not isinstance(payload, dict):
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "payload must be an object"})
+            return
+        user = self._authenticated_user() or {}
+        question = str(payload.get("question", "")).strip()
+        query = str(payload.get("query", "")).strip()
+        if not question or not query:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "question and query are required"})
+            return
+        aliases = payload.get("aliases", [])
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if not isinstance(aliases, list):
+            aliases = []
+        excerpt = str(payload.get("result_excerpt", "")).strip()
+        rows_returned = payload.get("rows_returned")
+        if rows_returned is not None and not excerpt:
+            excerpt = f"rows_returned={rows_returned}"
+        try:
+            saved = save_analyst_query(
+                question=question,
+                query=query,
+                intent=str(payload.get("intent", "")).strip(),
+                aliases=[str(item).strip() for item in aliases if str(item).strip()],
+                use_when=str(payload.get("use_when", "")).strip(),
+                saved_by=str(user.get("username", "unknown")).strip() or "unknown",
+                result_excerpt=excerpt,
+            )
+        except HoldoutLeakageError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        self._json(
+            HTTPStatus.OK,
+            {
+                "status": "ok",
+                "record": saved,
+                "library_url": "/spl-assets?source=analyst_saved",
+            },
+        )
+
+    def _api_saved_queries_stale_post(self, record_id: str) -> None:
+        if not self._require_auth(api_mode=True):
+            return
+        wanted = str(record_id or "").strip()
+        if not wanted:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "record id is required"})
+            return
+        ok = delete_or_stale_saved_query(wanted)
+        if not ok:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "record not found"})
+            return
+        self._json(HTTPStatus.OK, {"status": "ok", "id": wanted, "new_status": "stale"})
+
     def _api_config_personalize_get(self) -> None:
         if not self._require_ops_role({}):
             return
@@ -25601,22 +28041,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        def _write_stage(node: str, pct: int, label: str, title: str, skipped: bool = False) -> None:
-            info = progress_for_multi_model_node(node)
-            if int(info.get("pct") or 0) <= 0:
-                info = progress_for_stage_log(node)
-            payload = {
-                "type": "stage",
-                "source": "multi_model",
-                "node": node,
-                "progress_pct": pct,
-                "title": title or info.get("title", ""),
-                "label": label or info.get("label", ""),
-                "note": info.get("note", ""),
-                "indeterminate": False,
-                "skipped": bool(skipped),
-                "status": "skipped" if skipped else "active",
-            }
+        def _write_stage(
+            node: str,
+            pct: int,
+            label: str,
+            title: str,
+            skipped: bool = False,
+            phase: str = "enter",
+            duration_ms: int | None = None,
+        ) -> None:
+            payload = _investigation_stage_sse_payload(
+                node,
+                pct,
+                label,
+                title,
+                source="multi_model",
+                skipped=skipped,
+                phase=phase,
+                duration_ms=duration_ms,
+            )
             if not self._sse_emit("stage", payload):
                 raise BrokenPipeError("client disconnected")
 
@@ -25661,7 +28104,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
         finally:
-            _release_ollama_vram_after_run()
+            _release_ollama_vram_after_run(cookie_header=self.headers.get("Cookie", ""))
 
     def _stream_ollama_logs(self, parsed: Any) -> None:
         query = parse_qs(parsed.query)
@@ -25809,8 +28252,54 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _api_runtime_ops_summary(self) -> None:
-        payload = collect_analyst_ops_summary(get_ollama_host())
+        host = get_ollama_host()
+        payload = collect_analyst_ops_summary(host)
+        local_host = is_local_ollama_host(host)
+        payload["ollama_host_local"] = local_host
+        payload["keep_warm_available"] = local_host
+        payload["keep_warm_enabled"] = _ollama_keep_warm_from_cookie(self.headers.get("Cookie", ""))
         self._json(HTTPStatus.OK, payload)
+
+    def _api_runtime_ollama_keep_warm_post(self) -> None:
+        try:
+            data = self._read_json_body()
+        except Exception as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        enabled = bool(data.get("enabled"))
+        host = get_ollama_host()
+        if enabled and not is_local_ollama_host(host):
+            self._json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "keep_warm_requires_local_ollama",
+                    "host": host,
+                    "detail": "Keep warm only applies when Ollama runs on the same machine as agtsmith.",
+                },
+            )
+            return
+        warmed: dict[str, Any] = {"warmed": [], "errors": []}
+        if enabled:
+            try:
+                from ollama_client import warm_ollama_models
+
+                warmed = warm_ollama_models(host=host)
+            except Exception as exc:
+                warmed = {"warmed": [], "errors": [f"{type(exc).__name__}: {exc}"]}
+        self.send_response(HTTPStatus.OK)
+        self._set_ollama_keep_warm_cookie(enabled)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(
+            json.dumps(
+                {
+                    "enabled": enabled,
+                    "keep_warm_available": is_local_ollama_host(host),
+                    "warmed": warmed.get("warmed", []),
+                    "errors": warmed.get("errors", []),
+                }
+            ).encode("utf-8")
+        )
 
     def _api_ops_ollama_metrics(self) -> None:
         if not self._require_ops_role({}):
@@ -25945,7 +28434,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._json(HTTPStatus.OK, _build_mcp_chat_response(question, payload))
         finally:
-            _release_ollama_vram_after_run()
+            _release_ollama_vram_after_run(cookie_header=self.headers.get("Cookie", ""))
 
     def _stream_mcp_chat(self) -> None:
         try:
@@ -25968,25 +28457,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        pipeline_payload = _mcp_chat_pipeline_payload(pipeline)
-        source = "llm_assisted" if pipeline_payload.get("effective_pipeline") != MCP_CHAT_PIPELINE_DETERMINISTIC else "deterministic"
+        effective_pipeline, routing = resolve_mcp_chat_pipeline(question, pipeline)
+        pipeline_payload = _mcp_chat_pipeline_payload(effective_pipeline, routing=routing)
+        source = "llm_assisted" if effective_pipeline != MCP_CHAT_PIPELINE_DETERMINISTIC else "deterministic"
 
-        def _write_stage(node: str, pct: int, label: str, title: str, skipped: bool = False) -> None:
-            info = progress_for_multi_model_node(node)
-            if int(info.get("pct") or 0) <= 0:
-                info = progress_for_stage_log(node)
-            payload = {
-                "type": "stage",
-                "source": source,
-                "node": node,
-                "progress_pct": pct,
-                "title": title or info.get("title", ""),
-                "label": label or info.get("label", ""),
-                "note": info.get("note", ""),
-                "indeterminate": False,
-                "skipped": bool(skipped),
-                "status": "skipped" if skipped else "active",
-            }
+        def _write_stage(
+            node: str,
+            pct: int,
+            label: str,
+            title: str,
+            skipped: bool = False,
+            phase: str = "enter",
+            duration_ms: int | None = None,
+        ) -> None:
+            payload = _investigation_stage_sse_payload(
+                node,
+                pct,
+                label,
+                title,
+                source=source,
+                skipped=skipped,
+                phase=phase,
+                duration_ms=duration_ms,
+            )
             if not self._sse_emit("stage", payload):
                 raise BrokenPipeError("client disconnected")
 
@@ -26007,7 +28500,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             progress_cb = None
-            if pipeline_payload.get("effective_pipeline") != MCP_CHAT_PIPELINE_DETERMINISTIC:
+            if effective_pipeline != MCP_CHAT_PIPELINE_DETERMINISTIC:
                 progress_cb = _write_stage
 
             payload = _run_mcp_chat_query(question, mode=mode, pipeline=pipeline, progress_cb=progress_cb)
@@ -26039,7 +28532,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 pack_started = time.monotonic()
                 try:
-                    response = _build_mcp_chat_response(question, payload, lightweight=True)
+                    response = _build_mcp_chat_response(
+                        question,
+                        payload,
+                        lightweight=True,
+                        packaging_skipped=skip_packaging,
+                        packaging_duration_ms=0,
+                    )
                 except Exception as exc:
                     self._sse_emit(
                         "error",
@@ -26068,7 +28567,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 pack_started = time.monotonic()
                 try:
-                    response = _build_mcp_chat_response(question, payload, lightweight=False)
+                    response = _build_mcp_chat_response(
+                        question,
+                        payload,
+                        lightweight=False,
+                        packaging_skipped=skip_packaging,
+                        packaging_duration_ms=0,
+                    )
                 except Exception as exc:
                     self._sse_emit(
                         "error",
@@ -26081,6 +28586,24 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 pack_ms = int((time.monotonic() - pack_started) * 1000)
             response["packaging_duration_ms"] = pack_ms
+            if (
+                not skip_packaging
+                and pack_ms > 0
+                and isinstance(response.get("journey_rail"), dict)
+            ):
+                journey_rail = dict(response["journey_rail"])
+                timings = dict(journey_rail.get("timings_ms") or {})
+                timings["package_response"] = pack_ms
+                journey_rail["timings_ms"] = timings
+                completed = [
+                    str(item).strip()
+                    for item in (journey_rail.get("completed_nodes") or [])
+                    if str(item).strip()
+                ]
+                if "package_response" not in completed:
+                    completed.append("package_response")
+                journey_rail["completed_nodes"] = completed
+                response["journey_rail"] = journey_rail
             response["packaging_skipped"] = skip_packaging
             response["packaging_skip_reason"] = skip_reason if skip_packaging else ""
             result_obj = response.get("result")
@@ -26125,7 +28648,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
         finally:
-            _release_ollama_vram_after_run()
+            _release_ollama_vram_after_run(cookie_header=self.headers.get("Cookie", ""))
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -26222,6 +28745,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/config/personalize":
             self._api_config_personalize_get()
+            return
+        if parsed.path == "/api/saved-queries":
+            if not self._require_auth(api_mode=True):
+                return
+            self._api_saved_queries_get()
             return
         if parsed.path == "/api/config/local-learning":
             self._api_config_local_learning_get()
@@ -26397,7 +28925,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._api_mcp_chat()
             except Exception as exc:
-                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+                status = HTTPStatus.GATEWAY_TIMEOUT if isinstance(exc, MCPRequestTimeout) else HTTPStatus.INTERNAL_SERVER_ERROR
+                self._json(status, _mcp_error_payload(exc))
             return
         if parsed.path == "/api/mcp/chat/stream":
             if not self._require_auth(api_mode=True):
@@ -26405,7 +28934,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._stream_mcp_chat()
             except Exception as exc:
-                self._write_sse_error("mcp_chat_failed", f"{type(exc).__name__}: {exc}")
+                error_payload = _mcp_error_payload(exc)
+                extra = {"hint": error_payload["hint"]} if "hint" in error_payload else None
+                self._write_sse_error("mcp_chat_failed", error_payload["error"], extra=extra)
             return
         if parsed.path == "/api/config/runtime":
             if not self._require_auth(api_mode=True):
@@ -26444,6 +28975,31 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._api_config_personalize_post()
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        if parsed.path == "/api/runtime/ollama-keep-warm":
+            if not self._require_auth(api_mode=True):
+                return
+            try:
+                self._api_runtime_ollama_keep_warm_post()
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        if parsed.path == "/api/saved-queries":
+            if not self._require_auth(api_mode=True):
+                return
+            try:
+                self._api_saved_queries_post()
+            except Exception as exc:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        if parsed.path.startswith("/api/saved-queries/") and parsed.path.endswith("/stale"):
+            if not self._require_auth(api_mode=True):
+                return
+            record_id = parsed.path.removeprefix("/api/saved-queries/").removesuffix("/stale").strip("/")
+            try:
+                self._api_saved_queries_stale_post(record_id)
             except Exception as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(exc).__name__}: {exc}"})
             return
@@ -26500,7 +29056,9 @@ class Handler(BaseHTTPRequestHandler):
                 data = json.loads(raw.decode("utf-8")) if raw else {}
                 self._stream_ask_investigation(data if isinstance(data, dict) else {})
             except Exception as exc:
-                self._write_sse_error("stream_failed", f"{type(exc).__name__}: {exc}")
+                error_payload = _mcp_error_payload(exc)
+                extra = {"hint": error_payload["hint"]} if "hint" in error_payload else None
+                self._write_sse_error("stream_failed", error_payload["error"], extra=extra)
             return
 
         if parsed.path != "/api/ask":
@@ -26524,7 +29082,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = _finalize_ask_response(result if isinstance(result, dict) else {}, parsed_request, user)
             self._json(200, payload)
         except Exception as exc:
-            self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+            status = HTTPStatus.GATEWAY_TIMEOUT if isinstance(exc, MCPRequestTimeout) else 500
+            self._json(status, _mcp_error_payload(exc))
 
 
 def main() -> int:
@@ -26569,7 +29128,12 @@ def main() -> int:
         print(f"TLS key: {args.tls_key_file}")
     else:
         print("TLS disabled. Set AGTSMITH_TLS_CERT_FILE and AGTSMITH_TLS_KEY_FILE to enable HTTPS.")
+    _start_env_profile_auto_refresh_scheduler()
     print(f"UI auth enabled: {_auth_enabled()}")
+    print(
+        "Data Domains auto-refresh: "
+        f"{'enabled every ' + str(get_env_profile_refresh_interval_minutes()) + ' min' if get_env_profile_auto_refresh_enabled() else 'disabled'}"
+    )
     print("Default landing: /mcp")
     print("Investigation UI: /investigation")
     print("Docs portal: /docs")

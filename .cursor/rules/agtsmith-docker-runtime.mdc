@@ -1,0 +1,17 @@
+---
+description: After agtsmith engine/UI changes, rebuild and restart the Docker sidecar via agtsmith-docker-build
+globs: scripts/**,Dockerfile*,docker-compose*.yml,Makefile,requirements-docker.txt
+alwaysApply: false
+---
+
+# Docker runtime for agtsmith
+
+On this dev box the **:8787 sidecar must run in Docker**, not via `make ui-dev`.
+
+After editing matched files:
+
+1. Read and follow [.cursor/skills/agtsmith-docker-build/SKILL.md](../skills/agtsmith-docker-build/SKILL.md)
+2. Run `.cursor/skills/agtsmith-docker-build/scripts/deploy.sh`
+3. Do not claim UI/MCP fixes are verified until deploy completes and labels match current source
+
+Host `.venv` + `make check` is for unit tests only; live investigation validation uses the container.

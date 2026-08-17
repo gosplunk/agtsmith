@@ -33,10 +33,14 @@ OLLAMA_HOST=http://127.0.0.1:11434
 
 ## Docker deploy
 
+Use the dedicated build skill (do not use `make ui-dev` on this dev box):
+
 ```bash
 export AGTSMITH_UID=$(id -u) AGTSMITH_GID=$(id -g)
-make docker-deploy-build docker-deploy-up
+.cursor/skills/agtsmith-docker-build/scripts/deploy.sh
 ```
+
+See [agtsmith-docker-build](../agtsmith-docker-build/SKILL.md) for rebuild/restart policy.
 
 UI: `http://127.0.0.1:8787`
 The Docker deployment uses its private named config volume and does not read

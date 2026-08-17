@@ -15,6 +15,74 @@ from apache_intent import APACHE_INTENTS, apache_intent_profile
 DEFAULT_UNBOUNDED_EARLIEST = "-7d"
 DEFAULT_UNBOUNDED_LATEST = "now"
 
+# Investigative/security-flavored activity tags. A template carrying one of these
+# tags should only win a scoring tie because of it when the question actually
+# contains a matching activity signal or keyword -- never purely from the generic
+# cross_domain/summary defaults every question gets. Without this guard, a fully
+# generic or typo'd question (e.g. a misspelled inventory question) can default
+# to an auth-failure/security template simply because it happens to be first in
+# template declaration order.
+_SENSITIVE_ACTIVITY_TAGS = frozenset(
+    {
+        "auth_failure",
+        "auth_success",
+        "privilege_escalation",
+        "credential_access",
+        "process_activity",
+        "network_activity",
+        "dns_activity",
+        "session_activity",
+        "audit_activity",
+        "web_404",
+        "cloud_api",
+        "network_flow",
+        "signin_activity",
+        "saas_activity",
+        "user_agent",
+    }
+)
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Small, dependency-free edit distance (used only for short-word typo tolerance)."""
+    if a == b:
+        return 0
+    la, lb = len(a), len(b)
+    if la == 0:
+        return lb
+    if lb == 0:
+        return la
+    prev = list(range(lb + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i] + [0] * lb
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        prev = cur
+    return prev[lb]
+
+
+_INDEX_WORD_TARGETS = ("index", "indexes", "indices")
+
+
+def _is_index_like_word(word: str) -> bool:
+    """Return True for "index"/"indexes" and common typos (e.g. "idexes", "indexs")."""
+    w = word.strip().lower()
+    if len(w) < 4:
+        return False
+    if w in ("index", "indexes", "indices", "indexed", "indexing"):
+        return True
+    for target in _INDEX_WORD_TARGETS:
+        if abs(len(w) - len(target)) <= 2 and _levenshtein(w, target) <= 2:
+            return True
+    return False
+
+
+def question_has_index_token(question: str) -> bool:
+    """Detect an "index"/"indexes" reference even through common typos."""
+    words = re.findall(r"[a-z]+", (question or "").lower())
+    return any(_is_index_like_word(w) for w in words)
+
 
 def infer_question_dimensions(question: str) -> dict[str, Any]:
     q = (question or "").strip().lower()
@@ -116,7 +184,7 @@ def infer_question_dimensions(question: str) -> dict[str, Any]:
         activities.append("dns_activity")
     if any(tok in q for tok in ("office 365 management", "o365 management", "sharepoint activity", "onedrive activity", "ms:o365:management")):
         activities.append("saas_activity")
-    if any(tok in q for tok in ("index", "indexes")):
+    if any(tok in q for tok in ("index", "indexes")) or question_has_index_token(q):
         activities.append("inventory")
     if any(tok in q for tok in ("sourcetype", "sourcetypes", "metadata", "hosts metadata", "sources metadata")):
         activities.append("metadata")
@@ -201,6 +269,14 @@ def score_template_for_question(template: Any, question: str) -> tuple[int, list
         score += 10
         reasons.append(f"shape_match={','.join(sorted(tags & shapes))}")
 
+    sensitive_tags = tags & _SENSITIVE_ACTIVITY_TAGS
+    if sensitive_tags and not matched_keywords and not (tags & activities):
+        # This template only scored via the generic cross_domain/summary defaults
+        # every question gets -- there is no real evidence the question is actually
+        # about this sensitive activity. Never let it win a low-signal tie.
+        score -= 40
+        reasons.append(f"sensitive_tag_without_signal_penalty={','.join(sorted(sensitive_tags))}")
+
     intent = str(getattr(template, "intent", "")).lower()
     if "windows" in platforms and intent.startswith("linux_"):
         score -= 25
@@ -208,6 +284,17 @@ def score_template_for_question(template: Any, question: str) -> tuple[int, list
     if "linux" in platforms and intent.startswith("windows_"):
         score -= 25
         reasons.append("platform_penalty:windows_for_linux_question")
+    # A template scoped to Splunk's own internal/platform-ops data (e.g. sourcetype
+    # counts under index=_internal) should not win just because a generic keyword like
+    # "sourcetype" appears as a substring of the question's wording (e.g. "sourcetypes").
+    # Only apply when the question clearly targets a *different* concrete platform
+    # (windows/linux/web/aws/network/identity) -- ambiguous questions with no specific
+    # platform signal ("cross_domain" only) are left unpenalized so the internal
+    # templates can still win on their own explicit keyword matches.
+    other_platforms = platforms - {"splunk_internal", "cross_domain"}
+    if "splunk_internal" in tags and "splunk_internal" not in platforms and other_platforms:
+        score -= 25
+        reasons.append("platform_penalty:splunk_internal_tag_for_non_internal_question")
     if "web" in platforms and "access_combined" not in str(getattr(template, "query", "")).lower() and intent.startswith("apache_"):
         score -= 10
         reasons.append("web_template_missing_access_combined")
@@ -365,6 +452,64 @@ def score_template_for_question(template: Any, question: str) -> tuple[int, list
             if intent == "stream_http_activity":
                 score -= 18
                 reasons.append("cardinality_apache_penalty:prefer_access_top_ips")
+
+    _data_presence_terms = (
+        "have data",
+        "has data",
+        "with data",
+        "contain data",
+        "events in",
+        "had events",
+        "had data",
+        "active",
+        "most events",
+        "most data",
+    )
+    if any(term in q for term in ("sourcetype", "sourcetypes")):
+        if intent == "index_sourcetype_volume":
+            score += 32
+            reasons.append("sourcetype_inventory_bonus")
+        if intent == "internal_sourcetypes" and ("_internal" in q or "splunk internal" in q):
+            score += 36
+            reasons.append("internal_sourcetype_bonus")
+        if intent == "linux_sourcetypes" and (
+            "linux index" in q or "index=linux" in q or re.search(r"\blinux\b.*\bsourcetype", q)
+        ):
+            score += 36
+            reasons.append("linux_sourcetype_bonus")
+        if intent == "linux_host_activity" and "linux" in q and any(term in q for term in ("host", "hosts")):
+            score += 34
+            reasons.append("linux_host_activity_bonus")
+        if intent == "internal_splunkd_health" and "splunkd" in q:
+            score += 38
+            reasons.append("internal_splunkd_bonus")
+        if intent == "splunk_license_usage" and any(
+            term in q for term in ("license usage", "license quota", "splunk license", "license consumption")
+        ):
+            score += 36
+            reasons.append("internal_license_bonus")
+        if intent == "metadata_inventory" and any(
+            phrase in q for phrase in ("list sourcetype", "what sourcetype", "which sourcetype")
+        ):
+            score += 24
+            reasons.append("metadata_sourcetype_list_bonus")
+        if not matched_keywords and intent in {
+            "osquery_process_activity",
+            "o365_management_activity",
+            "botsv3_named_sourcetype_overview",
+        }:
+            score -= 45
+            reasons.append("unrelated_cross_domain_penalty:sourcetype_question")
+    if "inventory" in activities and question_has_index_token(q) and intent == "top_indexes":
+        score += 28
+        reasons.append("index_inventory_bonus")
+    if any(term in q for term in ("host", "hosts")) and any(term in q for term in _data_presence_terms):
+        if intent == "host_activity_summary":
+            score += 32
+            reasons.append("host_activity_bonus")
+        if not matched_keywords and intent == "osquery_process_activity":
+            score -= 45
+            reasons.append("unrelated_cross_domain_penalty:host_question")
 
     return score, reasons
 
@@ -613,6 +758,34 @@ def _match_named_window(q: str) -> tuple[str, str] | None:
     return None
 
 
+_BARE_UNIT_WINDOW_RE = re.compile(
+    r"\b(?:in|during|over|within|for|across)\s+the\s+"
+    r"(hour|day|week|month|quarter|year)\b(?!\s+of\b)"
+)
+
+
+def _match_bare_unit_window(q: str) -> tuple[str, str] | None:
+    """Catch lenient phrasing that drops an explicit last/past/previous qualifier.
+
+    Analysts frequently drop the qualifier in casual phrasing -- "which indexes
+    have data in the month?" is meant as "in the last month", not "give me
+    whatever the system feels like defaulting to". Time is load-bearing for
+    query correctness, so a single trailing window of the named unit is a far
+    better inference than silently falling back to the generic
+    DEFAULT_UNBOUNDED_EARLIEST. This is intentionally the lowest-priority
+    matcher: it only runs after every more specific matcher (explicit counts,
+    since/until anchors, and named windows like "last month") has already
+    failed, so it never overrides a question that stated its window precisely.
+    The "month of <name>" phrasing is excluded because it signals an absolute
+    calendar month, not a relative trailing window -- that's a different (and
+    still unhandled) parsing case, so we deliberately don't guess there.
+    """
+    match = _BARE_UNIT_WINDOW_RE.search(q)
+    if not match:
+        return None
+    return _splunk_relative(1, match.group(1)), "now"
+
+
 def _match_since_anchor(q: str) -> tuple[str, str] | None:
     if "since yesterday" in q:
         return "-1d@d", "now"
@@ -711,6 +884,7 @@ def _parse_bounded_time_window(
         _match_since_anchor,
         _match_until_anchor,
         _match_named_window,
+        _match_bare_unit_window,
     )
     for matcher in matchers:
         parsed = matcher(q)
@@ -1355,6 +1529,61 @@ def infer_analytical_shape_hints(question: str) -> dict[str, Any]:
     if time_bin:
         required_outputs.append("bucket")
 
+    platform_ops_hints: dict[str, Any] = {}
+    if any(
+        token in q_lower
+        for token in (
+            "_internal",
+            "splunk internal",
+            "splunkd",
+            "scheduler",
+            "license usage",
+            "forwarder",
+            "deploymentclient",
+            "audittrail",
+            "_audit",
+            "_introspection",
+        )
+    ):
+        platform_ops_hints = {
+            "domain": "platform_ops",
+            "preferred_dimensions": ["sourcetype", "host", "component"],
+            "preferred_measures": [{"function": "count", "name_hint": "events"}],
+            "dataset_locks": ["index=_internal", "index=_audit"],
+            "avoid": ["security_review_heavy_pivots", "invented_host_filters"],
+        }
+        for role in ("sourcetype", "host", "component"):
+            if role not in requested_dimensions and re.search(rf"\b{role}s?\b", q_lower):
+                requested_dimensions.append(role)
+        if not any(item.get("function") == "count" for item in measures):
+            measures.append({"function": "count", "name_hint": "events"})
+    elif any(
+        token in q_lower
+        for token in (
+            "index=linux",
+            "linux index",
+            "linux sourcetype",
+            "linux host",
+            "linux auth",
+            "linux sudo",
+            "linux audit",
+            "linux session",
+            "linux failed login",
+        )
+    ) or re.search(r"\blinux\b.*\b(?:sourcetype|host|auth|sudo|audit|session)\b", q_lower):
+        platform_ops_hints = {
+            "domain": "linux_ops",
+            "preferred_dimensions": ["sourcetype", "host", "user", "src_ip"],
+            "preferred_measures": [{"function": "count", "name_hint": "events"}],
+            "dataset_locks": ["index=linux"],
+            "avoid": ["windows_eventcode_on_linux", "invented_host_filters"],
+        }
+        for role in ("sourcetype", "host", "user", "src_ip"):
+            if role not in requested_dimensions and re.search(rf"\b{role.replace('_', ' ')}\b|\b{role}\b", q_lower):
+                requested_dimensions.append(role)
+        if not any(item.get("function") == "count" for item in measures):
+            measures.append({"function": "count", "name_hint": "events"})
+
     return {
         "requested_datasets": locks,
         "filters": explicit_filters,
@@ -1368,6 +1597,7 @@ def infer_analytical_shape_hints(question: str) -> dict[str, Any]:
         "ratios": ratios,
         "intersections": intersections,
         "output_fields": list(dict.fromkeys(required_outputs)),
+        "platform_ops": platform_ops_hints,
     }
 
 
@@ -1412,6 +1642,39 @@ def query_conflicts_with_explicit_sourcetype(question: str, query: str) -> bool:
     return False
 
 
+PLATFORM_ORACLE_INTENTS: frozenset[str] = frozenset(
+    {
+        "splunk_internal_health",
+        "internal_sourcetypes",
+        "splunk_license_usage",
+        "forwarder_connectivity",
+        "internal_splunkd_health",
+        "internal_auth_failures",
+        "linux_sourcetypes",
+        "linux_host_activity",
+        "linux_auth_failures",
+        "linux_successful_logins",
+        "linux_privilege_escalation",
+        "linux_privilege_escalation_activity",
+        "linux_session_activity",
+        "linux_audit_activity",
+    }
+)
+
+LINUX_ORACLE_INTENTS: frozenset[str] = frozenset(
+    {
+        "linux_sourcetypes",
+        "linux_host_activity",
+        "linux_auth_failures",
+        "linux_successful_logins",
+        "linux_privilege_escalation",
+        "linux_privilege_escalation_activity",
+        "linux_session_activity",
+        "linux_audit_activity",
+    }
+)
+
+
 def domain_oracle_threshold_for_question(
     question: str,
     *,
@@ -1419,11 +1682,24 @@ def domain_oracle_threshold_for_question(
     mapped_intent: str = "",
 ) -> float:
     """Lower oracle short-circuit threshold when the question names an explicit sourcetype."""
+    q = (question or "").lower()
+    domain_intent = str(domain_intent or "").strip()
+    mapped_intent = str(mapped_intent or "").strip()
+    platform_hit = domain_intent in PLATFORM_ORACLE_INTENTS or mapped_intent in PLATFORM_ORACLE_INTENTS
+    if platform_hit and any(
+        term in q
+        for term in ("_internal", "splunk internal", "internal index", "_audit", "license", "forwarder", "scheduler", "splunkd")
+    ):
+        return 0.70
+    if (domain_intent in LINUX_ORACLE_INTENTS or mapped_intent in LINUX_ORACLE_INTENTS) and any(
+        term in q for term in ("linux index", "index=linux", "linux sourcetype", "linux host", "linux auth", "linux sudo", "linux audit")
+    ):
+        return 0.70
+    if re.search(r"\blinux\b", q) and (domain_intent in LINUX_ORACLE_INTENTS or mapped_intent in LINUX_ORACLE_INTENTS):
+        return 0.72
     explicit = extract_explicit_sourcetype(question)
     if not explicit:
         return 0.85
-    domain_intent = str(domain_intent or "").strip()
-    mapped_intent = str(mapped_intent or "").strip()
     if explicit == "access_combined" and domain_intent in APACHE_WEB_INTENTS:
         return 0.75
     if domain_intent and mapped_intent and domain_intent == mapped_intent:

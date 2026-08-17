@@ -27,9 +27,14 @@ git clone YOUR_REPO_URL
 cd agtsmith
 export AGTSMITH_UID=$(id -u)
 export AGTSMITH_GID=$(id -g)
-make docker-deploy-build
 make docker-deploy-up
 ```
+
+`docker-deploy-up` builds the current source, tags it with its Git revision and
+dirty-tree build identity, and verifies that the running container uses that
+exact image. It fails instead of falling back to an old local image. Base
+deployment requires no GPU devices; use `make docker-deploy-up-nvidia` only
+when NVIDIA host metrics are intentionally available.
 
 Then open:
 ```text
@@ -325,6 +330,7 @@ Investigate repeated failed SSH login activity in the last 24 hours on my linux 
 - The deployment container starts with a clean artifact volume.
 - It does not reuse host Data Domains or host personalization output.
 - Treat each Docker deployment setup as a fresh environment bootstrap.
+- Rebuild with `make docker-deploy-up`; deployment hotpatching is disabled so image revision checks remain trustworthy.
 - Host runtime still exists for development, but Docker deployment is the primary operator path.
 
 ## Offline LangGraph Optimization

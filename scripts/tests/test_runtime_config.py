@@ -22,8 +22,11 @@ from runtime_config import (
     _get_config_value,
     apply_model_family_assignments,
     expected_ollama_models,
+    get_env_profile_auto_refresh_enabled,
+    get_env_profile_refresh_interval_minutes,
     get_soc_ui_session_remember_timeout_min,
     get_soc_ui_session_timeout_min,
+    is_local_ollama_host,
     model_stack_summary,
 )
 
@@ -75,6 +78,27 @@ class RuntimeConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(get_soc_ui_session_timeout_min(), "60")
         self.assertEqual(get_soc_ui_session_remember_timeout_min(), "480")
 
+    def test_env_profile_auto_refresh_defaults_on_every_sixty_minutes(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ENV_PROFILE_AUTO_REFRESH_ENABLED", None)
+            os.environ.pop("ENV_PROFILE_REFRESH_INTERVAL_MINUTES", None)
+            self.assertTrue(get_env_profile_auto_refresh_enabled())
+            self.assertEqual(get_env_profile_refresh_interval_minutes(), 60)
+
+    def test_env_profile_auto_refresh_can_be_disabled(self) -> None:
+        with mock.patch.dict(os.environ, {"ENV_PROFILE_AUTO_REFRESH_ENABLED": "0"}):
+            self.assertFalse(get_env_profile_auto_refresh_enabled())
+
+    def test_env_profile_refresh_interval_honors_configured_value(self) -> None:
+        with mock.patch.dict(os.environ, {"ENV_PROFILE_REFRESH_INTERVAL_MINUTES": "240"}):
+            self.assertEqual(get_env_profile_refresh_interval_minutes(), 240)
+
+    def test_env_profile_refresh_interval_falls_back_on_garbage(self) -> None:
+        with mock.patch.dict(os.environ, {"ENV_PROFILE_REFRESH_INTERVAL_MINUTES": "not-a-number"}):
+            self.assertEqual(get_env_profile_refresh_interval_minutes(), 60)
+        with mock.patch.dict(os.environ, {"ENV_PROFILE_REFRESH_INTERVAL_MINUTES": "-5"}):
+            self.assertEqual(get_env_profile_refresh_interval_minutes(), 60)
+
 
 class RuntimeConfigSecretPreferenceTests(unittest.TestCase):
     def test_prefers_ui_env_when_shell_truncated_mcp_token(self) -> None:
@@ -96,6 +120,12 @@ class RuntimeConfigSecretPreferenceTests(unittest.TestCase):
             with mock.patch("runtime_config.UI_ENV_PATH", ui_env):
                 with mock.patch.dict(os.environ, {"SPLUNK_LAB_BEARER_TOKEN": stale_shell_token}, clear=False):
                     self.assertEqual(_get_config_value("SPLUNK_LAB_BEARER_TOKEN"), full_token)
+
+    def test_is_local_ollama_host(self) -> None:
+        self.assertTrue(is_local_ollama_host("http://127.0.0.1:11434"))
+        self.assertTrue(is_local_ollama_host("http://localhost:11434"))
+        self.assertTrue(is_local_ollama_host("http://host.docker.internal:11434"))
+        self.assertFalse(is_local_ollama_host("http://192.168.1.50:11434"))
 
 
 if __name__ == "__main__":

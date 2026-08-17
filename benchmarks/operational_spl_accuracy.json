@@ -67,7 +67,8 @@
     "entity_fields": ["sourcetype"],
     "profile_window": "",
     "min_jaccard": 0.75,
-    "min_entity_recall": 0.85
+    "min_entity_recall": 0.85,
+    "max_count_delta_pct": 0.15
   },
   {
     "id": "forwarder_connectivity_24h",

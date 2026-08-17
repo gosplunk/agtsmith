@@ -8,7 +8,7 @@ This fork extends [gosplunk/agtsmith](https://github.com/gosplunk/agtsmith) with
 |------|-------|-------------------|
 | **SplunkAppEngineer** | `splunk_app/**`, Splunk conf, install/reload | `agtsmith-splunk-app` |
 | **CoreEngineer** | `core/**`, `scripts/langgraph_*`, query policy | `agtsmith-spl-quality`, `make check` |
-| **IntegrationQA** | End-to-end MCP, benchmarks, docker deploy | `agtsmith-local-lab`, `agtsmith-benchmark` |
+| **IntegrationQA** | End-to-end MCP, benchmarks, docker deploy | `agtsmith-docker-build`, `agtsmith-local-lab`, `agtsmith-benchmark` |
 | **VisualDocs** | README screenshots, release visuals | `agtsmith-screenshots`, `make screenshots` |
 | **SecurityGuard** | Any config/secrets change | Block commits of `config/ui.env`, tokens |
 
@@ -26,6 +26,7 @@ Credentials live in gitignored `config/ui.env` or Splunk `passwords.conf` only.
 
 ## Parallel Workflow (after UI changes)
 
+0. **IntegrationQA** — `agtsmith-docker-build` (rebuild/restart `:8787` sidecar)
 1. **IntegrationQA** — `make check` and one live investigation
 2. **VisualDocs** — `make screenshots SCREENSHOT_VERSION=<version>`
 3. **SplunkAppEngineer** — `make splunk-app-install-local` and verify Splunk nav

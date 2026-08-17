@@ -26,6 +26,7 @@ from botsv3_catalog import extract_explicit_botsv3_sourcetype
 from question_intelligence import (
     infer_question_dimensions,
     infer_time_window,
+    question_has_index_token,
     question_requests_privilege_first_seen,
     score_template_for_question,
 )
@@ -192,10 +193,6 @@ def map_question_to_template(question: str, *, profile_path: str | Path | None =
         for template in TEMPLATES:
             if template.intent == "windows_process_activity":
                 return template
-    if "apache" in normalized and any(tok in normalized for tok in ("logon attempt", "login attempt", "weird logon", "weird login", "failed login")):
-        for template in TEMPLATES:
-            if template.intent == "apache_access_top_ips":
-                return template
     if explicit_botsv3_overview:
         for template in TEMPLATES:
             if template.intent == "botsv3_named_sourcetype_overview":
@@ -208,13 +205,95 @@ def map_question_to_template(question: str, *, profile_path: str | Path | None =
         for template in TEMPLATES:
             if template.intent == "internal_sourcetypes":
                 return template
-    if "splunk internal" in normalized and any(term in normalized for term in ("health", "volume", "platform")):
+    if (
+        ("linux index" in normalized or "index=linux" in normalized or re.search(r"\blinux\b.*\bsourcetype", normalized))
+        and any(term in normalized for term in ("sourcetype", "sourcetypes"))
+    ):
+        for template in TEMPLATES:
+            if template.intent == "linux_sourcetypes":
+                return template
+    if "linux" in normalized and any(term in normalized for term in ("host", "hosts")) and any(
+        term in normalized
+        for term in (
+            "have data",
+            "has data",
+            "with data",
+            "events in",
+            "had events",
+            "active",
+            "most activity",
+            "busiest",
+            "sending events",
+            "events to",
+            "sending to",
+        )
+    ):
+        for template in TEMPLATES:
+            if template.intent == "linux_host_activity":
+                return template
+    if ("scheduler" in normalized or "scheduler activity" in normalized) and (
+        "_internal" in normalized or "splunk internal" in normalized
+    ):
         for template in TEMPLATES:
             if template.intent == "splunk_internal_health":
                 return template
-    if any(term in normalized for term in ("top sourcetype", "sourcetypes by index")) or (
-        "sourcetype volume" in normalized and "splunk internal" not in normalized
+    if "splunkd" in normalized and (
+        "_internal" in normalized or "splunk internal" in normalized or "internal index" in normalized
     ):
+        for template in TEMPLATES:
+            if template.intent == "internal_splunkd_health":
+                return template
+    if any(term in normalized for term in ("host", "hosts")) and any(
+        term in normalized
+        for term in (
+            "have data",
+            "has data",
+            "with data",
+            "events in",
+            "had events",
+            "active",
+            "most activity",
+            "busiest",
+            "sending events",
+            "events to",
+            "sending to",
+        )
+    ) and "login" not in normalized and "auth" not in normalized:
+        for template in TEMPLATES:
+            if template.intent == "host_activity_summary":
+                return template
+    if (
+        "splunk internal" in normalized
+        or "internal health" in normalized
+        or "platform health" in normalized
+    ) and any(term in normalized for term in ("health", "volume", "platform")):
+        for template in TEMPLATES:
+            if template.intent == "splunk_internal_health":
+                return template
+    _sourcetype_data_terms = (
+        "have data",
+        "has data",
+        "with data",
+        "contain data",
+        "events in",
+        "had events",
+        "had data",
+        "active",
+        "most events",
+        "most data",
+        "generating the most",
+        "top sourcetype",
+        "top sourcetypes",
+        "sourcetype volume",
+        "sourcetypes by index",
+    )
+    if any(term in normalized for term in ("sourcetype", "sourcetypes")) and any(
+        term in normalized for term in _sourcetype_data_terms
+    ):
+        if "splunk internal" in normalized or "_internal" in normalized or "internal index" in normalized:
+            for template in TEMPLATES:
+                if template.intent == "internal_sourcetypes":
+                    return template
         for template in TEMPLATES:
             if template.intent == "index_sourcetype_volume":
                 return template
@@ -350,6 +429,50 @@ def _dynamic_query_for_question(template: QueryTemplate, question: str) -> str:
         return query
     if template.intent == "botsv3_named_sourcetype_overview" and explicit_botsv3_sourcetype:
         return template.query.replace("PLACEHOLDER_SOURCETYPE", explicit_botsv3_sourcetype)
+    if template.intent == "index_sourcetype_volume":
+        index_scope = (
+            "index=_internal"
+            if "_internal" in q or "splunk internal" in q or "internal index" in q
+            else "index=* NOT index=_*"
+        )
+        if (
+            any(term in q for term in ("sourcetype", "sourcetypes"))
+            and not question_has_index_token(q)
+            and "by index" not in q
+        ):
+            return f"search {index_scope} | stats count by sourcetype | sort - count"
+        return template.query.replace("index=* NOT index=_*", index_scope)
+    if template.intent == "metadata_inventory":
+        index_scope = "index=_internal" if "_internal" in q else "index=* NOT index=_*"
+        if "sourcetype" in q or "sourcetypes" in q:
+            if any(
+                term in q
+                for term in (
+                    "have data",
+                    "has data",
+                    "with data",
+                    "events in",
+                    "last hour",
+                    "last day",
+                    "last 24",
+                    "last week",
+                    "today",
+                    "yesterday",
+                )
+            ):
+                return f"search {index_scope} | stats count by sourcetype | sort - count"
+            return f"search {index_scope} | metadata type=sourcetypes | sort + sourcetype"
+    if template.intent == "host_activity_summary" and (
+        "_internal" in q or "splunk internal" in q or "internal index" in q
+    ):
+        return "search index=_internal | stats count by host sourcetype | sort - count"
+    if template.intent == "internal_splunkd_health":
+        return "search index=_internal sourcetype=splunkd | stats count by host component | sort - count"
+    if template.intent == "splunk_internal_health":
+        if "scheduler" in q:
+            return "search index=_internal sourcetype=scheduler | stats count by host | sort - count"
+        if any(term in q for term in ("host", "hosts")) and "sourcetype" not in q and "sourcetypes" not in q:
+            return "search index=_internal | stats count by host sourcetype | sort - count"
     if template.intent == "top_indexes" and any(
         term in q
         for term in (
@@ -407,7 +530,7 @@ def _extract_explicit_hosts(question: str) -> list[str]:
     patterns = (
         r"\bpidx\d+\b",
         r"\brpi\d+\b",
-        r"\bsplunk[a-z0-9_-]+\b",
+        r"\bsplunk[-_][a-z0-9_-]+\b",
         r"\bip-\d+(?:-\d+){3}\b",
         r"\bhost(?:name)?\s*(?:=|:)\s*([A-Za-z0-9_.-]+)\b",
         r"\bon host\s+([A-Za-z0-9_.-]+)\b",
@@ -438,6 +561,14 @@ def _extract_explicit_hosts(question: str) -> list[str]:
         "last",
         "most",
         "on",
+        "scheduler",
+        "splunkd",
+        "deploymentclient",
+        "license_usage",
+        "audittrail",
+        "metrics",
+        "metric",
+        "internal",
         "that",
         "the",
         "user",

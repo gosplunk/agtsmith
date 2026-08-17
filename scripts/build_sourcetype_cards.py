@@ -106,7 +106,7 @@ def _build_card_from_profile(
     }
 
 
-def build_cards_from_profile(profile: dict[str, Any]) -> list[dict[str, Any]]:
+def build_cards_from_profile(profile: dict[str, Any], *, scope: str = "all") -> list[dict[str, Any]]:
     if not isinstance(profile, dict):
         return []
     st_to_idx = profile.get("sourcetype_to_indexes", {})
@@ -115,10 +115,16 @@ def build_cards_from_profile(profile: dict[str, Any]) -> list[dict[str, Any]]:
     field_inventory = profile.get("sourcetype_field_inventory", {})
     if not isinstance(field_inventory, dict):
         field_inventory = {}
+    internal_indexes = {"_internal", "_audit", "_introspection"}
+    linux_indexes = {"linux", "soc_linux"}
     cards: list[dict[str, Any]] = []
     for sourcetype in sorted(st_to_idx.keys()):
         indexes_raw = st_to_idx.get(sourcetype, [])
         indexes = [str(i).strip() for i in indexes_raw if str(i).strip()] if isinstance(indexes_raw, list) else []
+        if scope == "internal" and not any(idx in internal_indexes for idx in indexes):
+            continue
+        if scope == "linux" and not any(idx in linux_indexes for idx in indexes):
+            continue
         field_rows = field_inventory.get(sourcetype, [])
         if not isinstance(field_rows, list):
             field_rows = []
@@ -145,6 +151,12 @@ def main() -> int:
     parser.add_argument("--sourcetype", default="", help="Build/enrich one sourcetype only")
     parser.add_argument("--live", action="store_true", help="Fetch fieldsummary via MCP when inventory missing")
     parser.add_argument("--top-n", type=int, default=0, help="Limit to top N sourcetypes by index count")
+    parser.add_argument(
+        "--scope",
+        default="all",
+        choices=("all", "internal", "linux"),
+        help="Build cards for all sourcetypes or only _internal/_audit/_introspection or linux index",
+    )
     args = parser.parse_args()
 
     profile = load_environment_profile(args.profile)
@@ -158,7 +170,7 @@ def main() -> int:
     if not isinstance(existing_cards, list):
         existing_cards = []
 
-    cards = build_cards_from_profile(profile)
+    cards = build_cards_from_profile(profile, scope=str(args.scope))
     if args.top_n > 0:
         cards = cards[: args.top_n]
 

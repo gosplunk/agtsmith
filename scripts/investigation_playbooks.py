@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -550,6 +551,9 @@ INTENT_PLAYBOOKS: dict[str, str] = {
     "host_activity_summary": "inventory_ops",
     "index_staleness": "inventory_ops",
     "splunk_internal_health": "platform_ops",
+    "internal_splunkd_health": "platform_ops",
+    "internal_sourcetypes": "platform_ops",
+    "internal_auth_failures": "platform_ops",
     "splunk_license_usage": "platform_ops",
     "forwarder_connectivity": "platform_ops",
     "web_traffic_summary": "it_ops_web",
@@ -563,7 +567,18 @@ PIVOT_QUERY_LIBRARY: dict[str, str] = {
     "sourcetype_drilldown": "search index={index} sourcetype={sourcetype} earliest={earliest} latest={latest} | stats count by host | sort - count",
     "host_drilldown": "search index=* host={host} earliest={earliest} latest={latest} | stats count by sourcetype index | sort - count",
     "internal_sourcetype_drilldown": "search index=_internal sourcetype={sourcetype} earliest={earliest} latest={latest} | stats count by host | sort - count",
+    "internal_splunkd_drilldown": "search index=_internal sourcetype=splunkd host={host} earliest={earliest} latest={latest} | stats count by component | sort - count",
 }
+
+_PIVOT_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_PIVOT_TIME_RE = re.compile(r"^(?:now|0|-[1-9][0-9]*[smhdw])$")
+
+
+def _safe_pivot_value(name: str, value: str) -> bool:
+    text = str(value or "").strip()
+    if name in {"earliest", "latest"}:
+        return bool(_PIVOT_TIME_RE.fullmatch(text))
+    return bool(_PIVOT_IDENTIFIER_RE.fullmatch(text))
 
 
 def playbook_query_pivots(
@@ -583,13 +598,21 @@ def playbook_query_pivots(
         if not template:
             return
         values = {"earliest": earliest, "latest": latest, **fmt}
+        if not all(_safe_pivot_value(name, value) for name, value in values.items()):
+            return
         try:
             query = template.format(**values)
         except Exception:
             return
         pivots.append({"id": pivot_id, "question": question, "query": query})
 
-    if normalized in {"top_indexes", "index_sourcetype_volume", "host_activity_summary"}:
+    if normalized in {
+        "top_indexes",
+        "metadata_inventory",
+        "index_sourcetype_volume",
+        "host_activity_summary",
+        "index_staleness",
+    }:
         indexes = entities.get("indexes") or entities.get("index") or []
         if indexes:
             idx = str(indexes[0])
@@ -602,7 +625,11 @@ def playbook_query_pivots(
                 index=str(indexes[0]),
                 sourcetype=str(sourcetypes[0]),
             )
-    if normalized == "splunk_internal_health" and entities.get("sourcetypes"):
+    if normalized in {
+        "splunk_internal_health",
+        "splunk_license_usage",
+        "forwarder_connectivity",
+    } and entities.get("sourcetypes"):
         st = str(entities["sourcetypes"][0])
         _add("internal_sourcetype_drilldown", f"Break down internal sourcetype {st} by host", sourcetype=st)
     if entities.get("hosts"):

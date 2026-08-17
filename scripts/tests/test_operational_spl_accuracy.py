@@ -40,7 +40,7 @@ class OperationalSplAccuracyTests(unittest.TestCase):
         self.assertIn("linux|10", keys)
         self.assertIn("main|3", keys)
 
-    def test_passes_score_prefers_entity_recall(self) -> None:
+    def test_passes_score_rejects_count_drift_despite_entity_recall(self) -> None:
         case = AccuracyCase(
             id="x",
             category="inventory",
@@ -55,8 +55,69 @@ class OperationalSplAccuracyTests(unittest.TestCase):
             entity_fields=("index",),
             min_entity_recall=1.0,
         )
-        score = {"jaccard": 0.0, "entity_recall": 1.0, "entity_jaccard": 1.0, "count_delta_pct": 0.5}
+        score = {
+            "jaccard": 0.0,
+            "entity_recall": 1.0,
+            "entity_jaccard": 1.0,
+            "equivalence_score": 0.85,
+            "count_delta_pct": 0.5,
+        }
+        self.assertFalse(_passes_score(score, case=case))
+
+    def test_passes_score_accepts_small_count_drift_with_equivalent_entities(self) -> None:
+        case = AccuracyCase(
+            id="x",
+            category="inventory",
+            question="q",
+            expected_intent="top_indexes",
+            canonical_spl="search index=* | stats count by index",
+            earliest_time="-1h",
+            latest_time="now",
+            compare_fields=("index", "count"),
+            profile_window="-1h",
+            min_jaccard=0.9,
+            entity_fields=("index",),
+            min_entity_recall=1.0,
+        )
+        score = {
+            "jaccard": 0.0,
+            "entity_recall": 1.0,
+            "entity_jaccard": 1.0,
+            "equivalence_score": 0.85,
+            "count_delta_pct": 0.01,
+        }
         self.assertTrue(_passes_score(score, case=case))
+
+    def test_profile_score_tolerates_wider_count_drift_than_pipeline(self) -> None:
+        case = AccuracyCase(
+            id="x",
+            category="inventory",
+            question="q",
+            expected_intent="top_indexes",
+            canonical_spl="search index=* | stats count by index",
+            earliest_time="-1h",
+            latest_time="now",
+            compare_fields=("index", "count"),
+            profile_window="-1h",
+            min_jaccard=0.9,
+            entity_fields=("index",),
+            min_entity_recall=1.0,
+        )
+        score = {
+            "jaccard": 0.0,
+            "entity_recall": 1.0,
+            "entity_jaccard": 1.0,
+            "equivalence_score": 0.85,
+            "count_delta_pct": 0.27,
+        }
+        self.assertFalse(
+            _passes_score(score, case=case),
+            "pipeline tolerance should still reject this drift",
+        )
+        self.assertTrue(
+            _passes_score(score, case=case, max_count_delta_pct=case.profile_max_count_delta_pct),
+            "snapshot profile tolerance should accept typical refresh-interval drift",
+        )
 
     def test_evaluate_case_offline_routing(self) -> None:
         case = AccuracyCase(

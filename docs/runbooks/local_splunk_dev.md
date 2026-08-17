@@ -38,7 +38,19 @@ sudo apt-get install -y docker-compose-v2
 
 ```bash
 export AGTSMITH_UID=$(id -u) AGTSMITH_GID=$(id -g)
-make docker-deploy-build docker-deploy-up
+make docker-deploy-up
+```
+
+The normal deploy command always builds the current checkout into a unique
+revision/build-identity tag, starts that exact image, and verifies the running
+container labels and image ID. It stops on a mismatch; there is no direct-run
+fallback and deployment hotpatching is intentionally disabled.
+
+NVIDIA host metrics are optional. Opt in only on a host with the mapped
+`nvidia-smi`, NVML library, and device nodes:
+
+```bash
+make docker-deploy-up-nvidia
 ```
 
 Fresh Docker deployments do not create a reusable default login. Open

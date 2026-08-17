@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,61 @@ def index_available() -> bool:
     data = load_index()
     docs = data.get("documents", [])
     return isinstance(docs, list) and len(docs) > 0
+
+
+def clear_index_cache() -> None:
+    load_index.cache_clear()
+
+
+def upsert_index_document(doc: dict[str, Any], *, path: str | None = None) -> bool:
+    """Insert or replace one document in the SPL embedding index."""
+    if not isinstance(doc, dict):
+        return False
+    doc_id = str(doc.get("id", "")).strip()
+    if not doc_id:
+        return False
+    clear_index_cache()
+    idx_path = Path(path) if path else index_path()
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    if idx_path.is_file():
+        try:
+            data = json.loads(idx_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {"documents": []}
+    else:
+        data = {"documents": []}
+    if not isinstance(data, dict):
+        data = {"documents": []}
+    documents = data.get("documents", [])
+    if not isinstance(documents, list):
+        documents = []
+    model = str(data.get("model", "nomic-embed-text"))
+    payload = dict(doc)
+    if not payload.get("embedding"):
+        text = str(payload.get("text", "")).strip()
+        if text:
+            vector = embed_query(text, model=model)
+            if vector:
+                payload["embedding"] = vector
+    replaced = False
+    out_docs: list[dict[str, Any]] = []
+    for item in documents:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id", "")).strip() == doc_id:
+            out_docs.append(payload)
+            replaced = True
+        else:
+            out_docs.append(item)
+    if not replaced:
+        out_docs.append(payload)
+    data["documents"] = out_docs
+    data["document_count"] = len(out_docs)
+    data["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+    data.setdefault("model", model)
+    idx_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    clear_index_cache()
+    return True
 
 
 def _post_json(url: str, payload: dict[str, Any], *, timeout: float = 120.0) -> dict[str, Any]:

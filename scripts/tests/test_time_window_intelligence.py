@@ -63,6 +63,32 @@ class TimeWindowIntelligenceTests(unittest.TestCase):
             with self.subTest(question=question):
                 self._assert_window(question, earliest, latest)
 
+    def test_bare_unit_window_without_last_past_qualifier(self) -> None:
+        """A dropped 'last'/'past' qualifier should still resolve to a single
+        trailing window of the named unit, not silently fall back to the
+        generic default. See: user reported 'which indexes have data in the
+        month?' incorrectly running over the default 7-day window instead of
+        the intended ~1 month lookback."""
+        cases = (
+            ("which indexes have data in the month?", "-1mon"),
+            ("show me errors in the week", "-1w"),
+            ("activity during the hour", "-1h"),
+            ("audit events within the quarter", "-1q"),
+            ("logins for the year", "-1y"),
+            ("failures across the day", "-1d"),
+        )
+        for question, earliest in cases:
+            with self.subTest(question=question):
+                self._assert_window(question, earliest)
+
+    def test_bare_unit_window_does_not_override_absolute_month_reference(self) -> None:
+        # "month of <name>" signals an absolute calendar month, not a relative
+        # trailing window -- the bare-unit fallback must not misfire here.
+        self._assert_window("errors in the month of July", "-7d")
+
+    def test_bare_unit_window_does_not_misfire_on_month_over_month(self) -> None:
+        self._assert_window("month over month growth in errors", "-7d")
+
     def test_since_and_until_anchors(self) -> None:
         self._assert_window("failed logons since yesterday", "-1d@d")
         self._assert_window("activity since start of month", "@mon")

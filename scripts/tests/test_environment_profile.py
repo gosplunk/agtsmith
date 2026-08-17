@@ -1035,5 +1035,90 @@ class IndexAliasTests(unittest.TestCase):
             self.assertTrue(ok, reason)
 
 
+class ResolveAuthoritativeDomainsEmbeddingBlendTests(unittest.TestCase):
+    """Covers the additive embedding-retrieval bonus in resolve_authoritative_domains_for_question.
+
+    `_domain_embedding_index_scores` is mocked directly so these tests exercise
+    the scoring blend in isolation, without depending on a live Ollama
+    embedder or a pre-built domain embedding index.
+    """
+
+    def _profile(self) -> dict:
+        return {
+            "indexes": [
+                {"index": "assets", "sourcetypes": ["asset_events"]},
+                {"index": "cloudapp_idx", "sourcetypes": ["cloudapp_events"]},
+            ],
+            "sourcetype_to_indexes": {
+                "asset_events": ["assets"],
+                "cloudapp_events": ["cloudapp_idx"],
+            },
+        }
+
+    # "asset" (singular) gives the `assets` index a modest keyword score via a
+    # sourcetype-name substring match, without triggering the much larger
+    # exact-index-name-mention bonus (which uses the literal token "assets").
+    _QUESTION = "Show software asset inventory for endpoint hosts"
+
+    def test_keyword_only_ranking_unaffected_when_embedding_scores_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(self._profile()), encoding="utf-8")
+            with mock.patch("environment_profile._domain_embedding_index_scores", return_value={}):
+                domains = resolve_authoritative_domains_for_question(
+                    self._QUESTION,
+                    "asset_baselining",
+                    profile_path=path,
+                )
+        self.assertTrue(domains)
+        self.assertEqual(domains[0]["index"], "assets")
+
+    def test_embedding_bonus_rescues_domain_with_zero_keyword_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(self._profile()), encoding="utf-8")
+            with mock.patch(
+                "environment_profile._domain_embedding_index_scores",
+                return_value={"cloudapp_idx": 1.0},
+            ):
+                domains = resolve_authoritative_domains_for_question(
+                    self._QUESTION,
+                    "asset_baselining",
+                    profile_path=path,
+                )
+        self.assertTrue(domains)
+        self.assertEqual(domains[0]["index"], "cloudapp_idx")
+
+    def test_weak_embedding_similarity_does_not_override_strong_keyword_match(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "profile.json"
+            path.write_text(json.dumps(self._profile()), encoding="utf-8")
+            with mock.patch(
+                "environment_profile._domain_embedding_index_scores",
+                return_value={"cloudapp_idx": 0.1},
+            ):
+                domains = resolve_authoritative_domains_for_question(
+                    self._QUESTION,
+                    "asset_baselining",
+                    profile_path=path,
+                )
+        self.assertTrue(domains)
+        self.assertEqual(domains[0]["index"], "assets")
+
+    def test_domain_embedding_index_scores_helper_degrades_to_empty_on_any_failure(self) -> None:
+        from environment_profile import _domain_embedding_index_scores
+
+        with mock.patch(
+            "domain_embedding_retrieval.retrieve_domain_scores", side_effect=RuntimeError("boom")
+        ):
+            self.assertEqual(_domain_embedding_index_scores("anything"), {})
+
+    def test_domain_embedding_index_scores_helper_respects_disabled_flag(self) -> None:
+        from environment_profile import _domain_embedding_index_scores
+
+        with mock.patch.dict("os.environ", {"SPL_DOMAIN_EMBEDDING_RETRIEVAL_ENABLED": "0"}, clear=False):
+            self.assertEqual(_domain_embedding_index_scores("anything"), {})
+
+
 if __name__ == "__main__":
     unittest.main()

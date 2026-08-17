@@ -22,7 +22,7 @@ from ui_auth_docker import (  # noqa: E402
 
 EXPECTED_NODE_COUNT = len(PLAYBOOK_FLOW_NODES)
 MIN_VIEWBOX_WIDTH = 800
-MIN_VIEWBOX_HEIGHT = 500
+MIN_VIEWBOX_HEIGHT = 900
 
 
 def _ensure_auth(base_url: str) -> tuple[str, str]:
@@ -80,10 +80,10 @@ def verify_playbook_overlay(page) -> list[str]:
     pill = page.locator("#runtime-journey-overlay-profile")
     if not pill.count() or not pill.is_visible():
         raise PlaybookOverlayVerificationError("Profile pill #runtime-journey-overlay-profile not visible")
-    pill_text = (pill.inner_text() or "").strip().upper()
-    if pill_text != "ALL PATHS":
+    pill_text = (pill.inner_text() or "").strip()
+    if pill_text.lower() != "all paths":
         raise PlaybookOverlayVerificationError(
-            f"Expected ALL PATHS pill in doc mode (no active run), got {pill_text!r}"
+            f"Expected All paths pill in doc mode (no active run), got {pill_text!r}"
         )
     checks.append("all_paths_pill")
 
@@ -113,6 +113,19 @@ def verify_playbook_overlay(page) -> list[str]:
     if not labels_layer.count():
         raise PlaybookOverlayVerificationError("Edge labels layer .playbook-flow-edge-labels missing")
     checks.append("edge_labels_layer")
+
+    edge_paths = page.locator("#playbook-flowchart-svg .playbook-flow-edge")
+    edge_count = edge_paths.count()
+    if edge_count < 20:
+        raise PlaybookOverlayVerificationError(f"Expected ≥20 playbook edges, found {edge_count}")
+    missing_markers = page.locator(
+        '#playbook-flowchart-svg .playbook-flow-edge:not(.branch-blocked):not([marker-end])'
+    ).count()
+    if missing_markers:
+        raise PlaybookOverlayVerificationError(
+            f"Expected marker-end on non-blocked edges, {missing_markers} missing"
+        )
+    checks.append(f"edge_markers_{edge_count}")
 
     legend = page.locator("#playbook-flowchart-svg .playbook-flow-legend")
     if not legend.count():

@@ -46,6 +46,18 @@ def main() -> int:
             "Show internal Splunk sourcetypes in _internal",
         ),
         (
+            "pass_internal_when_possessive_internal_health_phrasing",
+            {
+                "query": "search index=_internal | stats count by sourcetype | sort - count",
+                "earliest_time": "-24h",
+                "latest_time": "now",
+                "row_limit": 10,
+            },
+            True,
+            "query_policy_ok",
+            "Is Splunk's own internal health okay, any errors or warnings in the last 24 hours?",
+        ),
+        (
             "fail_non_search_prefix",
             {
                 "query": "| tstats count where index=_internal by sourcetype",

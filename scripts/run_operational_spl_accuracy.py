@@ -35,6 +35,11 @@ class AccuracyCase:
     min_jaccard: float
     entity_fields: tuple[str, ...]
     min_entity_recall: float
+    max_count_delta_pct: float | None = 0.05
+    # Wider than max_count_delta_pct: the Data Domains profile is a periodically
+    # refreshed snapshot, not a live query, so count drift vs. canonical is expected.
+    profile_max_count_delta_pct: float | None = 0.5
+    min_equivalence_score: float = 0.7
     fields_first: bool = False
     offline_verified_fields: tuple[str, ...] = ()
 
@@ -65,6 +70,17 @@ def _load_cases(path: Path) -> list[AccuracyCase]:
                 min_jaccard=float(row.get("min_jaccard", 0.9)),
                 entity_fields=entity_fields,
                 min_entity_recall=float(row.get("min_entity_recall", 0.9)),
+                max_count_delta_pct=(
+                    float(row["max_count_delta_pct"])
+                    if row.get("max_count_delta_pct") is not None
+                    else (0.05 if "count" in compare_fields else None)
+                ),
+                profile_max_count_delta_pct=(
+                    float(row["profile_max_count_delta_pct"])
+                    if row.get("profile_max_count_delta_pct") is not None
+                    else (0.5 if "count" in compare_fields else None)
+                ),
+                min_equivalence_score=float(row.get("min_equivalence_score", 0.7)),
                 fields_first=bool(row.get("fields_first", False)),
                 offline_verified_fields=tuple(
                     str(field)
@@ -306,10 +322,46 @@ def _score_rows(
     }
 
 
-def _passes_score(score: dict[str, Any], *, case: AccuracyCase) -> bool:
-    if score.get("entity_recall", 0) >= case.min_entity_recall:
-        return True
-    return float(score.get("jaccard", 0)) >= case.min_jaccard
+def _passes_score(
+    score: dict[str, Any],
+    *,
+    case: AccuracyCase,
+    max_count_delta_pct: float | None = None,
+) -> bool:
+    if float(score.get("entity_recall", 0)) < case.min_entity_recall:
+        return False
+    if float(score.get("entity_jaccard", 0)) < case.min_jaccard:
+        return False
+    if float(score.get("equivalence_score", 0)) < case.min_equivalence_score:
+        return False
+    threshold = case.max_count_delta_pct if max_count_delta_pct is None else max_count_delta_pct
+    count_delta = score.get("count_delta_pct")
+    if threshold is not None and count_delta is not None and float(count_delta) > threshold:
+        return False
+    return True
+
+
+def _score_findings(
+    prefix: str,
+    score: dict[str, Any],
+    *,
+    case: AccuracyCase,
+    max_count_delta_pct: float | None = None,
+) -> list[str]:
+    findings: list[str] = []
+    if float(score.get("entity_recall", 0)) < case.min_entity_recall:
+        findings.append(f"{prefix}_entity_recall:{score.get('entity_recall')}<{case.min_entity_recall}")
+    if float(score.get("entity_jaccard", 0)) < case.min_jaccard:
+        findings.append(f"{prefix}_entity_jaccard:{score.get('entity_jaccard')}<{case.min_jaccard}")
+    if float(score.get("equivalence_score", 0)) < case.min_equivalence_score:
+        findings.append(
+            f"{prefix}_equivalence_score:{score.get('equivalence_score')}<{case.min_equivalence_score}"
+        )
+    threshold = case.max_count_delta_pct if max_count_delta_pct is None else max_count_delta_pct
+    count_delta = score.get("count_delta_pct")
+    if threshold is not None and count_delta is not None and float(count_delta) > threshold:
+        findings.append(f"{prefix}_count_delta_pct:{count_delta}>{threshold}")
+    return findings
 
 
 def evaluate_case(
@@ -335,7 +387,7 @@ def evaluate_case(
     policy_ok, policy_reason = validate_query_args(pipeline_args, question=case.question)
     pipeline_query = str(pipeline_args.get("query", ""))
     fields_first_findings: list[str] = []
-    if case.fields_first:
+    if case.fields_first and len(canonical_rows) > 0:
         if not pipeline.get("field_strategy_trusted_fields"):
             fields_first_findings.append("fields_first_no_trusted_native_fields")
         if "| rex " in pipeline_query.lower() or "| spath " in pipeline_query.lower():
@@ -395,17 +447,23 @@ def evaluate_case(
     if not policy_ok:
         findings.append(f"policy_fail:{policy_reason}")
     if not _passes_score(pipeline_score, case=case):
-        findings.append(
-            f"pipeline_entity_recall:{pipeline_score.get('entity_recall')}<{case.min_entity_recall}"
+        findings.extend(_score_findings("pipeline", pipeline_score, case=case))
+    if profile_score is not None and not _passes_score(
+        profile_score, case=case, max_count_delta_pct=case.profile_max_count_delta_pct
+    ):
+        profile_findings = _score_findings(
+            "profile", profile_score, case=case, max_count_delta_pct=case.profile_max_count_delta_pct
         )
-    if profile_score is not None and not _passes_score(profile_score, case=case):
-        findings.append(
-            f"profile_entity_recall:{profile_score.get('entity_recall')}<{case.min_entity_recall}"
-        )
+        if (
+            profile_findings
+            and _passes_score(pipeline_score, case=case)
+            and float(profile_score.get("entity_recall", 0)) >= case.min_entity_recall
+            and all(item.startswith("profile_count_delta_pct:") for item in profile_findings)
+        ):
+            profile_findings = []
+        findings.extend(profile_findings)
     if multi_score is not None and not _passes_score(multi_score, case=case):
-        findings.append(
-            f"multi_model_entity_recall:{multi_score.get('entity_recall')}<{case.min_entity_recall}"
-        )
+        findings.extend(_score_findings("multi_model", multi_score, case=case))
 
     passed = not findings
     multi_args = multi_model.get("mapped_query", {}) if isinstance(multi_model, dict) else {}
@@ -423,6 +481,7 @@ def evaluate_case(
         "pipeline_jaccard": pipeline_score.get("jaccard"),
         "profile_jaccard": profile_score.get("jaccard") if profile_score else None,
         "canonical_rows": len(canonical_rows),
+        "live_evidence": "non_empty_reference" if canonical_rows else "empty_reference_inconclusive",
         "pipeline_rows": len(pipeline_rows),
         "profile_rows": len(profile_rows),
         "multi_model_rows": len(multi_rows),
@@ -443,9 +502,24 @@ def main() -> int:
     parser.add_argument("--row-limit", type=int, default=50)
     parser.add_argument("--offline", action="store_true", help="Skip live MCP execution")
     parser.add_argument("--multi-model", action="store_true", help="Also run full multi-model LangGraph pipeline")
+    parser.add_argument(
+        "--case-id",
+        action="append",
+        default=[],
+        help="Run only the named case; repeat for a practical multi-model subset",
+    )
+    parser.add_argument("--max-cases", type=int, default=0, help="Limit cases after --case-id filtering")
     args = parser.parse_args()
 
     cases = _load_cases(Path(args.cases))
+    selected_ids = {str(case_id).strip() for case_id in args.case_id if str(case_id).strip()}
+    if selected_ids:
+        cases = [case for case in cases if case.id in selected_ids]
+        missing_ids = sorted(selected_ids - {case.id for case in cases})
+        if missing_ids:
+            parser.error(f"unknown --case-id value(s): {', '.join(missing_ids)}")
+    if args.max_cases > 0:
+        cases = cases[: args.max_cases]
     profile = load_environment_profile()
     results = [
         evaluate_case(
@@ -465,6 +539,9 @@ def main() -> int:
         "case_count": len(results),
         "passed_count": passed,
         "pass_rate_pct": round((passed / len(results)) * 100, 2) if results else 0.0,
+        "informative_case_count": sum(
+            1 for row in results if row.get("live_evidence") == "non_empty_reference"
+        ),
         "results": results,
     }
     out_dir = Path(args.out_dir)

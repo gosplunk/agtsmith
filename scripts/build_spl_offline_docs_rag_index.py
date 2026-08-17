@@ -193,6 +193,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.source.exists():
+        if args.if_stale:
+            # Optional enrichment corpus (e.g. not mounted in this deployment);
+            # don't fail the background refresh chain over a missing extra.
+            print(json.dumps({"out": str(args.out), "skipped": True, "reason": "source_unavailable"}, indent=2))
+            return 0
         raise SystemExit(f"source_not_found:{args.source}")
 
     if args.if_stale and args.out.exists():

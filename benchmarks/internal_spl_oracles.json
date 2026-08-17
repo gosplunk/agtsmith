@@ -1,0 +1,246 @@
+[
+  {
+    "id": "forwarder_connectivity_24h",
+    "category": "platform_ops",
+    "index_scope": "_internal",
+    "sourcetype_tags": [
+      "splunkd",
+      "deploymentclient"
+    ],
+    "question": "Show forwarder connectivity in _internal in the last 24 hours",
+    "expected_intent": "forwarder_connectivity",
+    "canonical_spl": "search index=_internal (sourcetype=splunkd OR sourcetype=deploymentclient) | stats count by host sourcetype | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "host",
+      "sourcetype"
+    ],
+    "min_jaccard": 0.6,
+    "min_entity_recall": 0.7,
+    "min_equivalence_score": 0.7,
+    "data_present_required": true
+  },
+  {
+    "id": "internal_auth_failures_24h",
+    "category": "platform_ops",
+    "index_scope": "_audit",
+    "sourcetype_tags": [
+      "audittrail"
+    ],
+    "question": "What Splunk internal auth failures happened in the last 24 hours?",
+    "expected_intent": "internal_auth_failures",
+    "canonical_spl": "search index=_audit sourcetype=audittrail info=failed | stats count by host user src | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "user",
+      "src",
+      "count"
+    ],
+    "entity_fields": [
+      "host",
+      "user",
+      "src"
+    ],
+    "min_jaccard": 1.0,
+    "min_entity_recall": 1.0,
+    "min_equivalence_score": 1.0,
+    "data_present_required": false
+  },
+  {
+    "id": "internal_hosts_sending_events_24h",
+    "category": "platform_ops",
+    "index_scope": "_internal",
+    "sourcetype_tags": [],
+    "question": "Which hosts are sending events to _internal in the last 24 hours?",
+    "expected_intent": "host_activity_summary",
+    "canonical_spl": "search index=_internal | stats count by host sourcetype | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "host",
+      "sourcetype"
+    ],
+    "min_jaccard": 0.7,
+    "min_entity_recall": 0.8,
+    "min_equivalence_score": 0.75,
+    "data_present_required": true
+  },
+  {
+    "id": "internal_most_active_sourcetypes_hour",
+    "category": "platform_ops",
+    "index_scope": "_internal",
+    "sourcetype_tags": [],
+    "question": "Which sourcetypes are most active in _internal in the last hour?",
+    "expected_intent": "internal_sourcetypes",
+    "canonical_spl": "search index=_internal | stats count by sourcetype | sort - count",
+    "earliest_time": "-1h",
+    "latest_time": "now",
+    "compare_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "sourcetype"
+    ],
+    "min_jaccard": 0.85,
+    "min_entity_recall": 0.9,
+    "min_equivalence_score": 0.85,
+    "data_present_required": true
+  },
+  {
+    "id": "internal_sourcetype_volume_24h",
+    "category": "platform_ops",
+    "index_scope": "_internal",
+    "sourcetype_tags": [],
+    "question": "Show Splunk internal sourcetype volume in the last 24 hours",
+    "expected_intent": "splunk_internal_health",
+    "canonical_spl": "search index=_internal | stats count by sourcetype | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "sourcetype"
+    ],
+    "min_jaccard": 0.75,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "max_count_delta_pct": 0.15,
+    "data_present_required": true
+  },
+  {
+    "id": "internal_sourcetypes_24h",
+    "category": "platform_ops",
+    "index_scope": "_internal",
+    "sourcetype_tags": [],
+    "question": "What sourcetypes have data in _internal in the last hour?",
+    "expected_intent": "internal_sourcetypes",
+    "canonical_spl": "search index=_internal | stats count by sourcetype | sort - count",
+    "earliest_time": "-1h",
+    "latest_time": "now",
+    "compare_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "sourcetype"
+    ],
+    "min_jaccard": 0.85,
+    "min_entity_recall": 0.9,
+    "min_equivalence_score": 0.85,
+    "data_present_required": true
+  },
+  {
+    "id": "license_usage_day",
+    "category": "platform_ops",
+    "index_scope": "_internal",
+    "sourcetype_tags": [
+      "splunkd",
+      "license_usage"
+    ],
+    "question": "Show license usage in Splunk internal indexes in the last day",
+    "expected_intent": "splunk_license_usage",
+    "canonical_spl": "search index=_internal sourcetype=splunkd OR sourcetype=license_usage | stats count by sourcetype host | sort - count",
+    "earliest_time": "-1d",
+    "latest_time": "now",
+    "compare_fields": [
+      "sourcetype",
+      "host",
+      "count"
+    ],
+    "entity_fields": [
+      "sourcetype",
+      "host"
+    ],
+    "min_jaccard": 0.6,
+    "min_entity_recall": 0.7,
+    "min_equivalence_score": 0.7,
+    "data_present_required": true
+  },
+  {
+    "id": "list_internal_sourcetypes_hour",
+    "category": "platform_ops",
+    "index_scope": "_internal",
+    "sourcetype_tags": [],
+    "question": "List sourcetypes with events in _internal in the last hour",
+    "expected_intent": "internal_sourcetypes",
+    "canonical_spl": "search index=_internal | stats count by sourcetype | sort - count",
+    "earliest_time": "-1h",
+    "latest_time": "now",
+    "compare_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "sourcetype"
+    ],
+    "min_jaccard": 0.85,
+    "min_entity_recall": 0.9,
+    "min_equivalence_score": 0.85,
+    "data_present_required": true
+  },
+  {
+    "id": "scheduler_activity_by_host_24h",
+    "category": "platform_ops",
+    "index_scope": "_internal",
+    "sourcetype_tags": [
+      "scheduler"
+    ],
+    "question": "Show scheduler activity in _internal for the last 24 hours",
+    "expected_intent": "splunk_internal_health",
+    "canonical_spl": "search index=_internal sourcetype=scheduler | stats count by host | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "count"
+    ],
+    "entity_fields": [
+      "host"
+    ],
+    "min_jaccard": 0.8,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.85,
+    "data_present_required": true
+  },
+  {
+    "id": "splunkd_volume_24h",
+    "category": "platform_ops",
+    "index_scope": "_internal",
+    "sourcetype_tags": [
+      "splunkd"
+    ],
+    "question": "Show splunkd volume in _internal for the last 24 hours",
+    "expected_intent": "internal_splunkd_health",
+    "canonical_spl": "search index=_internal sourcetype=splunkd | stats count by host component | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "component",
+      "count"
+    ],
+    "entity_fields": [
+      "host"
+    ],
+    "min_jaccard": 0.65,
+    "min_entity_recall": 0.75,
+    "min_equivalence_score": 0.7,
+    "data_present_required": true
+  }
+]

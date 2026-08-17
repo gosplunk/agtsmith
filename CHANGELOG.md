@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.5.2
+
+- added **Internal SPL** and **Linux SPL** benchmark programs with oracle JSON corpora, discover/card scripts, offline gates in `make check`, and live template/multimodel harnesses (`docs/project/internal_spl_benchmark.md`, `docs/project/linux_spl_benchmark.md`)
+- added **ten-domain SPL learning loop** (`make ten-domain-learning-loop`) with expanded lab ingest, per-domain scoring, and autonomous fix dispatch (`artifacts/spl_autonomy/ten_domain_loop/`)
+- hardened **LangGraph writer path**: template bypass before analytical plans, intent contract rejects invalid stats+table shapes, Linux/internal domain oracle short-circuits
+- added **MCP pipeline router** (deterministic vs LLM-assisted chat) with regression tests
+- added **Docker deploy contract** (`scripts/docker_deploy.py`, `agtsmith-docker-build` skill, compose NVIDIA overlay)
+- added **saved query library**, **domain embedding RAG** index builders, and operational SPL offline Makefile target
+- **Splunk app wrapper** under `splunk_app/agent_smith/` for native Splunk Web embedding (fork packaging)
+- Makefile **`PYTHON_BIN`** fallback so benchmark targets run in Docker (python3) and host `.venv` interchangeably
+- host-side **SPL quality tracker** console (`make spl-quality-tracker`, port 8791)—not in Docker sidecar
+- Phase 3 internal expansion documented and deferred (`docs/project/internal_spl_phase3.md`)
+
 ## v1.5.1
 
 - promoted **`TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M`** as the default **planner** after the 24-model RTX 1000 Ada bake-off (Ministral-3B-Reasoning; **`ministral-3:3b`** fallback via `OLLAMA_MODEL_QUERY_PLANNER_FALLBACK`)

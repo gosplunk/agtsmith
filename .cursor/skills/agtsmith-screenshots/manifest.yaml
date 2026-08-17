@@ -1,4 +1,4 @@
-version: "v1.5.1"
+version: "v1.5.2"
 output_dir_template: docs/images/screenshots/{version}
 viewport:
   width: 1920

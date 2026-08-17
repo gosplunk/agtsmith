@@ -11,6 +11,7 @@ from typing import Any
 
 from holdout_firewall import filter_holdout_records
 from local_learning import approved_learning_records
+from saved_query_library import learning_record_to_index_doc
 from minimal_question_to_answer import map_question_to_template, template_to_query_args
 from query_templates import TEMPLATES
 from sourcetype_cards import load_cards
@@ -77,19 +78,9 @@ def build_documents() -> list[dict[str, Any]]:
             }
         )
     for row in approved_learning_records():
-        q = str(row.get("question", "")).strip()
-        query = str(row.get("query", "")).strip()
-        if not q or not query:
-            continue
-        docs.append(
-            {
-                "id": f"learning:{row.get('id', len(docs))}",
-                "kind": "learning",
-                "intent": str(row.get("intent", "")),
-                "text": f"{q} {query}",
-                "query": query,
-            }
-        )
+        doc = learning_record_to_index_doc(row)
+        if doc:
+            docs.append(doc)
     allowed, _rejected = filter_holdout_records(docs)
     return allowed
 

@@ -1,0 +1,66 @@
+# Tier 1 linux sourcetype clusters for oracle seeding (Phase 1).
+auth_log:
+  index: linux
+  sourcetype: auth.log
+  data_present_required: false
+  example_questions:
+    - Show Linux failed login activity in the last 24 hours
+    - Show Linux successful login activity in the last 24 hours
+  canonical_shape: 'search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("Failed password" OR "authentication failure") | stats count by host user src_ip port | sort - count'
+  compare_fields: [host, user, src_ip, port, count]
+
+linux_secure:
+  index: linux
+  sourcetype: linux_secure
+  data_present_required: false
+  example_questions:
+    - Show Linux failed login activity in the last 24 hours
+  canonical_shape: 'search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") ("Failed password" OR "authentication failure") | stats count by host user src_ip port | sort - count'
+  compare_fields: [host, user, src_ip, count]
+
+linux_sudo:
+  index: linux
+  data_present_required: false
+  example_questions:
+    - Show failed sudo attempts on Linux in the last 24 hours
+  canonical_shape: 'search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") | stats count by host process_name actor tty src_ip sourcetype | sort - count'
+  compare_fields: [host, actor, src_ip, count]
+
+linux_sudo_activity:
+  index: linux
+  example_questions:
+    - Show Linux sudo activity in the last 24 hours
+  canonical_shape: 'search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") | stats count by host user src_ip | sort - count'
+  compare_fields: [host, user, src_ip, count]
+
+linux_session:
+  index: linux
+  example_questions:
+    - Show Linux session activity in the last 24 hours
+  canonical_shape: 'search index=linux (source="/var/log/auth.log" OR source="/var/log/secure") | table _time host sourcetype session_state actor tty src_ip _raw | head 20'
+  compare_fields: [host, actor, src_ip, count]
+  data_present_required: false
+
+linux_audit:
+  index: linux
+  sourcetype: linux_audit
+  example_questions:
+    - Show Linux audit activity in the last 24 hours
+  canonical_shape: 'search index=linux sourcetype=linux_audit | stats count by host audit_type audit_op audit_res | sort - count'
+  compare_fields: [host, audit_type, audit_op, count]
+  data_present_required: false
+
+linux_inventory:
+  index: linux
+  example_questions:
+    - What sourcetypes have data in the linux index in the last hour?
+    - Which sourcetypes are most active in the linux index in the last hour?
+  canonical_shape: 'search index=linux | stats count by sourcetype | sort - count'
+  compare_fields: [sourcetype, count]
+
+linux_hosts:
+  index: linux
+  example_questions:
+    - Which hosts are sending events to the linux index in the last 24 hours?
+  canonical_shape: 'search index=linux | stats count by host sourcetype | sort - count'
+  compare_fields: [host, sourcetype, count]

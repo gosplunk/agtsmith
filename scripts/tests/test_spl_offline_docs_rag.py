@@ -94,6 +94,40 @@ class SplOfflineDocsRagTests(unittest.TestCase):
                 )
         self.assertIn("[SPL_OFFLINE_DOCS]", ctx)
 
+    def test_operational_intent_filters_high_scoring_but_irrelevant_topic(self) -> None:
+        payload = {
+            "built_at": "2026-08-06T00:00:00+00:00",
+            "topic_count": 2,
+            "topics": [
+                {
+                    "id": "irrelevant",
+                    "title": "Verify the status of agents lookup",
+                    "path": "admin/agents/status",
+                    "text": "Use stats to count status values for agent inventory.",
+                    "category": "search",
+                },
+                {
+                    "id": "relevant",
+                    "title": "Search Apache web access logs",
+                    "path": "search/apache-http-access",
+                    "text": "Search access_combined events and use stats by clientip, uri, and status.",
+                    "category": "search",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            index_path = Path(tmp) / "index.json"
+            index_path.write_text(json.dumps(payload), encoding="utf-8")
+            ctx = build_offline_docs_context(
+                "Investigate suspicious web requests and status codes",
+                intent="apache_suspicious_activity",
+                index_path=index_path,
+                max_topics=1,
+            )
+
+        self.assertIn("Search Apache web access logs", ctx)
+        self.assertNotIn("Verify the status of agents lookup", ctx)
+
     def test_offline_docs_index_available_false_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self.assertFalse(offline_docs_index_available(index_path=Path(tmp) / "missing.json"))

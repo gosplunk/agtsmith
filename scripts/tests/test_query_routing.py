@@ -46,6 +46,15 @@ class QueryRoutingTests(unittest.TestCase):
         self.assertEqual(tool, "splunk_get_metadata")
         self.assertEqual(metadata_args.get("type"), "sources")
 
+    def test_splunk_own_internal_health_phrasing_routes_to_internal_health(self) -> None:
+        # Regression: the rigid "splunk internal" substring check missed the
+        # natural possessive phrasing "Splunk's own internal health", which
+        # fell through to failed_login_activity instead.
+        template = map_question_to_template(
+            "Is Splunk's own internal health okay, any errors or warnings in the last 24 hours?"
+        )
+        self.assertEqual(template.intent, "splunk_internal_health")
+
     def test_demo_botsv3_phrase_does_not_misroute_aad_signin_questions(self) -> None:
         template = map_question_to_template(
             "Show Azure AD sign-in activity by user, IP, and application using the public BOTSv3 demo dataset across all time."

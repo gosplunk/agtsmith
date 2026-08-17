@@ -55,6 +55,13 @@ _BENIGN_ONLY_PHRASES = (
     "do not filter",
     "without filtering",
 )
+_LOGON_PHRASES = (
+    "logon attempt",
+    "login attempt",
+    "weird logon",
+    "weird login",
+    "failed login",
+)
 _SENSITIVE_PATH_WORDS = (
     "sensitive path",
     "sensitive uri",
@@ -150,6 +157,13 @@ def classify_apache_intent(question: str) -> str:
     sensitive_path = any(word in q for word in _SENSITIVE_PATH_WORDS)
     trend = any(word in q for word in ("spike", "trend", "timeline", "over time", "rate by time", "timechart"))
 
+    # Apache access logs have no real "logon"/"login" concept -- a question
+    # phrased that way isn't asking about a concrete suspicious signal, even
+    # when it's also flavored with a generic mood word like "weird". Treat it
+    # as a request for the general access/top-IPs view rather than letting the
+    # vague mood word win the (more specific) suspicious-activity template.
+    if any(phrase in q for phrase in _LOGON_PHRASES):
+        return "apache_access_top_ips"
     if sensitive_path:
         return "apache_sensitive_path_probing"
     if has_404 and scanning:

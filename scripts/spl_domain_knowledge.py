@@ -99,6 +99,42 @@ BUILTIN_PATTERNS: list[dict[str, Any]] = [
         "priority": 85,
     },
     {
+        "id": "internal_scheduler_activity",
+        "intent": "splunk_internal_health",
+        "triggers": ["scheduler activity", "scheduler", "search scheduler"],
+        "trigger_regex": [r"\bscheduler\b.*\b(?:activity|volume|health)\b"],
+        "preferred_tool": "splunk_run_query",
+        "query_template": "search index=_internal sourcetype=scheduler | stats count by host | sort - count",
+        "anti_patterns": [r"index=\*(?!.*_internal)", r"sourcetype=splunkd"],
+        "explanation": "Scheduler telemetry lives in _internal sourcetype=scheduler.",
+        "tags": ["platform_ops", "scheduler"],
+        "priority": 90,
+    },
+    {
+        "id": "internal_splunkd_health",
+        "intent": "internal_splunkd_health",
+        "triggers": ["splunkd volume", "splunkd health", "splunkd errors", "splunkd component"],
+        "trigger_regex": [r"\bsplunkd\b.*\b(?:volume|health|error|component|activity)\b"],
+        "preferred_tool": "splunk_run_query",
+        "query_template": "search index=_internal sourcetype=splunkd | stats count by host component | sort - count",
+        "anti_patterns": [r"index=\*(?!.*_internal)", r"sourcetype=scheduler"],
+        "explanation": "Splunkd diagnostics use index=_internal sourcetype=splunkd with host/component breakdown.",
+        "tags": ["platform_ops", "splunkd"],
+        "priority": 91,
+    },
+    {
+        "id": "internal_sourcetype_inventory",
+        "intent": "internal_sourcetypes",
+        "triggers": ["internal sourcetype", "sourcetypes in _internal", "list sourcetype"],
+        "trigger_regex": [r"\b_?internal\b.*\bsourcetype"],
+        "preferred_tool": "splunk_run_query",
+        "query_template": "search index=_internal | stats count by sourcetype | sort - count",
+        "anti_patterns": [r"stats\s+count\s+by\s+index\b", r"\|\s*stats\s+count\s+by\s+source\b", r"index=\*(?!.*_internal)"],
+        "explanation": "Internal sourcetype inventory uses index=_internal with stats by sourcetype.",
+        "tags": ["platform_ops", "inventory"],
+        "priority": 93,
+    },
+    {
         "id": "forwarder_connectivity",
         "intent": "forwarder_connectivity",
         "triggers": ["forwarder", "deployment client", "heartbeat"],
@@ -108,6 +144,82 @@ BUILTIN_PATTERNS: list[dict[str, Any]] = [
         "explanation": "Forwarder health lives in _internal splunkd/deploymentclient sourcetypes.",
         "tags": ["platform_ops"],
         "priority": 80,
+    },
+    {
+        "id": "splunk_license_usage",
+        "intent": "splunk_license_usage",
+        "triggers": ["license usage", "license quota", "splunk license", "license consumption"],
+        "trigger_regex": [r"\blicense\b.*\b(?:usage|quota|consumption)\b", r"\bsplunk\b.*\blicense\b"],
+        "preferred_tool": "splunk_run_query",
+        "query_template": "search index=_internal sourcetype=splunkd OR sourcetype=license_usage | stats count by sourcetype host | sort - count",
+        "anti_patterns": [
+            r"sourcetype=splunkd(?!.*license_usage)",
+            r"index=\*(?!.*_internal)",
+        ],
+        "explanation": "License usage spans _internal sourcetype=splunkd and sourcetype=license_usage.",
+        "tags": ["platform_ops", "license"],
+        "priority": 94,
+    },
+    {
+        "id": "linux_sourcetype_inventory",
+        "intent": "linux_sourcetypes",
+        "triggers": ["linux sourcetype", "sourcetypes in linux", "linux index sourcetype"],
+        "trigger_regex": [r"\blinux\b.*\bsourcetype", r"\bsourcetype\b.*\blinux\b"],
+        "preferred_tool": "splunk_run_query",
+        "query_template": "search index=linux | stats count by sourcetype | sort - count",
+        "anti_patterns": [r"stats\s+count\s+by\s+index\b", r"\|\s*stats\s+count\s+by\s+source\b", r"index=\*(?!.*\blinux\b)"],
+        "explanation": "Linux sourcetype inventory uses index=linux with stats by sourcetype.",
+        "tags": ["linux", "inventory"],
+        "priority": 93,
+    },
+    {
+        "id": "linux_host_activity",
+        "intent": "linux_host_activity",
+        "triggers": ["linux host", "hosts in linux", "linux index host"],
+        "trigger_regex": [r"\blinux\b.*\bhost", r"\bhost\b.*\blinux\b.*\b(?:index|sending|events)\b"],
+        "preferred_tool": "splunk_run_query",
+        "query_template": "search index=linux | stats count by host sourcetype | sort - count",
+        "anti_patterns": [r"index=\*(?!.*\blinux\b)", r"stats\s+count\s+by\s+sourcetype\b(?!.*\bhost\b)"],
+        "explanation": "Linux host activity uses index=linux with stats by host and sourcetype.",
+        "tags": ["linux", "inventory"],
+        "priority": 90,
+    },
+    {
+        "id": "linux_auth_failures_oracle",
+        "intent": "linux_auth_failures",
+        "triggers": ["linux failed login", "linux auth failure", "ssh brute force"],
+        "preferred_tool": "splunk_run_query",
+        "query_template": (
+            "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") "
+            "(\"Failed password\" OR \"authentication failure\" OR \"Invalid user\") "
+            "| stats count by host user src_ip port | sort - count"
+        ),
+        "anti_patterns": [r"event(?:code|id)=4625", r"sourcetype=XmlWinEventLog"],
+        "explanation": "Linux auth failures use auth.log/secure sources, not Windows EventCode.",
+        "tags": ["linux", "auth_failure"],
+        "priority": 92,
+    },
+    {
+        "id": "linux_sudo_activity_oracle",
+        "intent": "linux_privilege_escalation_activity",
+        "triggers": [
+            "sudo activity",
+            "sudo behavior",
+            "su activity",
+            "su behavior",
+            "sudo sessions",
+            "root session",
+        ],
+        "trigger_regex": [r"\blinux\b.*\bsudo\b", r"\bsudo\b.*\bactivity\b"],
+        "preferred_tool": "splunk_run_query",
+        "query_template": "",
+        "anti_patterns": [
+            r"\|\s*stats\b.*\|\s*table\b",
+            r"stats\s+count\s+by\s+host\s+user\s+src_ip\s*\|\s*table\b",
+        ],
+        "explanation": "Linux sudo activity is an evidence table query with rex/eval fields, not a stats summary.",
+        "tags": ["linux", "privilege_escalation"],
+        "priority": 91,
     },
     {
         "id": "cross_platform_failed_login",
@@ -277,6 +389,23 @@ def load_patterns() -> list[DomainPattern]:
     return out
 
 
+# Tools that cannot filter by time or event volume at all -- pure catalog/metadata
+# lookups. A pattern preferring one of these must never win for a question that
+# needs an actual time-scoped or volume-scoped search; the tool structurally
+# cannot answer it. This reuses the same authoritative disqualifier list the MCP
+# deterministic router and saved-query shortcut gate already use, so all three
+# subsystems agree on what counts as "needs a real search".
+_NO_TIME_FILTER_TOOLS: frozenset[str] = frozenset(
+    {"splunk_get_indexes", "splunk_get_info", "splunk_get_metadata"}
+)
+
+
+def _question_needs_time_scoped_search(question: str) -> bool:
+    from mcp_deterministic_routing import question_disqualified_for_deterministic
+
+    return bool(question_disqualified_for_deterministic(question))
+
+
 def _score_pattern(pattern: DomainPattern, question: str, intent: str = "") -> float:
     q = (question or "").strip().lower()
     if not q:
@@ -305,7 +434,20 @@ def _score_pattern(pattern: DomainPattern, question: str, intent: str = "") -> f
     mapped_match = mapped.intent == pattern.intent
     if mapped_match:
         score += 15.0
-    if pattern.intent.startswith("apache_") and not (exact_intent or partial_intent or trigger_hits or regex_hit or mapped_match):
+    # Eligibility gate: a pattern's own anti_patterns/query_template only apply when
+    # something about THIS question's text specifically matched it (a literal trigger
+    # phrase or trigger_regex). Intent-level agreement (exact_intent/partial_intent/
+    # mapped_match) is deliberately excluded from this gate -- it is a useful
+    # tie-breaking bonus among patterns that already have genuine textual signal, but
+    # by itself it lets every pattern sharing an intent claim equal relevance, at which
+    # point raw `priority` (a static authoring knob, not a per-question relevance
+    # signal) decides the winner. That previously let ultra-specific, single-exact-
+    # phrase "gold oracle" patterns (and other high-priority-but-irrelevant patterns)
+    # outrank the correct general-purpose template for any differently-worded question
+    # sharing their intent, wrongly applying their narrow anti_patterns everywhere.
+    if not (trigger_hits or regex_hit):
+        return 0.0
+    if pattern.preferred_tool in _NO_TIME_FILTER_TOOLS and _question_needs_time_scoped_search(question):
         return 0.0
     if question_requests_cardinality(question) and "cardinality" in pattern.tags:
         score += 20.0
@@ -323,6 +465,23 @@ def _score_pattern(pattern: DomainPattern, question: str, intent: str = "") -> f
             score += 20.0
         if pattern.id == "index_count_cardinality":
             score -= 55.0
+    q_l = (question or "").lower()
+    if any(term in q_l for term in ("_internal", "splunk internal", "internal index", "_audit")):
+        if pattern.intent in {
+            "splunk_internal_health",
+            "internal_sourcetypes",
+            "splunk_license_usage",
+            "forwarder_connectivity",
+            "internal_splunkd_health",
+            "internal_auth_failures",
+        }:
+            score += 25.0
+        if pattern.intent == "top_indexes" or "index_volume" in pattern.id:
+            score -= 40.0
+    if "license" in q_l and pattern.intent == "splunk_license_usage":
+        score += 35.0
+    if "splunkd" in q_l and pattern.intent == "internal_splunkd_health":
+        score += 30.0
     from question_intelligence import APACHE_WEB_INTENTS, extract_explicit_sourcetype
 
     explicit_st = extract_explicit_sourcetype(question)
@@ -418,6 +577,8 @@ def validate_query_against_domain_knowledge(
         except re.error:
             continue
     if resolution.query and resolution.preferred_tool == "splunk_run_query":
+        if resolution.intent == "splunk_license_usage" and "license_usage" not in lowered:
+            return False, f"domain_missing_license_usage:{resolution.pattern_id}"
         if " by index" in resolution.query.lower() and "| stats count" in lowered and " by " not in lowered.split("| stats", 1)[-1]:
             return False, f"domain_missing_breakdown:{resolution.pattern_id}"
         if "dc(index)" in resolution.query.lower() and "dc(index)" not in lowered and "stats count" in lowered:

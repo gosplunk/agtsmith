@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 from typing import Any
 
 import httpx
@@ -195,6 +196,75 @@ def _safe_float(value: str) -> float | None:
         return None
 
 
+def _non_negative_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _read_cpu_totals(path: str = "/proc/stat") -> tuple[int, int] | None:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            fields = handle.readline().split()
+    except (OSError, UnicodeError):
+        return None
+    if not fields or fields[0] != "cpu" or len(fields) < 5:
+        return None
+    try:
+        values = [int(value) for value in fields[1:]]
+    except ValueError:
+        return None
+    idle = values[3] + (values[4] if len(values) > 4 else 0)
+    return sum(values), idle
+
+
+def query_cpu_usage(sample_interval: float = 0.05) -> dict[str, Any]:
+    first = _read_cpu_totals()
+    if first is None:
+        return {"available": False, "reason": "/proc/stat unavailable", "utilization_pct": None}
+    time.sleep(max(0.0, min(float(sample_interval), 0.25)))
+    second = _read_cpu_totals()
+    if second is None:
+        return {"available": False, "reason": "/proc/stat unavailable", "utilization_pct": None}
+    total_delta = second[0] - first[0]
+    idle_delta = second[1] - first[1]
+    if total_delta <= 0:
+        return {"available": False, "reason": "no CPU sample delta", "utilization_pct": None}
+    utilization = max(0.0, min(100.0, 100.0 * (total_delta - idle_delta) / total_delta))
+    return {
+        "available": True,
+        "reason": "",
+        "utilization_pct": round(utilization, 1),
+        "logical_cores": os.cpu_count() or 1,
+    }
+
+
+def infer_compute_engagement(models_loaded: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = [row for row in models_loaded if isinstance(row, dict)]
+    total_size = sum(_non_negative_float(row.get("size")) or 0.0 for row in rows)
+    total_vram = sum(_non_negative_float(row.get("size_vram")) or 0.0 for row in rows)
+    gpu_engaged = total_vram > 0
+    cpu_engaged = bool(rows) and (total_size <= 0 or total_vram < total_size)
+    target = (
+        "hybrid"
+        if cpu_engaged and gpu_engaged
+        else "gpu"
+        if gpu_engaged
+        else "cpu"
+        if cpu_engaged
+        else "idle"
+    )
+    return {
+        "target": target,
+        "cpu_engaged": cpu_engaged,
+        "gpu_engaged": gpu_engaged,
+        "model_size_bytes": int(total_size),
+        "model_vram_bytes": int(total_vram),
+    }
+
+
 def probe_ollama_host(ollama_host: str, timeout: float = 5.0) -> dict[str, Any]:
     base = (ollama_host or "").strip().rstrip("/")
     if not base:
@@ -256,10 +326,14 @@ def probe_ollama_host(ollama_host: str, timeout: float = 5.0) -> dict[str, Any]:
 
 
 def collect_ops_snapshot(ollama_host: str) -> dict[str, Any]:
+    ollama = probe_ollama_host(ollama_host)
+    loaded = ollama.get("models_loaded") if isinstance(ollama.get("models_loaded"), list) else []
     return {
         "ts": utc_now_iso(),
-        "ollama": probe_ollama_host(ollama_host),
+        "ollama": ollama,
         "gpu": query_nvidia_smi(),
+        "cpu": query_cpu_usage(),
+        "compute": infer_compute_engagement(loaded),
         "log_source": ollama_log_config_status(),
     }
 
@@ -285,18 +359,35 @@ def collect_analyst_ops_summary(ollama_host: str) -> dict[str, Any]:
     snapshot = collect_ops_snapshot(ollama_host)
     ollama = snapshot.get("ollama") if isinstance(snapshot.get("ollama"), dict) else {}
     gpu_block = snapshot.get("gpu") if isinstance(snapshot.get("gpu"), dict) else {}
+    cpu_block = snapshot.get("cpu") if isinstance(snapshot.get("cpu"), dict) else {}
+    compute = snapshot.get("compute") if isinstance(snapshot.get("compute"), dict) else {}
     gpus = gpu_block.get("gpus") if isinstance(gpu_block.get("gpus"), list) else []
     first_gpu = gpus[0] if gpus and isinstance(gpus[0], dict) else {}
     used_gb: float | None = None
     total_gb: float | None = None
+    gpu_utilization_pct: float | None = None
     if first_gpu:
-        used_mib = first_gpu.get("memory_used_mib")
-        total_mib = first_gpu.get("memory_total_mib")
+        used_mib = _non_negative_float(first_gpu.get("memory_used_mib"))
+        total_mib = _non_negative_float(first_gpu.get("memory_total_mib"))
         if used_mib is not None:
-            used_gb = round(float(used_mib) / 1024, 1)
+            used_gb = round(used_mib / 1024, 1)
         if total_mib is not None:
-            total_gb = round(float(total_mib) / 1024, 1)
+            total_gb = round(total_mib / 1024, 1)
+        gpu_utilization_pct = _non_negative_float(first_gpu.get("utilization_gpu_pct"))
     loaded = ollama.get("models_loaded") if isinstance(ollama.get("models_loaded"), list) else []
+    loaded_names = [
+        str(row.get("name", "")).strip()
+        for row in loaded
+        if isinstance(row, dict) and str(row.get("name", "")).strip()
+    ]
+    if used_gb is None and loaded:
+        ollama_vram_bytes = sum(
+            _non_negative_float(row.get("size_vram")) or 0.0
+            for row in loaded
+            if isinstance(row, dict)
+        )
+        if ollama_vram_bytes > 0:
+            used_gb = round(ollama_vram_bytes / (1024**3), 1)
     host = str(ollama.get("host", "")).strip()
     display_host = host.replace("http://", "").replace("https://", "")
     connected, connection_state = resolve_ollama_connection_state(ollama, gpu_vram_used_gb=used_gb)
@@ -305,7 +396,18 @@ def collect_analyst_ops_summary(ollama_host: str) -> dict[str, Any]:
         "connection_state": connection_state,
         "host": display_host,
         "models_loaded": len(loaded),
+        "models_loaded_names": loaded_names[:8],
         "gpu_vram_used_gb": used_gb,
         "gpu_vram_total_gb": total_gb,
+        "gpu_utilization_pct": gpu_utilization_pct,
+        "gpu_metrics_available": bool(gpu_block.get("available")),
+        "gpu_metrics_reason": str(gpu_block.get("reason", "")).strip(),
+        "gpu_metrics_source": "nvidia_smi" if first_gpu else ("ollama_api" if used_gb is not None else "unavailable"),
+        "cpu_utilization_pct": _non_negative_float(cpu_block.get("utilization_pct")),
+        "cpu_metrics_available": bool(cpu_block.get("available")),
+        "cpu_metrics_reason": str(cpu_block.get("reason", "")).strip(),
+        "cpu_engaged": bool(compute.get("cpu_engaged")),
+        "gpu_engaged": bool(compute.get("gpu_engaged")),
+        "compute_target": str(compute.get("target", "idle")).strip() or "idle",
         "updated_at": str(snapshot.get("ts", "")),
     }

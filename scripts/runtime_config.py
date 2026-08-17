@@ -12,10 +12,43 @@ DEFAULT_SPLUNK_MCP_URL = "https://127.0.0.1:8089/services/mcp"
 DEFAULT_SPLUNK_BASE_URL = "https://127.0.0.1:8089"
 DEFAULT_EDGE_LLM_ROLE = "edge_router_splitter"
 DEFAULT_EDGE_LLM_TIMEOUT_SEC = "60"
+# Google/US, ~815MB, non-Chinese by design (matches the v1.5.x US-primary
+# stack rationale in docs/model_strategy.md). Right-sized for a
+# classification-only task -- turns a raw question into a small structured
+# hint (platform/activity/data_category/entities/time_hint) consumed by
+# resolve_authoritative_domains_for_question's embedding retrieval blend.
+DEFAULT_EDGE_LLM_MODEL = "gemma3:1b"
 DEFAULT_SOC_UI_SESSION_TIMEOUT_MIN = "60"
 DEFAULT_SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN = "480"
 DEFAULT_OLLAMA_KEEP_ALIVE = "0"
-DEFAULT_MCP_REQUEST_TIMEOUT_SEC = "90"
+DEFAULT_OLLAMA_WARM_KEEP_ALIVE = "30m"
+LOCAL_OLLAMA_HOSTNAMES: frozenset[str] = frozenset(
+    {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "host.docker.internal",
+        "ollama",
+    }
+)
+
+# Data Domains (environment profile) auto-refresh scheduler. Checked on by
+# default at first-run configuration time so the profile self-heals without
+# an operator remembering to click "Refresh Data Domains" manually.
+DEFAULT_ENV_PROFILE_AUTO_REFRESH_ENABLED = "1"
+DEFAULT_ENV_PROFILE_REFRESH_INTERVAL_MINUTES = "60"
+ENV_PROFILE_AUTO_REFRESH_INTERVAL_CHOICES_MINUTES = (60, 240, 1440)
+
+# Wide, wildcard `index=*` searches over broad windows (a month, a quarter, a
+# year -- see question_intelligence.infer_time_window) legitimately scan far
+# more data than the narrow 24h/7d windows this budget was originally tuned
+# for. 90s was already tight for a 7-day full-index scan on a moderately
+# sized lab; a shorter total MCP budget than the search itself needs simply
+# converts "answer took a while" into "guardrail-shaped timeout error" for
+# exactly the broader-window questions this time-window fix now honors
+# correctly. 240s keeps ad hoc UI queries from hanging forever while giving
+# multi-week/month scans realistic room to finish.
+DEFAULT_MCP_REQUEST_TIMEOUT_SEC = "240"
 DEFAULT_OLLAMA_REQUEST_TIMEOUT_SEC = "180"
 
 # v1.5.x stack — split planner / writer (2026-07-23 bake-off on RTX 1000 Ada).
@@ -252,6 +285,44 @@ def get_ollama_keep_alive() -> str | int:
     return raw
 
 
+def get_ollama_warm_keep_alive() -> str | int:
+    """Ollama keep_alive used when the UI keep-warm toggle is enabled."""
+    raw = str(_get_config_value("OLLAMA_WARM_KEEP_ALIVE", DEFAULT_OLLAMA_WARM_KEEP_ALIVE)).strip()
+    if not raw:
+        return DEFAULT_OLLAMA_WARM_KEEP_ALIVE
+    lowered = raw.lower()
+    if lowered in {"0", "false", "no", "off", "immediate"}:
+        return 0
+    if lowered.isdigit():
+        return int(lowered)
+    return raw
+
+
+def is_local_ollama_host(host: str | None = None) -> bool:
+    """True when Ollama is reachable on the same machine as the UI sidecar."""
+    from urllib.parse import urlparse
+
+    raw = str(host or get_ollama_host()).strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    hostname = str(parsed.hostname or "").strip().lower()
+    return hostname in LOCAL_OLLAMA_HOSTNAMES
+
+
+def ollama_warm_model_names(values: dict[str, str] | None = None) -> list[str]:
+    """Primary models to preload when keep-warm is enabled."""
+    names: list[str] = []
+    for key in ("OLLAMA_MODEL_QUERY_PLANNER", "OLLAMA_MODEL_QUERY_WRITER"):
+        if isinstance(values, dict) and key in values:
+            model = str(values.get(key, "")).strip()
+        else:
+            model = str(_get_config_value(key, "")).strip()
+        if model and model not in names:
+            names.append(model)
+    return names
+
+
 def get_mcp_request_timeout_sec() -> float:
     """Return the total timeout budget for one MCP request including retries."""
     raw = str(
@@ -290,7 +361,7 @@ def get_edge_llm_host() -> str:
 
 
 def get_edge_llm_model() -> str:
-    return str(_get_config_value("EDGE_LLM_MODEL", "")).strip()
+    return str(_get_config_value("EDGE_LLM_MODEL", DEFAULT_EDGE_LLM_MODEL)).strip() or DEFAULT_EDGE_LLM_MODEL
 
 
 def get_edge_llm_role() -> str:
@@ -299,6 +370,22 @@ def get_edge_llm_role() -> str:
 
 def get_edge_llm_timeout_sec() -> str:
     return str(_get_config_value("EDGE_LLM_TIMEOUT_SEC", DEFAULT_EDGE_LLM_TIMEOUT_SEC)).strip() or DEFAULT_EDGE_LLM_TIMEOUT_SEC
+
+
+def mcp_pipeline_router_enabled() -> bool:
+    return str(_get_config_value("MCP_PIPELINE_ROUTER_ENABLED", "1")).strip() == "1"
+
+
+def mcp_deterministic_auto_route() -> bool:
+    return str(_get_config_value("MCP_DETERMINISTIC_AUTO_ROUTE", "1")).strip() == "1"
+
+
+def mcp_deterministic_min_confidence() -> float:
+    raw = str(_get_config_value("MCP_DETERMINISTIC_MIN_CONFIDENCE", "0.90")).strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.90
 
 
 def get_soc_ui_session_timeout_min() -> str:
@@ -313,6 +400,33 @@ def get_soc_ui_session_remember_timeout_min() -> str:
         str(_get_config_value("SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN", DEFAULT_SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN)).strip()
         or DEFAULT_SOC_UI_SESSION_REMEMBER_TIMEOUT_MIN
     )
+
+
+def get_env_profile_auto_refresh_enabled() -> bool:
+    """Whether the background Data Domains scheduler should run at all."""
+    raw = str(
+        _get_config_value("ENV_PROFILE_AUTO_REFRESH_ENABLED", DEFAULT_ENV_PROFILE_AUTO_REFRESH_ENABLED)
+    ).strip()
+    return raw != "0"
+
+
+def get_env_profile_refresh_interval_minutes() -> int:
+    """Cadence, in minutes, for the Data Domains auto-refresh scheduler.
+
+    Configure page offers 60 minutes (default), 4 hours, or once a day, but
+    any positive integer supplied directly via env/config is honored so
+    operators can fine-tune it outside the UI if needed.
+    """
+    raw = str(
+        _get_config_value(
+            "ENV_PROFILE_REFRESH_INTERVAL_MINUTES", DEFAULT_ENV_PROFILE_REFRESH_INTERVAL_MINUTES
+        )
+    ).strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return int(DEFAULT_ENV_PROFILE_REFRESH_INTERVAL_MINUTES)
+    return value if value > 0 else int(DEFAULT_ENV_PROFILE_REFRESH_INTERVAL_MINUTES)
 
 
 def get_splunk_mcp_url() -> str:
@@ -403,3 +517,46 @@ def write_env_file(updates: dict[str, str], path: Path | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
     return target
+
+
+DEFAULT_SAVED_QUERY_SAVE_REQUIRES_APPROVAL = "0"
+DEFAULT_SAVED_QUERY_SHORTCUT_ENABLED = "1"
+DEFAULT_SAVED_QUERY_AUTO_THRESHOLD = "0.92"
+DEFAULT_SAVED_QUERY_SUGGEST_THRESHOLD = "0.80"
+DEFAULT_SAVED_QUERY_INCLUDE_OPTIMIZATION_ASSETS = "0"
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    value = _get_config_value(name, default).strip().lower()
+    return value not in {"0", "false", "no", ""}
+
+
+def _env_float(name: str, default: str) -> float:
+    raw = _get_config_value(name, default).strip()
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+def saved_query_save_requires_approval() -> bool:
+    return _env_flag("SPL_SAVED_QUERY_SAVE_REQUIRES_APPROVAL", DEFAULT_SAVED_QUERY_SAVE_REQUIRES_APPROVAL)
+
+
+def saved_query_shortcut_enabled() -> bool:
+    return _env_flag("SPL_SAVED_QUERY_SHORTCUT_ENABLED", DEFAULT_SAVED_QUERY_SHORTCUT_ENABLED)
+
+
+def saved_query_include_optimization_assets() -> bool:
+    return _env_flag(
+        "SPL_SAVED_QUERY_INCLUDE_OPTIMIZATION_ASSETS",
+        DEFAULT_SAVED_QUERY_INCLUDE_OPTIMIZATION_ASSETS,
+    )
+
+
+def saved_query_auto_threshold() -> float:
+    return _env_float("SPL_SAVED_QUERY_AUTO_THRESHOLD", DEFAULT_SAVED_QUERY_AUTO_THRESHOLD)
+
+
+def saved_query_suggest_threshold() -> float:
+    return _env_float("SPL_SAVED_QUERY_SUGGEST_THRESHOLD", DEFAULT_SAVED_QUERY_SUGGEST_THRESHOLD)

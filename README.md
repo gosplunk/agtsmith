@@ -1,12 +1,12 @@
 # A.G.E.N.T. Smith
 
-Current release: `v1.5.1`
+Current release: `v1.5.2`
 
 A.G.E.N.T. Smith is a guarded Splunk analyst copilot built for detection, triage, and investigation work. The project takes a natural-language question, plans a search strategy, writes bounded read-only SPL, validates that plan before it can touch Splunk, pulls back evidence through Splunk MCP, and returns the result with the executed query, evidence, and model reasoning visible. The goal is not blind autonomy. The goal is to help an analyst move faster without losing control of the workflow.
 
 This repository is published as a clean starting point. It ships with example configuration, not live environment secrets or local runtime state.
 
-For a short operator-facing summary of what changed in `v1.5.1`, read [v1.5.1 Release Highlights](docs/project/v1_5_1_delta.md).
+For a short operator-facing summary of what changed in `v1.5.2`, read [v1.5.2 Release Highlights](docs/project/v1_5_2_delta.md).
 
 ## Start Here
 If you are trying to get the platform running for the first time, read the [Initial Setup Guide](docs/runbooks/initial_setup.md) alongside the quick start below.
@@ -52,32 +52,32 @@ Then:
 - run the first investigation
 
 ## Screenshots
-These screenshots reflect the current `v1.5.1` interface and the split-role model stack (Ministral planner, Granite writer, Gemma peers, Foundation-Sec review).
+These screenshots reflect the current `v1.5.2` interface, Docker deploy sidecar, and the split-role model stack (Ministral planner, Granite writer, Gemma peers, Foundation-Sec review).
 
 ### Login
-`v1.5.1` login flow for the analyst console.
+`v1.5.2` login flow for the analyst console.
 
-![A.G.E.N.T. Smith v1.5.1 login](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-login.png)
+![A.G.E.N.T. Smith v1.5.2 login](docs/images/screenshots/v1.5.2/agtsmith-v1.5.2-login.png)
 
 ### Investigation Workspace
-`v1.5.1` Splunk-first investigation workflow with a decision-first answer card, confidence-backed recommendation, one primary next action, and inline trust validation.
+`v1.5.2` Splunk-first investigation workflow with a decision-first answer card, confidence-backed recommendation, one primary next action, and inline trust validation.
 
-![A.G.E.N.T. Smith v1.5.1 investigation workspace](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-investigation.png)
+![A.G.E.N.T. Smith v1.5.2 investigation workspace](docs/images/screenshots/v1.5.2/agtsmith-v1.5.2-investigation.png)
 
 ### Architecture View
-`v1.5.1` system architecture and role separation view for the bounded Splunk investigation pipeline.
+`v1.5.2` system architecture and role separation view for the bounded Splunk investigation pipeline.
 
-![A.G.E.N.T. Smith v1.5.1 architecture view](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-architecture.png)
+![A.G.E.N.T. Smith v1.5.2 architecture view](docs/images/screenshots/v1.5.2/agtsmith-v1.5.2-architecture.png)
 
 ### Data Domains And Personalization
-`v1.5.1` environment-aware Data Domains view showing local index and sourcetype discovery, current coverage, and grounded planning support built from the live Splunk environment.
+`v1.5.2` environment-aware Data Domains view showing local index and sourcetype discovery, current coverage, and grounded planning support built from the live Splunk environment.
 
-![A.G.E.N.T. Smith v1.5.1 Data Domains personalization view](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-data-domains.png)
+![A.G.E.N.T. Smith v1.5.2 Data Domains personalization view](docs/images/screenshots/v1.5.2/agtsmith-v1.5.2-data-domains.png)
 
 ### SPL Optimization AI Engine
-`v1.5.1` SPL Optimization AI Engine showing run controls, what changed this run, repository state, and reusable SPL asset workflow.
+`v1.5.2` SPL Optimization AI Engine showing run controls, what changed this run, repository state, and reusable SPL asset workflow.
 
-![A.G.E.N.T. Smith v1.5.1 SPL Optimization AI Engine](docs/images/screenshots/v1.5.1/agtsmith-v1.5.1-learning.png)
+![A.G.E.N.T. Smith v1.5.2 SPL Optimization AI Engine](docs/images/screenshots/v1.5.2/agtsmith-v1.5.2-learning.png)
 
 ## How It Works
 The default SPL path is a split-role pipeline:
@@ -109,6 +109,13 @@ An optional small-model helper on an edge device can also be enabled for low-cos
 - Controller-hosted orchestration with visible decision steps
 - Grounded in local environment metadata, Data Domains, and curated SPL references
 - Built to be tuned empirically with benchmarks and evals
+
+## What's New In v1.5.2
+- **Internal & Linux SPL benchmark programs** with oracle harnesses, offline CI gates, and live multimodel accuracy targets (`make internal-spl-accuracy-multimodel`, `make linux-spl-accuracy-multimodel`)
+- **Ten-domain SPL learning loop** with expanded lab ingest and autonomous benchmark/fix cycles (`make ten-domain-learning-loop`)
+- **Writer path hardening** — template bypass ordering, intent contracts, domain oracle short-circuits for platform/Linux intents
+- **MCP pipeline router**, **saved query library**, **domain embedding RAG**, and **Docker deploy contract** with verified build-id sidecar restarts
+- **Splunk app wrapper** (`splunk_app/agent_smith/`) for native Splunk Web alongside the `:8787` Docker sidecar
 
 ## What's New In v1.5.1
 - promoted **`TechyShishy/ministral-3:3b-reasoning-2512-q4_K_M`** as the default **planner** with **`ministral-3:3b`** fallback after the 24-model planner bake-off

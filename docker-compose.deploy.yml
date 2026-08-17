@@ -1,3 +1,5 @@
+name: agtsmith
+
 services:
   agtsmith-case-db:
     image: postgres:16
@@ -16,13 +18,24 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.deploy
-    image: agtsmith-ui-deploy:local
+      # Match the host-network runtime and avoid daemon-local DNS drift during builds.
+      network: host
+      args:
+        AGTSMITH_SOURCE_REVISION: "${AGTSMITH_SOURCE_REVISION:?run make docker-deploy-up}"
+        AGTSMITH_BUILD_ID: "${AGTSMITH_BUILD_ID:?run make docker-deploy-up}"
+    image: "${AGTSMITH_DEPLOY_IMAGE:?run make docker-deploy-up}"
+    pull_policy: never
     container_name: agtsmith-ui-deploy
+    labels:
+      org.opencontainers.image.revision: "${AGTSMITH_SOURCE_REVISION:?run make docker-deploy-up}"
+      io.agtsmith.build-id: "${AGTSMITH_BUILD_ID:?run make docker-deploy-up}"
     depends_on:
       - agtsmith-case-db
     network_mode: host
     environment:
       PYTHONPATH: /app:/app/scripts
+      AGTSMITH_SOURCE_REVISION: "${AGTSMITH_SOURCE_REVISION:?run make docker-deploy-up}"
+      AGTSMITH_BUILD_ID: "${AGTSMITH_BUILD_ID:?run make docker-deploy-up}"
       AGTSMITH_CASE_DB_HOST: 127.0.0.1
       AGTSMITH_CASE_DB_PORT: "5432"
       AGTSMITH_CASE_DB_NAME: "${AGTSMITH_CASE_DB_NAME:-agtsmith}"
@@ -35,14 +48,6 @@ services:
       - /run/systemd/journal:/run/systemd/journal:ro
       - /var/log/journal:/var/log/journal:ro
       - /etc/machine-id:/etc/machine-id:ro
-      # Host NVIDIA metrics for Ollama Ops (read-only NVML; Ollama still runs on the host GPU).
-      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.595.71.05:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.595.71.05:ro
-    devices:
-      - /dev/nvidiactl:/dev/nvidiactl
-      - /dev/nvidia0:/dev/nvidia0
-      - /dev/nvidia-uvm:/dev/nvidia-uvm
     restart: unless-stopped
 
 volumes:

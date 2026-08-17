@@ -23,8 +23,18 @@ The default profile shifts from Qwen + DeepSeek (`v1.4.x`) to US-origin Ollama t
 - Responsibilities: security reviewer, evidence reviewer, final summary, agentic summary, continuation reviewer
 
 ### Optional Edge Router Model
-- Example fit: a small on-device classifier (optional)
+- Default model: `gemma3:1b` (US / Google, ~815MB) -- non-Chinese by design, same rationale as the rest of the v1.5.x stack. Replaces the earlier `qwen2.5:1.5b` placeholder.
 - Configuration keys: `EDGE_LLM_ENABLED`, `EDGE_LLM_HOST`, `EDGE_LLM_MODEL`, `EDGE_LLM_ROLE`, `EDGE_LLM_TIMEOUT_SEC`
+- Disabled by default (`EDGE_LLM_ENABLED=0`). When enabled, `edge_question_classifier.classify_question()` turns the raw question into a small structured hint (`platform`, `activity`, `data_category`, `entities`, `time_hint`) with zero access to the environment profile. Any failure (disabled, unreachable, unparsable) degrades to an empty hint with no effect on downstream behavior.
+- Pull: `ollama pull gemma3:1b`
+
+### Domain/Sourcetype Embedding Retrieval
+- Purpose: replace exhaustive keyword scoring in `resolve_authoritative_domains_for_question` with a similarity lookup, so routing scales past hand-curated keyword lists as sourcetype counts grow (see `docs/project/spl_self_improvement_plan.md`, which had deferred FAISS/embedding retrieval pending this exact need).
+- Implementation: `domain_embedding_retrieval.py` embeds each `(index, sourcetype)` pair's semantic description once via the existing Ollama `nomic-embed-text` pipeline (`spl_embedding_rag.py` -- no FAISS needed at this corpus size; brute-force cosine over cached vectors is sub-millisecond for hundreds of sourcetypes).
+- Build/refresh: `make spl-domain-embedding-index-build` (wired into `make env-profile-refresh`; falls back to a metadata-only, vector-free index automatically if Ollama is unreachable so profile refresh never hard-fails on this step).
+- Wiring: the retrieval score is an **additive, bounded bonus** blended into the existing keyword score inside `resolve_authoritative_domains_for_question` (up to +8, matching a full use-case keyword match) -- not a replacement. This keeps behavior unchanged when the index is missing/stale/unreachable, and lets a strong semantic match (e.g. "unsuccessful sign-ins to Office 365" against an `o365:management:activity` sourcetype with zero literal keyword overlap) surface a domain the keyword lists never anticipated, without letting a weak match override a solid keyword hit.
+- Enrichment: when the edge router model is enabled, its structured hint (see above) is appended to the retrieval query text, so "understanding" and "retrieval" compose rather than being two independent guesses.
+- Feature flag: `SPL_DOMAIN_EMBEDDING_RETRIEVAL_ENABLED` (default `1`).
 
 ## Role Mapping
 - Planner: `OLLAMA_MODEL_QUERY_PLANNER`
@@ -37,7 +47,7 @@ The default profile shifts from Qwen + DeepSeek (`v1.4.x`) to US-origin Ollama t
 - Query Repair: `OLLAMA_MODEL_QUERY_REPAIR`
 
 ## Runtime Flow
-1. Optional edge router can classify or split the question before main planning.
+1. Optional edge router classifies the question into a structured hint (platform/activity/data_category/entities/time_hint) consumed by domain/sourcetype embedding retrieval -- see "Domain/Sourcetype Embedding Retrieval" above.
 2. Planner interprets the analyst question and emits a structured search plan.
 3. SPL Writer converts that plan into bounded read-only SPL.
 4. Security Reviewer critiques the generated SPL against the plan.
@@ -68,6 +78,8 @@ ollama pull ministral-3:3b
 ollama pull granite4:3b
 ollama pull gemma3:4b
 ollama pull hf.co/fdtn-ai/Foundation-Sec-8B-Reasoning-Q8_0-GGUF:latest
+ollama pull nomic-embed-text                                          # domain/RAG embedding retrieval
+ollama pull gemma3:1b                                                 # optional edge router model (EDGE_LLM_ENABLED=1)
 ```
 
 ## Legacy v1.4.x Profile (rollback)

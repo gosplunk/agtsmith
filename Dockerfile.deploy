@@ -17,6 +17,15 @@ RUN python -m pip install --upgrade pip \
 
 COPY . /app
 
+ARG AGTSMITH_SOURCE_REVISION=unknown
+ARG AGTSMITH_BUILD_ID=unknown
+
+LABEL org.opencontainers.image.revision="${AGTSMITH_SOURCE_REVISION}" \
+      io.agtsmith.build-id="${AGTSMITH_BUILD_ID}"
+
+ENV AGTSMITH_IMAGE_SOURCE_REVISION="${AGTSMITH_SOURCE_REVISION}" \
+    AGTSMITH_IMAGE_BUILD_ID="${AGTSMITH_BUILD_ID}"
+
 EXPOSE 8787
 
 CMD ["python", "scripts/web_ui_server.py", "--host", "0.0.0.0", "--port", "8787"]

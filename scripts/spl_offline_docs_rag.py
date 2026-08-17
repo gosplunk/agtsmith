@@ -60,6 +60,51 @@ SPL_COMMAND_TOKENS: tuple[str, ...] = (
     "subsearch",
 )
 
+INTENT_TOPIC_ANCHORS: dict[str, tuple[str, ...]] = {
+    "top_indexes": ("index", "indexes"),
+    "metadata_inventory": ("metadata", "metasearch", "sourcetype"),
+    "index_sourcetype_volume": ("sourcetype", "index"),
+    "host_activity_summary": ("host", "index"),
+    "index_staleness": ("index", "event count"),
+    "splunk_internal_health": ("_internal", "splunkd", "health report", "scheduler"),
+    "internal_sourcetypes": ("_internal", "splunkd", "sourcetype"),
+    "splunk_license_usage": ("license", "license_usage"),
+    "forwarder_connectivity": ("forwarder", "deploymentclient", "splunkd"),
+    "web_traffic_summary": ("http", "web", "apache", "access_combined", "uri"),
+    "apache_access_top_ips": ("http", "web", "apache", "access_combined", "clientip"),
+    "apache_suspicious_activity": ("http", "web", "apache", "access_combined", "uri", "user agent"),
+    "apache_404_spike": ("http", "web", "apache", "404"),
+    "failed_login_activity": ("failed login", "failed logon", "4625", "authentication failure"),
+    "linux_auth_failures": ("failed password", "authentication failure", "auth.log"),
+    "windows_auth_failures": ("failed logon", "4625", "xmlwineventlog"),
+    "network_flow_summary": ("network flow", "src_ip", "dest_ip", "destination port"),
+    "app_error_spike": ("application error", "error log", "exceptions"),
+}
+
+INTENT_TOPIC_NEGATIVE_TERMS: dict[str, tuple[str, ...]] = {
+    "web_traffic_summary": ("splunk web", "web.conf", "browser", "https encryption"),
+    "apache_access_top_ips": ("splunk web", "web.conf", "browser", "https encryption"),
+    "apache_suspicious_activity": ("splunk web", "web.conf", "browser", "https encryption"),
+    "apache_404_spike": ("splunk web", "web.conf", "browser", "https encryption"),
+}
+
+QUESTION_STOP_TOKENS: frozenset[str] = frozenset(
+    {
+        "activity",
+        "days",
+        "hours",
+        "investigate",
+        "last",
+        "most",
+        "over",
+        "show",
+        "summary",
+        "using",
+        "which",
+        "with",
+    }
+)
+
 
 def _index_path() -> Path:
     override = str(os.getenv("SPL_OFFLINE_DOCS_RAG_INDEX", "")).strip()
@@ -70,7 +115,11 @@ def _index_path() -> Path:
 
 def _question_tokens(question: str, *, intent: str = "") -> set[str]:
     q = f"{question} {intent}".lower()
-    tokens = {t for t in re.findall(r"[a-z0-9_]{3,}", q)}
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9_]{3,}", q)
+        if token not in QUESTION_STOP_TOKENS
+    }
     dims = infer_question_dimensions(question)
     for key in ("platforms", "activities", "shapes"):
         for value in dims.get(key, []):
@@ -112,8 +161,16 @@ def _question_tokens(question: str, *, intent: str = "") -> set[str]:
         tokens.update({"forwarder", "deploymentclient", "splunkd", "connectivity"})
     elif intent_name in {"host_activity_summary", "index_staleness"}:
         tokens.update({"host", "index", "stats", "count", "activity"})
-    elif intent_name in {"web_traffic_summary", "apache_access_top_ips"}:
-        tokens.update({"web", "access", "clientip", "uri", "status", "stats"})
+    elif intent_name in {
+        "web_traffic_summary",
+        "apache_access_top_ips",
+        "apache_suspicious_activity",
+        "apache_404_spike",
+        "apache_404_scanning",
+        "apache_suspicious_user_agents",
+        "apache_sensitive_path_probing",
+    }:
+        tokens.update({"web", "access", "access_combined", "clientip", "uri", "status", "stats"})
     elif intent_name in {"network_flow_summary", "aws_vpc_flow_activity"}:
         tokens.update({"network", "flow", "src", "dest", "port", "stats"})
     elif intent_name in {"app_error_spike"}:
@@ -148,10 +205,21 @@ def _score_topic(row: dict[str, Any], tokens: set[str], *, intent: str = "") -> 
             score += 4
         if token in text:
             score += 2
+            if "_" in token:
+                score += 98
     for cmd in SPL_COMMAND_TOKENS:
         if cmd in tokens and (cmd in title or cmd in path or f"| {cmd}" in text or f" {cmd} " in text):
             score += 10
     category = str(row.get("category", "")).strip().lower()
+    anchors = INTENT_TOPIC_ANCHORS.get(intent_name, ())
+    title_path = f"{title} {path}"
+    score += sum(24 for anchor in anchors if anchor in title_path)
+    score += sum(4 for anchor in anchors if anchor in text)
+    score -= sum(
+        80
+        for negative_term in INTENT_TOPIC_NEGATIVE_TERMS.get(intent_name, ())
+        if negative_term in title_path
+    )
     if category == "inventory" and intent_name in {"top_indexes", "metadata_inventory", "index_sourcetype_volume", "host_activity_summary"}:
         score += 12
     if category == "platform_ops" and intent_name in {
@@ -166,6 +234,27 @@ def _score_topic(row: dict[str, Any], tokens: set[str], *, intent: str = "") -> 
     if "optimizing-searches" in path:
         score += 2
     return score
+
+
+def _topic_matches_intent(row: dict[str, Any], *, intent: str, tokens: set[str]) -> bool:
+    anchors = INTENT_TOPIC_ANCHORS.get(str(intent or "").strip().lower(), ())
+    if not anchors:
+        return True
+    title_path = f"{row.get('title', '')} {row.get('path', '')}".lower()
+    text = str(row.get("text", "")).lower()
+    if any("_" in token and token in f"{title_path} {text}" for token in tokens):
+        return True
+    if any(anchor in title_path for anchor in anchors):
+        return True
+    if (
+        sum(1 for anchor in anchors if anchor in text) >= 2
+        and bool(_extract_spl_examples(text, max_chars=120))
+    ):
+        return True
+    is_search_reference = "search-reference" in title_path or "search-manual" in title_path
+    return is_search_reference and any(
+        command in tokens and command in title_path for command in SPL_COMMAND_TOKENS
+    )
 
 
 @lru_cache(maxsize=2)
@@ -207,6 +296,7 @@ def build_offline_docs_context(
 
     tokens = _question_tokens(question, intent=intent)
     ranked: list[tuple[int, dict[str, Any]]] = []
+    intent_aligned: list[tuple[int, dict[str, Any]]] = []
     for row in topics:
         text = str(row.get("text", ""))
         lowered = text.lower()
@@ -218,9 +308,15 @@ def build_offline_docs_context(
         if score <= 0:
             continue
         ranked.append((score, row))
+        if _topic_matches_intent(row, intent=intent, tokens=tokens):
+            intent_aligned.append((score, row))
 
     if not ranked:
         return ""
+    if str(intent or "").strip().lower() in INTENT_TOPIC_ANCHORS:
+        if not intent_aligned:
+            return ""
+        ranked = intent_aligned
 
     ranked.sort(key=lambda item: item[0], reverse=True)
     lines: list[str] = ["[SPL_OFFLINE_DOCS]"]
@@ -233,8 +329,13 @@ def build_offline_docs_context(
     used = len("\n".join(lines))
     per_topic = max(180, int((budget - used) / max(1, max_topics)))
 
-    for _score, row in ranked[: max(1, max_topics)]:
+    seen_titles: set[str] = set()
+    for _score, row in ranked:
         title = str(row.get("title", "")).strip()
+        normalized_title = re.sub(r"\s+", " ", title.lower())
+        if normalized_title in seen_titles:
+            continue
+        seen_titles.add(normalized_title)
         doc_path = str(row.get("path", "")).strip()
         text = str(row.get("text", "")).strip()
         example = _extract_spl_examples(text, max_chars=min(420, per_topic // 2))
@@ -245,9 +346,14 @@ def build_offline_docs_context(
         block_lines.append(f"summary={snippet}")
         block = "\n".join(block_lines)
         if used + len(block) + 2 > budget:
-            break
+            remaining = budget - used - 2
+            if remaining < 80:
+                break
+            block = block[: remaining - 3].rstrip() + "..."
         lines.append(block)
         used += len(block) + 2
+        if len(seen_titles) >= max(1, max_topics):
+            break
 
     return "\n".join(lines).strip()
 

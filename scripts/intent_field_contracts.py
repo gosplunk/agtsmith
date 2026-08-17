@@ -33,6 +33,24 @@ def _group_hit(query: str, tokens: tuple[str, ...]) -> bool:
     )
 
 
+_TABLE_EVIDENCE_INTENTS = frozenset(
+    {
+        "linux_privilege_escalation_activity",
+        "linux_session_activity",
+        "windows_sysmon_network_activity",
+        "windows_sysmon_dns_activity",
+        "windows_credential_access_activity",
+        "windows_process_audit_activity",
+        "windows_privilege_assigned_activity",
+    }
+)
+
+
+def _stats_table_pipeline_incompatible(query: str) -> bool:
+    """Reject invalid pipelines that aggregate with stats then attempt a table projection."""
+    return bool(re.search(r"\|\s*stats\b", query) and re.search(r"\|\s*table\b", query))
+
+
 _AUTH_COHERENCE_INTENTS = frozenset(
     {
         "failed_login_activity",
@@ -469,12 +487,34 @@ def validate_query_for_intent(
             ("stats ",),
             (" by sourcetype",),
         ),
+        "linux_sourcetypes": (
+            ("index=linux",),
+            ("stats ",),
+            (" by sourcetype",),
+        ),
+        "linux_host_activity": (
+            ("index=linux",),
+            ("stats ",),
+            (" by host", " by host sourcetype"),
+        ),
         "internal_auth_failures": (
             ("index=_audit",),
             ("sourcetype=audittrail",),
             ("info=failed",),
             ("stats ",),
             (" by user", " by src", " by user src", " by host user src"),
+        ),
+        "internal_splunkd_health": (
+            ("index=_internal",),
+            ("sourcetype=splunkd",),
+            ("stats ",),
+            (" by host", " by component", " by host component"),
+        ),
+        "splunk_license_usage": (
+            ("index=_internal",),
+            ("license_usage",),
+            ("stats ",),
+            (" by sourcetype", " by host", " by sourcetype host"),
         ),
     }
 
@@ -495,6 +535,12 @@ def validate_query_for_intent(
             return False, "intent_contract_redundant_rex_with_trusted_native_fields"
         if re.search(r"\|\s*spath\b", query):
             return False, "intent_contract_redundant_spath_with_trusted_native_fields"
+
+    if intent_l in _TABLE_EVIDENCE_INTENTS:
+        if _stats_table_pipeline_incompatible(query):
+            return False, "intent_contract_stats_table_pipeline_incompatible"
+        if intent_l.startswith("linux_") and not re.search(r"\|\s*table\b", query):
+            return False, "intent_contract_linux_table_shape_required"
 
     if intent_l == "linux_auth_failures":
         if "match(" in query and "?<" in query:

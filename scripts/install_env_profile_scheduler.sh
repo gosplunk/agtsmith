@@ -31,10 +31,17 @@ else
     echo "INTERVAL_MIN must be an integer from 15 to 1440"
     exit 1
   fi
-  CRON_EXPR="*/${INTERVAL_MIN} * * * *"
+  # Cron's */45 minute syntax runs at :00 and :45, creating alternating
+  # 45/15-minute gaps. Poll freshness every 15 minutes instead and refresh
+  # only when the configured interval has elapsed.
+  CRON_EXPR="*/15 * * * *"
 fi
 
-ENTRY="${CRON_EXPR} cd ${ROOT_DIR} && make env-profile-refresh >> ${LOG_FILE} 2>&1 ${MARKER}"
+if [[ -n "${DAY_OF_WEEK}" ]]; then
+  ENTRY="${CRON_EXPR} cd ${ROOT_DIR} && make env-profile-refresh >> ${LOG_FILE} 2>&1 ${MARKER}"
+else
+  ENTRY="${CRON_EXPR} cd ${ROOT_DIR} && { .venv/bin/python scripts/check_environment_profile_freshness.py --max-age-minutes ${INTERVAL_MIN} >/dev/null 2>&1 || make env-profile-refresh >> ${LOG_FILE} 2>&1; } ${MARKER}"
+fi
 
 TMP="$(mktemp)"
 trap 'rm -f "${TMP}"' EXIT

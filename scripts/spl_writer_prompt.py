@@ -19,6 +19,27 @@ from spl_query_schema import constrained_mode_enabled, constrained_writer_schema
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SPL_CASES = PROJECT_ROOT / "benchmarks" / "spl_cases.json"
+INTERNAL_BRIEFS = PROJECT_ROOT / "benchmarks" / "internal_sourcetype_briefs.yaml"
+LINUX_BRIEFS = PROJECT_ROOT / "benchmarks" / "linux_sourcetype_briefs.yaml"
+
+PLATFORM_WRITER_INTENTS = frozenset(
+    {
+        "splunk_internal_health",
+        "internal_sourcetypes",
+        "splunk_license_usage",
+        "forwarder_connectivity",
+        "internal_splunkd_health",
+        "internal_auth_failures",
+        "linux_sourcetypes",
+        "linux_host_activity",
+        "linux_auth_failures",
+        "linux_successful_logins",
+        "linux_privilege_escalation",
+        "linux_privilege_escalation_activity",
+        "linux_session_activity",
+        "linux_audit_activity",
+    }
+)
 
 WRITER_COMPOSITION_RULES = (
     "SPL composition rules (mandatory):\n"
@@ -192,9 +213,65 @@ def _example_question_for_template(template: QueryTemplate) -> str:
     return f"Run a read-only {template.intent.replace('_', ' ')} search."
 
 
+def _brief_examples_from_path(intent: str, *, briefs_path: Path, allowed_intents: frozenset[str]) -> list[dict[str, Any]]:
+    intent_l = str(intent or "").strip().lower()
+    if intent_l not in allowed_intents or not briefs_path.is_file():
+        return []
+    try:
+        import yaml
+
+        briefs = yaml.safe_load(briefs_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(briefs, dict):
+        return []
+    examples: list[dict[str, Any]] = []
+    for _brief_id, brief in briefs.items():
+        if not isinstance(brief, dict):
+            continue
+        canonical = str(brief.get("canonical_shape", "")).strip()
+        questions = brief.get("example_questions", [])
+        if not canonical or not isinstance(questions, list):
+            continue
+        question = str(questions[0]).strip()
+        if not question:
+            continue
+        mapped = map_question_to_template(question)
+        if mapped.intent != intent_l:
+            continue
+        args = template_to_query_args(mapped, question)
+        args["query"] = canonical
+        examples.append(
+            {
+                "intent": intent_l,
+                "question": question,
+                "selected_tool": "splunk_run_query",
+                "tool_args": {
+                    "query": _truncate_query(canonical, max_len=320),
+                    "earliest_time": str(args.get("earliest_time", "-24h")),
+                    "latest_time": str(args.get("latest_time", "now")),
+                    "row_limit": int(args.get("row_limit", 50)),
+                },
+            }
+        )
+        if len(examples) >= 1:
+            break
+    return examples
+
+
+def _internal_brief_examples(intent: str) -> list[dict[str, Any]]:
+    return _brief_examples_from_path(intent, briefs_path=INTERNAL_BRIEFS, allowed_intents=PLATFORM_WRITER_INTENTS)
+
+
+def _linux_brief_examples(intent: str) -> list[dict[str, Any]]:
+    return _brief_examples_from_path(intent, briefs_path=LINUX_BRIEFS, allowed_intents=PLATFORM_WRITER_INTENTS)
+
+
 def few_shot_examples_for_intent(intent: str, *, max_examples: int = 2) -> list[dict[str, Any]]:
     """Return compact gold writer examples for the requested intent."""
     intent_l = str(intent or "").strip().lower()
+    internal = _internal_brief_examples(intent_l)
+    linux = _linux_brief_examples(intent_l)
     chosen: list[QueryTemplate] = []
     for template in _intent_templates(intent_l):
         if template not in chosen:
@@ -213,12 +290,12 @@ def few_shot_examples_for_intent(intent: str, *, max_examples: int = 2) -> list[
                 chosen.append(template)
             if len(chosen) >= max_examples:
                 break
-    examples: list[dict[str, Any]] = []
-    for template in chosen[:max_examples]:
+    examples: list[dict[str, Any]] = list(internal) + list(linux)
+    for template in chosen[: max(0, max_examples - len(examples))]:
         examples.append(
             _template_few_shot(template, _example_question_for_template(template), max_query_len=320)
         )
-    return examples
+    return examples[:max_examples]
 
 
 def format_few_shot_block(examples: list[dict[str, Any]]) -> str:

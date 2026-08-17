@@ -272,12 +272,18 @@ def determine_splunk_tool(question: str, intent: str) -> tuple[str, str, dict, s
         "today",
         "yesterday",
     )
-    if any(term in question_lower for term in index_inventory_only_terms):
+    from mcp_deterministic_routing import question_disqualified_for_deterministic
+
+    has_data_signal = any(term in question_lower for term in index_data_signal_terms) or bool(
+        question_disqualified_for_deterministic(question)
+    )
+    has_time_window = any(term in question_lower for term in time_window_signal_terms)
+    if any(term in question_lower for term in index_inventory_only_terms) and not (
+        has_data_signal or has_time_window
+    ):
         selected_tool = "splunk_get_indexes"
         reason = "question_requests_index_inventory"
     elif intent_lower == "top_indexes" and "most events" not in question_lower and "top" not in question_lower:
-        has_data_signal = any(term in question_lower for term in index_data_signal_terms)
-        has_time_window = any(term in question_lower for term in time_window_signal_terms)
         if has_data_signal or has_time_window:
             reason = "intent_top_indexes_time_bounded_data_query"
         else:
@@ -287,9 +293,21 @@ def determine_splunk_tool(question: str, intent: str) -> tuple[str, str, dict, s
         selected_tool = "splunk_get_info"
         reason = "question_requests_splunk_instance_info"
     elif any(term in question_lower for term in metadata_signal_terms):
-        selected_tool = "splunk_get_metadata"
-        metadata_args = _plan_metadata_args(question)
-        reason = "question_requests_metadata_inventory"
+        time_bounded_inventory_intents = {
+            "index_sourcetype_volume",
+            "internal_sourcetypes",
+            "host_activity_summary",
+            "splunk_internal_health",
+            "top_indexes",
+        }
+        if (has_data_signal or has_time_window) and intent_lower in time_bounded_inventory_intents:
+            reason = "time_bounded_inventory_requires_event_search"
+        elif has_data_signal or has_time_window:
+            reason = "time_bounded_metadata_requires_event_search"
+        else:
+            selected_tool = "splunk_get_metadata"
+            metadata_args = _plan_metadata_args(question)
+            reason = "question_requests_metadata_inventory"
     if (
         "investigate top index" in question_lower
         or "drill down top index" in question_lower

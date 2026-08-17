@@ -13,6 +13,8 @@ from scripts.runtime_config import (
     get_ollama_host,
     get_ollama_keep_alive,
     get_ollama_request_timeout_sec,
+    get_ollama_warm_keep_alive,
+    ollama_warm_model_names,
 )
 
 OLLAMA_HOST = get_ollama_host()
@@ -77,6 +79,41 @@ def list_loaded_ollama_models(*, host: str | None = None) -> list[str]:
         if name and name not in names:
             names.append(name)
     return names
+
+
+def warm_ollama_models(
+    models: Iterable[str] | None = None,
+    *,
+    host: str | None = None,
+    keep_alive: str | int | None = None,
+) -> dict[str, Any]:
+    """Best-effort preload of planner/writer models into Ollama memory."""
+    ollama_host = str(host or get_ollama_host()).strip().rstrip("/")
+    if not ollama_host:
+        return {"warmed": [], "errors": ["missing_ollama_host"]}
+    targets = [str(item).strip() for item in (models or ollama_warm_model_names()) if str(item).strip()]
+    if not targets:
+        return {"warmed": [], "errors": ["no_warm_models_configured"]}
+    retention = get_ollama_warm_keep_alive() if keep_alive is None else keep_alive
+    warmed: list[str] = []
+    errors: list[str] = []
+    with httpx.Client(timeout=120.0) as client:
+        for model in targets:
+            try:
+                resp = client.post(
+                    f"{ollama_host}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": "Reply with exactly: WARM_OK",
+                        "stream": False,
+                        "keep_alive": retention,
+                    },
+                )
+                resp.raise_for_status()
+                warmed.append(model)
+            except Exception as exc:
+                errors.append(f"{model}:{type(exc).__name__}:{exc}")
+    return {"warmed": warmed, "errors": errors}
 
 
 def release_ollama_vram(models: Iterable[str] | None = None, *, host: str | None = None) -> None:

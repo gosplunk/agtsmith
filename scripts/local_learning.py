@@ -125,7 +125,7 @@ def _sanitize_learning_proposal(kind: str, proposal: Any) -> tuple[dict[str, Any
                 cleaned["preferred_sourcetypes"] = filtered
                 changed = True
     if kind == "spl_pattern_asset":
-        for key in ("required_fields", "required_sources", "required_sourcetypes", "match_tokens", "avoid_when"):
+        for key in ("required_fields", "required_sources", "required_sourcetypes", "match_tokens", "avoid_when", "aliases"):
             values = cleaned.get(key, [])
             if isinstance(values, str):
                 values = [values]
@@ -272,6 +272,11 @@ def load_learning_registry() -> dict[str, Any]:
                 "created_at": created_at,
                 "updated_at": str(row.get("updated_at", "")).strip() or _utc_now(),
                 "status": status if status in ALLOWED_STATUSES else "pending",
+                **{
+                    key: row.get(key)
+                    for key in ("source", "saved_by", "saved_at", "selection_reason", "benchmark_impact")
+                    if row.get(key) not in (None, "", {}, [])
+                },
             }
         )
     out = {

@@ -1294,6 +1294,37 @@ def _fallback_domains_from_profile(
     return domains
 
 
+def _domain_embedding_index_scores(question: str) -> dict[str, float]:
+    """Best-effort index-level embedding retrieval scores for `question`.
+
+    Enriches the retrieval query with the optional edge-model classifier's
+    structured hint (platform/activity/data_category/entities/time_hint) when
+    enabled. Any failure anywhere in this chain (edge LLM disabled/unreachable,
+    no domain embedding index built yet, embedder unreachable) degrades to an
+    empty dict, so `resolve_authoritative_domains_for_question` falls back to
+    pure keyword scoring exactly as before this feature existed.
+    """
+    try:
+        from domain_embedding_retrieval import domain_embedding_enabled, index_level_scores, retrieve_domain_scores
+
+        if not domain_embedding_enabled():
+            return {}
+        query_hint = ""
+        try:
+            from runtime_config import get_edge_llm_enabled
+
+            if get_edge_llm_enabled():
+                from edge_question_classifier import question_query_hint
+
+                query_hint = question_query_hint(question)
+        except Exception:
+            query_hint = ""
+        domain_scores = retrieve_domain_scores(question, query_hint=query_hint)
+        return index_level_scores(domain_scores) if domain_scores else {}
+    except Exception:
+        return {}
+
+
 def resolve_authoritative_domains_for_question(
     question: str,
     intent: str,
@@ -1317,6 +1348,7 @@ def resolve_authoritative_domains_for_question(
     tokens = _question_tokens(question)
     target_use_cases = _intent_use_cases(intent, question)
     explicit_internal = any(tok in str(question or "").lower() for tok in ("_audit", "_internal", "splunk internal"))
+    embed_index_scores = _domain_embedding_index_scores(question)
 
     scored: list[tuple[int, dict[str, Any]]] = []
     for row in indexes:
@@ -1350,6 +1382,14 @@ def resolve_authoritative_domains_for_question(
             score += 6
         if idx_l.startswith("_") and not explicit_internal:
             score -= 6
+        embed_score = embed_index_scores.get(idx_l, 0.0)
+        if embed_score > 0:
+            # Additive, bounded bonus: strong semantic similarity (>=0.8 cosine)
+            # can contribute up to +8, matching the weight of a full use-case
+            # match above. This lets embedding retrieval rescue domains a
+            # question phrases in vocabulary the keyword lists never anticipated,
+            # without letting it override a solid keyword match on its own.
+            score += round(embed_score * 8)
         ranked_sourcetypes = _rank_domain_sourcetypes(
             index_name=idx,
             sourcetypes=sourcetypes,
@@ -2408,6 +2448,63 @@ def _known_index_sourcetypes(
     return out
 
 
+def _environment_query_segments(query: str) -> list[str]:
+    text = str(query or "").strip()
+    if not re.search(r"\|\s*append\s*\[", text, flags=re.IGNORECASE):
+        return [text]
+    segments: list[str] = []
+    head = re.split(r"\|\s*append\s*\[", text, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    if head:
+        segments.append(head)
+    for match in re.finditer(r"\|\s*append\s*\[\s*(search[^]]+)\]", text, flags=re.IGNORECASE):
+        segments.append(match.group(1).strip())
+    return segments or [text]
+
+
+def _validate_environment_segment(
+    segment: str,
+    *,
+    known_indexes: set[str],
+    indexes_by_name: dict[str, set[str]],
+    st_to_idx: dict[str, Any],
+    aliases: dict[str, str],
+) -> tuple[bool, str]:
+    q_indexes = extract_indexes_from_query(segment)
+    q_sourcetypes = extract_sourcetypes_from_query(segment)
+
+    for idx in q_indexes:
+        if idx in {"*", "_*"}:
+            continue
+        if idx in known_indexes:
+            continue
+        canonical = aliases.get(str(idx).strip().lower())
+        if canonical and canonical in known_indexes:
+            continue
+        return False, f"environment_unknown_index:{idx}"
+
+    if q_sourcetypes:
+        if not q_indexes:
+            for st in q_sourcetypes:
+                if st in BOTSV3_SOURCETYPES:
+                    continue
+                if st not in st_to_idx:
+                    return False, f"environment_unknown_sourcetype:{st}"
+            return True, "environment_sourcetype_known_no_index_constraint"
+
+        concrete_indexes = [i for i in q_indexes if i not in {"*", "_*"}]
+        if concrete_indexes:
+            for st in q_sourcetypes:
+                ok_any = False
+                for idx in concrete_indexes:
+                    if st in indexes_by_name.get(idx, set()):
+                        ok_any = True
+                        break
+                if not ok_any:
+                    return False, f"environment_sourcetype_not_in_index:{st}"
+
+    return True, "environment_query_ok"
+
+
 def validate_query_against_environment(query_args: dict[str, Any], *, profile_path: str | Path = PROFILE_PATH_DEFAULT) -> tuple[bool, str]:
     if not isinstance(query_args, dict):
         return False, "environment_query_args_not_dict"
@@ -2441,40 +2538,16 @@ def validate_query_against_environment(query_args: dict[str, Any], *, profile_pa
                 sourcetype_to_indexes=st_to_idx,
             )
 
-    q_indexes = extract_indexes_from_query(query)
-    q_sourcetypes = extract_sourcetypes_from_query(query)
     aliases = build_index_alias_map(profile)
-
-    # index check
-    for idx in q_indexes:
-        if idx in {"*", "_*"}:
-            continue
-        if idx in known_indexes:
-            continue
-        canonical = aliases.get(str(idx).strip().lower())
-        if canonical and canonical in known_indexes:
-            continue
-        return False, f"environment_unknown_index:{idx}"
-
-    # sourcetype and index pairing check
-    if q_sourcetypes:
-        if not q_indexes:
-            for st in q_sourcetypes:
-                if st in BOTSV3_SOURCETYPES:
-                    continue
-                if st not in st_to_idx:
-                    return False, f"environment_unknown_sourcetype:{st}"
-            return True, "environment_sourcetype_known_no_index_constraint"
-
-        concrete_indexes = [i for i in q_indexes if i not in {"*", "_*"}]
-        if concrete_indexes:
-            for st in q_sourcetypes:
-                ok_any = False
-                for idx in concrete_indexes:
-                    if st in indexes_by_name.get(idx, set()):
-                        ok_any = True
-                        break
-                if not ok_any:
-                    return False, f"environment_sourcetype_not_in_index:{st}"
+    for segment in _environment_query_segments(query):
+        ok, reason = _validate_environment_segment(
+            segment,
+            known_indexes=known_indexes,
+            indexes_by_name=indexes_by_name,
+            st_to_idx=st_to_idx,
+            aliases=aliases,
+        )
+        if not ok:
+            return False, reason
 
     return True, "environment_query_ok"

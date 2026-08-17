@@ -68,6 +68,18 @@ def main() -> int:
                 f"Template '{t.intent}' has row_limit={t.row_limit}; exceeds safety max {MAX_SAFE_ROW_LIMIT}."
             )
 
+        # Policy check: any template that searches across all indexes with a bare
+        # `index=*` must exclude Splunk's internal indexes, matching the same hard
+        # rule query_policy.py enforces on live LLM-generated queries
+        # (wildcard_index_requires_internal_exclusion). This is a structural check
+        # independent of routing/keywords: a canonical template shipping `index=*`
+        # without the exclusion is unsafe regardless of which question selects it.
+        lowered_query = t.query.lower()
+        if "index=*" in lowered_query and "not index=_*" not in lowered_query and "index!=_*" not in lowered_query:
+            errors.append(
+                f"Template '{t.intent}' uses bare index=* without 'NOT index=_*' exclusion: {t.query!r}"
+            )
+
     routing_cases = (
         ("Show linux failed login activity in the last 24 hours", "linux_auth_failures"),
         ("Show failed login activity in the last 24 hours in windows", "windows_auth_failures"),

@@ -523,6 +523,32 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         summary_hint="Focus on Linux auditd activity by audit type, operation, result, and host.",
     ),
     QueryTemplate(
+        intent="linux_sourcetypes",
+        keywords=(
+            "linux sourcetype",
+            "linux sourcetypes",
+            "sourcetypes in linux",
+            "linux index sourcetype",
+            "sourcetype breakdown linux",
+        ),
+        query="search index=linux | stats count by sourcetype | sort - count",
+        tags=("linux", "metadata", "top_n"),
+        summary_hint="Focus on sourcetype volume in the linux index.",
+    ),
+    QueryTemplate(
+        intent="linux_host_activity",
+        keywords=(
+            "linux host activity",
+            "linux hosts",
+            "hosts in linux index",
+            "linux index hosts",
+            "hosts sending to linux",
+        ),
+        query="search index=linux | stats count by host sourcetype | sort - count",
+        tags=("linux", "inventory", "top_n"),
+        summary_hint="Focus on hosts sending events to the linux index.",
+    ),
+    QueryTemplate(
         intent="linux_privilege_escalation_first_seen",
         keywords=(
             "first time privilege escalation",
@@ -755,7 +781,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
     QueryTemplate(
         intent="metadata_inventory",
         keywords=("metadata", "list hosts", "list sources", "list sourcetypes", "hosts in index", "sources in index"),
-        query="search index=* | metadata type=hosts | sort + host",
+        query="search index=* NOT index=_* | metadata type=hosts | sort + host",
         tags=("inventory", "metadata"),
         summary_hint="Focus on metadata inventory for hosts, sources, or sourcetypes in an index.",
     ),
@@ -788,6 +814,13 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
         summary_hint="Focus on Splunk internal sourcetype volume for platform health.",
     ),
     QueryTemplate(
+        intent="internal_splunkd_health",
+        keywords=("splunkd volume", "splunkd health", "splunkd errors", "splunkd component", "splunkd activity"),
+        query="search index=_internal sourcetype=splunkd | stats count by host component | sort - count",
+        tags=("splunk_internal", "platform_ops", "top_n"),
+        summary_hint="Focus on splunkd volume and component health in _internal.",
+    ),
+    QueryTemplate(
         intent="splunk_license_usage",
         keywords=("license usage", "license quota", "splunk license"),
         query="search index=_internal sourcetype=splunkd OR sourcetype=license_usage | stats count by sourcetype host | sort - count",
@@ -811,14 +844,14 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
     QueryTemplate(
         intent="network_flow_summary",
         keywords=("network flow", "top connections", "flow summary", "top src dest"),
-        query="search index=* (sourcetype=stream:ip OR sourcetype=aws:cloudwatchlogs:vpcflow OR sourcetype=cisco:asa) | stats count by src dest dest_port action | sort - count",
+        query="search index=* NOT index=_* (sourcetype=stream:ip OR sourcetype=aws:cloudwatchlogs:vpcflow OR sourcetype=cisco:asa) | stats count by src dest dest_port action | sort - count",
         tags=("network", "operational", "top_n"),
         summary_hint="Focus on network flow volume by source, destination, and port.",
     ),
     QueryTemplate(
         intent="app_error_spike",
         keywords=("error spike", "application errors", "error log volume", "error count by host"),
-        query="search index=* (error OR ERROR OR severity=error) | stats count by index sourcetype host | sort - count",
+        query="search index=* NOT index=_* (error OR ERROR OR severity=error) | stats count by index sourcetype host | sort - count",
         tags=("operational", "top_n"),
         summary_hint="Focus on application error volume by index, sourcetype, and host.",
     ),
@@ -842,7 +875,7 @@ TEMPLATES: tuple[QueryTemplate, ...] = (
     ),
     QueryTemplate(
         intent="internal_sourcetypes",
-        keywords=("sourcetype", "internal"),
+        keywords=("internal sourcetype", "internal sourcetypes", "splunk internal sourcetype", "sourcetype breakdown internal"),
         query="search index=_internal | stats count by sourcetype | sort - count",
         tags=("splunk_internal", "metadata", "top_n"),
         summary_hint="Focus on top internal sourcetypes and operational significance.",

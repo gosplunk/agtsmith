@@ -1,0 +1,244 @@
+[
+  {
+    "id": "linux_auth_failures_24h",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [],
+    "question": "Show Linux failed login activity in the last 24 hours",
+    "expected_intent": "linux_auth_failures",
+    "canonical_spl": "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") (\"Failed password\" OR \"authentication failure\" OR \"Invalid user\" OR \"Connection closed by invalid user\" OR \"FAILED SU\") | rex field=_raw \"(?i)Failed password for (?:invalid user )?(?<user>[^ ]+)\" | rex field=_raw \"(?i)user=(?<pam_user>[^\\s;]+)\" | rex field=_raw \"(?i)from (?<failed_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<failed_port>\\d+)\" | rex field=_raw \"(?i)rhost=(?<rhost>[^\\s;]+)\" | eval user=coalesce(user,pam_user,username,account) | eval src_ip=coalesce(src_ip,failed_src_ip,rhost,src,ip,\"local\") | eval port=coalesce(port,failed_port,lport) | stats count by host user src_ip port | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port",
+      "count"
+    ],
+    "entity_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "min_jaccard": 0.75,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "data_present_required": false
+  },
+  {
+    "id": "linux_successful_logins_24h",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [],
+    "question": "Show Linux successful login activity in the last 24 hours",
+    "expected_intent": "linux_successful_logins",
+    "canonical_spl": "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") (\"Accepted password\" OR \"Accepted publickey\" OR \"Accepted keyboard-interactive/pam\" OR \"session opened for user\") | rex field=_raw \"(?i)Accepted (?:password|publickey|keyboard-interactive/pam) for (?<user>[^ ]+)\" | rex field=_raw \"(?i)from (?<success_src_ip>\\d{1,3}(?:\\.\\d{1,3}){3}) port (?<success_port>\\d+)\" | rex field=_raw \"(?i)session opened for user (?<session_user>[A-Za-z0-9_.-]+)\" | eval user=coalesce(user,session_user,username,account) | eval src_ip=coalesce(src_ip,success_src_ip,rhost,src,ip,\"local\") | eval port=coalesce(port,success_port,lport) | stats count by host user src_ip port | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port",
+      "count"
+    ],
+    "entity_fields": [
+      "host",
+      "user",
+      "src_ip",
+      "port"
+    ],
+    "min_jaccard": 0.75,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "data_present_required": false
+  },
+  {
+    "id": "linux_sudo_failures_24h",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [],
+    "question": "Show failed sudo attempts on Linux in the last 24 hours",
+    "expected_intent": "linux_privilege_escalation",
+    "canonical_spl": "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") ((\"pam_unix(sudo:auth): authentication failure\" OR \"conversation failed\") OR (\"sudo:\" (\"authentication failure\" OR \"incorrect password\" OR \"incorrect password attempts\" OR \"failed\"))) | rex field=_raw \"\\s(?<process_name>sudo|su)(?:\\[[^\\]]+\\])?:\" | rex field=_raw \"(?i)sudo:\\s+(?<sudo_actor>[A-Za-z0-9_.-]+)\\s+:\" | rex field=_raw \"(?i)logname=(?<logname_user>[^\\s;]+)\" | rex field=_raw \"(?i)ruser=(?<ruser>[^\\s;]+)\" | rex field=_raw \"(?i)\\buser=(?<auth_user>[^\\s;]+)\" | rex field=_raw \"(?i)tty=(?<tty_value>[^\\s;]+)\" | rex field=_raw \"(?i)rhost=(?<src_ip>[^\\s;]+)\" | eval actor=coalesce(sudo_actor,logname_user,ruser,auth_user,user,account,uid,user_name) | eval tty=coalesce(tty_value,tty) | eval src_ip=if(isnull(src_ip) OR len(trim(src_ip))=0, \"local\", src_ip) | stats count by host process_name actor tty src_ip sourcetype | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "count"
+    ],
+    "entity_fields": [
+      "host"
+    ],
+    "min_jaccard": 0.65,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "data_present_required": false
+  },
+  {
+    "id": "linux_session_activity_24h",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [],
+    "question": "Show Linux session activity in the last 24 hours",
+    "expected_intent": "linux_session_activity",
+    "canonical_spl": "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") (\"session opened for user\" OR \"session closed for user\" OR \"pam_unix(cron:session)\") | rex field=_raw \"(?i)session (?<session_state>opened|closed) for user (?<session_user>[A-Za-z0-9_.-]+)\" | rex field=_raw \"(?i)tty=(?<tty>[^\\s;]+)\" | rex field=_raw \"(?i)rhost=(?<src_ip>[^\\s;]+)\" | eval actor=session_user | eval src_ip=if(isnull(src_ip) OR len(trim(src_ip))=0, \"local\", src_ip) | table _time host sourcetype session_state actor tty src_ip _raw",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "count"
+    ],
+    "entity_fields": [
+      "host"
+    ],
+    "min_jaccard": 0.75,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "data_present_required": true
+  },
+  {
+    "id": "linux_audit_activity_24h",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [
+      "linux_audit"
+    ],
+    "question": "Show Linux audit activity in the last 24 hours",
+    "expected_intent": "linux_audit_activity",
+    "canonical_spl": "search index=linux sourcetype=linux_audit | rex field=_raw \"type=(?<audit_type>[^ ]+)\" | rex field=_raw \"\\bop=(?<audit_op>[^ ]+)\" | rex field=_raw \"\\bres=(?<audit_res>[^ ]+)\" | stats count by host audit_type audit_op audit_res | sort - count | head 20",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "audit_type",
+      "audit_op",
+      "audit_res",
+      "count"
+    ],
+    "entity_fields": [
+      "host",
+      "audit_type",
+      "audit_op",
+      "audit_res"
+    ],
+    "min_jaccard": 0.75,
+    "min_entity_recall": 0.75,
+    "min_equivalence_score": 0.7,
+    "data_present_required": false
+  },
+  {
+    "id": "linux_hosts_sending_events_24h",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [],
+    "question": "Which hosts are sending events to the linux index in the last 24 hours?",
+    "expected_intent": "linux_host_activity",
+    "canonical_spl": "search index=linux | stats count by host sourcetype | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "host",
+      "sourcetype"
+    ],
+    "min_jaccard": 0.75,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "data_present_required": true
+  },
+  {
+    "id": "linux_most_active_sourcetypes_hour",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [],
+    "question": "Which sourcetypes are most active in the linux index in the last hour?",
+    "expected_intent": "linux_sourcetypes",
+    "canonical_spl": "search index=linux | stats count by sourcetype | sort - count",
+    "earliest_time": "-1h",
+    "latest_time": "now",
+    "compare_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "sourcetype"
+    ],
+    "min_jaccard": 0.75,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "data_present_required": true
+  },
+  {
+    "id": "linux_sourcetype_volume_24h",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [],
+    "question": "Show Linux sourcetype volume in the last 24 hours",
+    "expected_intent": "linux_sourcetypes",
+    "canonical_spl": "search index=linux | stats count by sourcetype | sort - count",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "sourcetype"
+    ],
+    "min_jaccard": 0.75,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "data_present_required": true
+  },
+  {
+    "id": "list_linux_sourcetypes_hour",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [],
+    "question": "List sourcetypes with events in the linux index in the last hour",
+    "expected_intent": "linux_sourcetypes",
+    "canonical_spl": "search index=linux | stats count by sourcetype | sort - count",
+    "earliest_time": "-1h",
+    "latest_time": "now",
+    "compare_fields": [
+      "sourcetype",
+      "count"
+    ],
+    "entity_fields": [
+      "sourcetype"
+    ],
+    "min_jaccard": 0.75,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "data_present_required": true
+  },
+  {
+    "id": "linux_sudo_activity_24h",
+    "category": "platform_ops",
+    "index_scope": "linux",
+    "sourcetype_tags": [],
+    "question": "Show Linux sudo activity in the last 24 hours",
+    "expected_intent": "linux_privilege_escalation_activity",
+    "canonical_spl": "search index=linux (source=\"/var/log/auth.log\" OR source=\"/var/log/secure\") (\"sudo:\" OR \"su:\" OR \"pam_unix(sudo:session)\" OR \"pam_unix(su:session)\" OR \"COMMAND=\" OR \"session opened for user root by\" OR \"incorrect password\" OR \"authentication failure\") | rex field=_raw \"\\s(?<process_name>sudo|su)(?:\\[[^\\]]+\\])?:\" | rex field=_raw \"(?i)sudo:\\s+(?<sudo_actor>[A-Za-z0-9_.-]+)\\s+:\" | rex field=_raw \"(?i)by\\s+(?<session_actor>[A-Za-z0-9_.-]+)\\(uid=\" | rex field=_raw \"(?i)\\(to\\s+(?<su_target>[A-Za-z0-9_.-]+)\\)\\s+(?<su_actor>[A-Za-z0-9_.-]+)\\s+on\\s+(?<su_tty>[^\\s;]+)\" | rex field=_raw \"(?i)for user\\s+(?<target_user>[A-Za-z0-9_.-]+)\" | rex field=_raw \"(?i)USER=(?<target_user_cmd>[A-Za-z0-9_.-]+)\" | rex field=_raw \"(?i)password changed for\\s+(?<passwd_target>[A-Za-z0-9_.-]+)\" | rex field=_raw \"(?i)new user:\\s+name=(?<new_user>[A-Za-z0-9_.-]+)\" | rex field=_raw \"(?i)delete user\\s+'(?<deleted_user>[A-Za-z0-9_.-]+)'\" | rex field=_raw \"(?i)COMMAND=(?<command>.+)$\" | rex field=_raw \"(?i)pkexec\\[[^\\]]+\\]:\\s+(?<pkexec_actor>[A-Za-z0-9_.-]+):\" | eval target_user=coalesce(target_user,target_user_cmd,su_target,passwd_target,new_user,deleted_user) | eval outcome=case(match(_raw, \"(?i)incorrect password|failure|failed|not in sudoers|conversation failed|auth could not identify password\"), \"failure\", match(_raw, \"(?i)password changed for\"), \"password_changed\", match(_raw, \"(?i)new user:\"), \"user_created\", match(_raw, \"(?i)delete user\"), \"user_deleted\", match(_raw, \"(?i)session opened\"), \"session_opened\", match(_raw, \"(?i)session closed\"), \"session_closed\", match(_raw, \"(?i)COMMAND=\"), \"command\", true(), \"other\") | eval process_name=case(isnotnull(process_name),process_name,match(_raw,\"(?i)pkexec\"),\"pkexec\",true(),\"unknown\") | eval actor=coalesce(sudo_actor, su_actor, session_actor, pkexec_actor, user, account, uid, user_name) | eval actor=if(isnull(actor) AND match(_raw,\"(?i)by\\s+\\(uid=0\\)\"),\"root\",actor) | eval src_ip=coalesce(rhost, src, src_ip, ip) | eval tty=coalesce(su_tty, tty) | fillnull value=\"unknown\" actor target_user command src_ip tty | table _time host sourcetype process_name outcome actor target_user command src_ip tty _raw",
+    "earliest_time": "-24h",
+    "latest_time": "now",
+    "compare_fields": [
+      "host",
+      "count"
+    ],
+    "entity_fields": [
+      "host"
+    ],
+    "min_jaccard": 0.65,
+    "min_entity_recall": 0.85,
+    "min_equivalence_score": 0.8,
+    "data_present_required": true
+  }
+]

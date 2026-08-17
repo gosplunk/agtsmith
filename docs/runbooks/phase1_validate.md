@@ -20,12 +20,12 @@ make setup-local-ui-env
 ## 3. Start sidecar
 
 ```bash
-# With compose plugin:
 make docker-deploy-up
-
-# Without compose plugin:
-make docker-deploy-manual
 ```
+
+Docker Compose v2 is required. The compatibility `docker-deploy-manual` target
+uses the same verified Compose path and refuses an unverified direct-run
+fallback.
 
 Open http://127.0.0.1:8787 — complete first-run setup if prompted, then paste values from `config/ui.env` in Configuration.
 The deployment container uses a private named config volume; `config/ui.env` is

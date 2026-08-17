@@ -1,0 +1,51 @@
+# Tier 1 internal sourcetype clusters for oracle seeding (Phase 1).
+scheduler:
+  index: _internal
+  sourcetype: scheduler
+  example_questions:
+    - Show scheduler activity in _internal for the last 24 hours
+    - Which hosts ran the most scheduled searches in the last day?
+  canonical_shape: "search index=_internal sourcetype=scheduler | stats count by host | sort - count"
+  compare_fields: [host, count]
+
+splunkd:
+  index: _internal
+  sourcetype: splunkd
+  example_questions:
+    - Show splunkd volume in _internal for the last 24 hours
+    - Break down splunkd activity by host and component
+  canonical_shape: "search index=_internal sourcetype=splunkd | stats count by host component | sort - count"
+  compare_fields: [host, component, count]
+
+deploymentclient:
+  index: _internal
+  sourcetype: deploymentclient
+  example_questions:
+    - Show forwarder connectivity in _internal in the last 24 hours
+  canonical_shape: "search index=_internal (sourcetype=splunkd OR sourcetype=deploymentclient) | stats count by host sourcetype | sort - count"
+  compare_fields: [host, sourcetype, count]
+
+license_usage:
+  index: _internal
+  sourcetypes: [splunkd, license_usage]
+  example_questions:
+    - Show license usage in Splunk internal indexes in the last day
+  canonical_shape: "search index=_internal sourcetype=splunkd OR sourcetype=license_usage | stats count by sourcetype host | sort - count"
+  compare_fields: [sourcetype, host, count]
+
+audittrail:
+  index: _audit
+  sourcetype: audittrail
+  example_questions:
+    - What Splunk internal auth failures happened in the last 24 hours?
+  canonical_shape: "search index=_audit sourcetype=audittrail info=failed | stats count by host user src | sort - count"
+  compare_fields: [host, user, src, count]
+  data_present_required: false
+
+internal_inventory:
+  index: _internal
+  example_questions:
+    - What sourcetypes have data in _internal in the last hour?
+    - Which sourcetypes are most active in _internal in the last hour?
+  canonical_shape: "search index=_internal | stats count by sourcetype | sort - count"
+  compare_fields: [sourcetype, count]

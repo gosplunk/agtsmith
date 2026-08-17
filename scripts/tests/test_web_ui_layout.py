@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import os
+import json
 import sys
 import tempfile
 import time
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -54,6 +57,7 @@ def _install_stub_modules() -> None:
     mod.run_splunk_query_args = lambda *args, **kwargs: {"structured": {"results": [], "total_rows": 0}}
     mod.summarize_with_ollama_model = lambda *args, **kwargs: ""
     mod.template_to_query_args = lambda *args, **kwargs: {"query": "search index=test", "earliest_time": "-24h", "latest_time": "now"}
+    mod.MCPRequestTimeout = type("MCPRequestTimeout", (TimeoutError,), {})
     stubs["minimal_question_to_answer"] = mod
 
     mod = types.ModuleType("ollama_log_stream")
@@ -75,8 +79,19 @@ def _install_stub_modules() -> None:
         "connection_state": "connected",
         "host": "127.0.0.1:11434",
         "models_loaded": 2,
+        "models_loaded_names": ["planner:latest", "writer:latest"],
         "gpu_vram_used_gb": 1.0,
         "gpu_vram_total_gb": 8.0,
+        "gpu_utilization_pct": 42.0,
+        "gpu_metrics_available": True,
+        "gpu_metrics_reason": "",
+        "gpu_metrics_source": "nvidia_smi",
+        "cpu_utilization_pct": 18.5,
+        "cpu_metrics_available": True,
+        "cpu_metrics_reason": "",
+        "cpu_engaged": True,
+        "gpu_engaged": True,
+        "compute_target": "hybrid",
         "updated_at": "2026-07-29T00:00:00+00:00",
     }
     mod.ollama_log_config_status = lambda *args, **kwargs: {}
@@ -122,9 +137,12 @@ def _install_stub_modules() -> None:
     mod.get_edge_llm_model = lambda: ""
     mod.get_edge_llm_role = lambda: ""
     mod.get_edge_llm_timeout_sec = lambda: "60"
+    mod.get_env_profile_auto_refresh_enabled = lambda: True
+    mod.get_env_profile_refresh_interval_minutes = lambda: 60
     mod.get_soc_ui_session_timeout_min = lambda: "60"
     mod.get_soc_ui_session_remember_timeout_min = lambda: "480"
     mod.get_ollama_host = lambda: ""
+    mod.is_local_ollama_host = lambda host=None: True
     mod.get_splunk_base_url = lambda: ""
     mod.get_splunk_mcp_url = lambda: ""
     mod.get_runtime_secret = lambda name, default="": default
@@ -145,6 +163,14 @@ def _install_stub_modules() -> None:
     mod.determine_splunk_tool = lambda question, intent: ("splunk_run_query", "demo", {}, "deterministic")
     stubs["langgraph_minimal_flow"] = mod
 
+    mod = types.ModuleType("mcp_deterministic_routing")
+    mod.resolve_mcp_chat_pipeline = lambda question, pipeline: (
+        "assisted",
+        {"requested_pipeline": pipeline or "assisted", "effective_pipeline": "assisted", "auto_routed": False},
+    )
+    mod.classify_mcp_deterministic_eligibility = lambda question: {"eligible": False, "reason": "stub"}
+    stubs["mcp_deterministic_routing"] = mod
+
     for name, module in stubs.items():
         sys.modules[name] = module
 
@@ -155,6 +181,123 @@ import web_ui_server as wus
 
 
 class WebUiLayoutTests(unittest.TestCase):
+    def test_data_domains_maintenance_reports_profile_and_rag_freshness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile_path = root / "profile.json"
+            source_path = root / "search-index.json"
+            rag_path = root / "rag-index.json"
+            profile_path.write_text(
+                '{"timestamp_utc": "' + datetime.now(timezone.utc).isoformat() + '"}',
+                encoding="utf-8",
+            )
+            source_path.write_text("{}", encoding="utf-8")
+            rag_path.write_text("{}", encoding="utf-8")
+            now = time.time()
+            os.utime(rag_path, (now - 60, now - 60))
+            os.utime(source_path, (now, now))
+
+            with mock.patch.object(wus, "ENV_PROFILE_PATH", profile_path), mock.patch.object(
+                wus,
+                "DEFAULT_SPL_OFFLINE_DOCS_SOURCE",
+                source_path,
+            ), mock.patch.object(
+                wus,
+                "SPL_OFFLINE_DOCS_RAG_PATH",
+                rag_path,
+            ), mock.patch.dict(
+                os.environ,
+                {"SPL_OFFLINE_DOCS_SOURCE": str(source_path)},
+            ):
+                meta = wus._data_domains_maintenance_meta()
+
+        self.assertFalse(meta["profile_stale"])
+        self.assertTrue(meta["offline_docs_source_available"])
+        self.assertTrue(meta["offline_docs_rag_stale"])
+        self.assertTrue(meta["next_refresh_due_utc"])
+        self.assertTrue(meta["auto_refresh_enabled"])
+        self.assertEqual(meta["refresh_interval_minutes"], 60)
+
+    def test_data_domains_maintenance_hides_next_due_when_auto_refresh_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile_path = root / "profile.json"
+            profile_path.write_text(
+                '{"timestamp_utc": "' + datetime.now(timezone.utc).isoformat() + '"}',
+                encoding="utf-8",
+            )
+            with mock.patch.object(wus, "ENV_PROFILE_PATH", profile_path), mock.patch.object(
+                wus, "get_env_profile_auto_refresh_enabled", lambda: False
+            ):
+                meta = wus._data_domains_maintenance_meta()
+        self.assertFalse(meta["auto_refresh_enabled"])
+        self.assertEqual(meta["next_refresh_due_utc"], "")
+
+    def test_env_profile_auto_refresh_due_respects_toggle_and_progress(self) -> None:
+        with mock.patch.object(wus, "get_env_profile_auto_refresh_enabled", lambda: False):
+            self.assertFalse(wus._env_profile_auto_refresh_due())
+        with mock.patch.object(wus, "get_env_profile_auto_refresh_enabled", lambda: True), mock.patch.object(
+            wus, "_environment_profile_exists", lambda: False
+        ):
+            self.assertFalse(wus._env_profile_auto_refresh_due())
+        with mock.patch.object(wus, "get_env_profile_auto_refresh_enabled", lambda: True), mock.patch.object(
+            wus, "_environment_profile_exists", lambda: True
+        ), mock.patch.object(wus, "_environment_profile_refresh_in_progress", lambda: True):
+            self.assertFalse(wus._env_profile_auto_refresh_due())
+        with mock.patch.object(wus, "get_env_profile_auto_refresh_enabled", lambda: True), mock.patch.object(
+            wus, "_environment_profile_exists", lambda: True
+        ), mock.patch.object(
+            wus, "_environment_profile_refresh_in_progress", lambda: False
+        ), mock.patch.object(
+            wus, "get_env_profile_refresh_interval_minutes", lambda: 60
+        ), mock.patch.object(
+            wus,
+            "_data_domains_maintenance_meta",
+            lambda: {"profile_age_minutes": 61},
+        ):
+            self.assertTrue(wus._env_profile_auto_refresh_due())
+        with mock.patch.object(wus, "get_env_profile_auto_refresh_enabled", lambda: True), mock.patch.object(
+            wus, "_environment_profile_exists", lambda: True
+        ), mock.patch.object(
+            wus, "_environment_profile_refresh_in_progress", lambda: False
+        ), mock.patch.object(
+            wus, "get_env_profile_refresh_interval_minutes", lambda: 60
+        ), mock.patch.object(
+            wus,
+            "_data_domains_maintenance_meta",
+            lambda: {"profile_age_minutes": 5},
+        ):
+            self.assertFalse(wus._env_profile_auto_refresh_due())
+
+    def test_configure_page_exposes_data_domains_scheduler_controls(self) -> None:
+        html = wus._configure_page_body_rendered()
+        self.assertIn('id="cfg-env-auto-refresh-enabled"', html)
+        self.assertIn('id="cfg-env-auto-refresh-interval"', html)
+        self.assertIn('value="60"', html)
+        self.assertIn('value="240"', html)
+        self.assertIn('value="1440"', html)
+        self.assertIn("ENV_PROFILE_AUTO_REFRESH_ENABLED", html)
+        self.assertIn("ENV_PROFILE_REFRESH_INTERVAL_MINUTES", html)
+        # Checkbox defaults to checked so new setups auto-refresh every 60 minutes.
+        self.assertIn('id="cfg-env-auto-refresh-enabled" type="checkbox" checked', html)
+
+    def test_environment_page_shows_scheduler_status_and_modern_hero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile_path = root / "profile.json"
+            profile_path.write_text(
+                '{"timestamp_utc": "'
+                + datetime.now(timezone.utc).isoformat()
+                + '", "indexes": [], "counts": {}, "time_window": {}}',
+                encoding="utf-8",
+            )
+            with mock.patch.object(wus, "ENV_PROFILE_PATH", profile_path):
+                html = wus._environment_page_body()
+        self.assertIn("envx-hero", html)
+        self.assertIn("envx-status-board", html)
+        self.assertIn("envx-scheduler-badge", html)
+        self.assertIn("Auto-refresh", html)
+
     def test_configure_page_exposes_role_family_model_map(self) -> None:
         html = wus._configure_page_body_rendered()
         self.assertIn('Model Stack', html)
@@ -225,11 +368,23 @@ class WebUiLayoutTests(unittest.TestCase):
 
     def test_investigation_layout_exposes_collapsible_runtime_rail(self) -> None:
         html = wus._investigation_page_html({"role": "analyst"})
+        rail_html = wus._runtime_rail_html()
         self.assertIn('class="runtime-rail"', html)
         self.assertIn('id="runtime-rail-toggle"', html)
         self.assertIn('LangGraph Journey', html)
-        self.assertIn('Active Models', html)
+        self.assertIn('Tasked LLM', html)
         self.assertIn('Ollama Ops', html)
+        self.assertLess(rail_html.index('LangGraph Journey'), rail_html.index('Tasked LLM'))
+        self.assertLess(rail_html.index('Tasked LLM'), rail_html.index('Ollama Ops'))
+        self.assertIn('id="runtime-model-summary"', html)
+        self.assertIn('id="runtime-ops-gpu-util"', html)
+        self.assertIn('id="runtime-ops-cpu-util"', html)
+        self.assertIn('id="runtime-ops-device-gpu"', html)
+        self.assertIn('id="runtime-ops-device-cpu"', html)
+        self.assertIn('id="runtime-ops-device-label"', html)
+        self.assertIn('id="runtime-ops-model-label"', html)
+        self.assertIn('Ollama Utilization', html)
+        self.assertIn('Glow is live; outline marks the last model task.', html)
         self.assertIn('updateRuntimeRailFromStage', html)
         self.assertIn('/api/runtime/ops-summary', html)
         self.assertIn('agtsmith_runtime_rail_expanded', html)
@@ -239,6 +394,26 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertIn('runtime-journey-step.is-skipped', html)
         self.assertIn('markJourneySkipped', html)
         self.assertIn('hydrateSkippedFromResult', html)
+        rail = wus._runtime_rail_script(show_ops_link=False)
+        self.assertIn('const phaseActive = runActive && Boolean(activeNode);', rail)
+        self.assertIn('const modelPhase = phaseActive && Boolean(roleKey);', rail)
+        self.assertIn("parallel_compute", rail)
+        self.assertIn("'CPU phase'", rail)
+        self.assertIn('lastTaskedSnapshot', rail)
+        self.assertIn('hydrateLastTaskedFromResult', rail)
+        self.assertIn('Last task ·', rail)
+        self.assertIn("classList.toggle('is-last'", rail)
+        self.assertIn('updateOpsPhaseState();', rail)
+        self.assertIn('runtime-ops-keep-warm', html)
+        self.assertIn('/api/runtime/ollama-keep-warm', rail)
+        self.assertIn('setOllamaKeepWarm', rail)
+        self.assertIn('resolveJourneyNode', rail)
+        self.assertIn("if (node === 'ingest_question') return '';", rail)
+        self.assertIn('runtime-journey-legend', html)
+        self.assertIn('writer-path-library', html)
+        self.assertIn('writer-path-deterministic', html)
+        self.assertIn('writer-path-llm', html)
+        self.assertIn('--runtime-rail-width: 248px', html)
         self.assertIn('runtime-ops-full-link" href="/admin/ollama-ops" hidden', html)
 
     def test_investigation_layout_exposes_journey_playbook_overlay(self) -> None:
@@ -251,7 +426,13 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertNotIn('id="runtime-journey-overlay-sidebar"', html)
         self.assertNotIn('runtime-journey-overlay-content', html)
         self.assertIn('id="runtime-journey-overlay-profile"', html)
-        self.assertIn('runtime-journey-overlay-live-dot', html)
+        self.assertIn('id="runtime-journey-overlay-status"', html)
+        self.assertIn('id="runtime-journey-overlay-zoom-out"', html)
+        self.assertIn('id="runtime-journey-overlay-zoom-in"', html)
+        self.assertIn('id="runtime-journey-overlay-zoom-fit"', html)
+        self.assertIn('id="runtime-journey-overlay-zoom-value"', html)
+        self.assertIn('runtime-journey-overlay-status-spinner', html)
+        self.assertIn('runtime-journey-overlay-status-check', html)
         self.assertIn('runtime-journey-overlay', html)
         self.assertIn('playbook-flowchart', html)
         self.assertIn('playbook-flowchart-svg', html)
@@ -259,10 +440,14 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertIn('backdrop-filter:blur(16px)', overlay_styles)
         self.assertIn('rgba(15,23,42,.92)', overlay_styles)
         self.assertIn('rgba(62,184,255,.25)', overlay_styles)
-        self.assertIn('right:calc(var(--runtime-rail-width, 312px) + 16px)', overlay_styles)
-        self.assertIn('min(1500px, calc(100vw - 64px - var(--runtime-rail-width, 312px) - 16px))', overlay_styles)
+        self.assertIn('right:calc(var(--runtime-rail-width, 248px) + 16px)', overlay_styles)
+        self.assertIn('min(1500px, calc(100vw - 64px - var(--runtime-rail-width, 248px) - 16px))', overlay_styles)
         self.assertIn('padding:12px 16px 16px 12px', overlay_styles)
-        self.assertIn('overflow-x:hidden', overlay_styles)
+        self.assertIn('overflow:auto', overlay_styles)
+        self.assertIn('scrollbar-gutter:stable both-edges', overlay_styles)
+        self.assertIn('max-width:none', overlay_styles)
+        self.assertNotIn('overflow-x:hidden', overlay_styles)
+        self.assertNotIn('min-height:640px', overlay_styles)
         self.assertIn('branch-operational', overlay_styles)
         self.assertIn('branch-trunk', overlay_styles)
         self.assertIn('playbook-flow-legend', overlay_styles)
@@ -273,23 +458,44 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertIn('phase-gate', overlay_styles)
         self.assertIn('background-size:28px 28px', overlay_styles)
         self.assertIn('playbook-flow-icon-badge', overlay_styles)
-        self.assertIn('playbook-flow-spinner-arc', overlay_styles)
+        self.assertIn('runtime-journey-overlay-status-spinner', overlay_styles)
+        self.assertNotIn('playbook-flow-spinner-arc', overlay_styles)
+        self.assertNotIn('playbook-spinner-spin', overlay_styles)
         self.assertIn('playbook-flow-edge-label-bg', overlay_styles)
         self.assertIn('runtime-journey-overlay-profile-pill', overlay_styles)
+        self.assertIn('playbook-flow-phase-time', overlay_styles)
+        self.assertIn('playbook-flow-lane-header', overlay_styles)
         rail = wus._runtime_rail_script(show_ops_link=False)
         self.assertIn('openJourneyOverlay', rail)
         self.assertIn('closeJourneyOverlay', rail)
         self.assertIn('renderPlaybookFlowchart', rail)
         self.assertIn('renderPlaybookOverlay', rail)
+        self.assertIn('fitPlaybookToViewport', rail)
+        self.assertIn('applyPlaybookZoom', rail)
+        self.assertIn('handlePlaybookViewportWheel', rail)
+        self.assertIn('handlePlaybookDoubleClick', rail)
+        self.assertIn('PLAYBOOK_DOUBLE_CLICK_FACTOR = 1.6', rail)
+        self.assertIn('centerOnAnchor: true', rail)
+        self.assertIn("addEventListener('dblclick', handlePlaybookDoubleClick)", rail)
+        self.assertIn('beginPlaybookPan', rail)
+        self.assertIn('PLAYBOOK_ZOOM_MIN = 0.1', rail)
+        self.assertIn('PLAYBOOK_ZOOM_MAX = 2', rail)
+        self.assertIn("playbookZoomMode = 'fit'", rail)
+        self.assertIn("playbookViewport.scrollLeft", rail)
+        self.assertIn("playbookViewport.scrollTop", rail)
+        self.assertIn("addEventListener('wheel', handlePlaybookViewportWheel, { passive: false })", rail)
+        self.assertIn('new window.ResizeObserver', rail)
         self.assertNotIn('syncOverlayRuntimeSidebar', rail)
         self.assertIn('updateReviewProfilePill', rail)
         self.assertIn('syncPlaybookCompletedThrough', rail)
         self.assertIn('completeGraphSummarizeStep', rail)
         self.assertIn('playbookCompletedThrough = -1', rail)
-        self.assertIn('ALL PATHS', rail)
+        self.assertIn('All paths', rail)
         self.assertIn('appendProcessNodeTitle', rail)
         self.assertIn('edgeDrawOrder', rail)
-        self.assertIn('x: -78, y: -51, w: 1196, h: 810', rail)
+        from investigation_progress import PLAYBOOK_VIEWBOX  # noqa: WPS433
+
+        self.assertIn(f"const FLOW_VIEWBOX = {json.dumps(PLAYBOOK_VIEWBOX)};", rail)
         self.assertIn('appendPlaybookDefs', rail)
         self.assertIn('nodeGradTrunk', rail)
         self.assertIn('nodeGradOperational', rail)
@@ -299,7 +505,10 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertIn('id="glow"', rail)
         self.assertIn('id="greenGlow"', rail)
         self.assertIn('id="amberGlow"', rail)
-        self.assertIn('playbook-flow-done-badge', rail)
+        self.assertNotIn('playbook-flow-done-badge', rail)
+        self.assertNotIn('appendNodeStatusChrome', rail)
+        self.assertIn('updatePlaybookHeaderStatus', rail)
+        self.assertIn("playbookRunCompleted = true", rail)
         self.assertIn('PLAYBOOK_EDGES', rail)
         self.assertIn('PLAYBOOK_FLOW', rail)
         self.assertIn('PLAYBOOK_LAYOUT', rail)
@@ -310,19 +519,40 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertIn('PLAYBOOK_ORDER', rail)
         self.assertIn('buildPlaybookFlowchart', rail)
         self.assertIn('appendPlaybookLegend', rail)
+        self.assertIn('appendPlaybookFramework', rail)
+        self.assertIn('renderPlaybookPhaseTimes', rail)
+        self.assertIn("phaseSkipped ? 'skipped'", rail)
+        self.assertIn('journeyStageSeconds', rail)
+        self.assertIn('PLAYBOOK_TIMING_SOURCE', rail)
+        self.assertIn('value.toFixed(3)', rail)
+        self.assertIn('presentKeys', rail)
+        self.assertIn('finalSeconds > 0 || stageTimingsSec[key] == null', rail)
+        self.assertIn('delete stageTimingsSec[key]', rail)
+        self.assertIn('recordStageComplete', rail)
+        self.assertIn('activateJourneyNode', rail)
+        self.assertIn('completedNodes.has(key)', rail)
+        self.assertIn('eventPhase', rail)
+        self.assertNotIn('playbookTimingsSec', rail)
+        self.assertNotIn('playbookStartAt', rail)
         self.assertIn('PLAYBOOK_ICONS', rail)
         self.assertIn('playbookIconPath', rail)
-        self.assertIn("'Main Trunk'", rail)
+        self.assertIn("'Core flow'", rail)
+        self.assertIn('trimPathEnd', rail)
+        self.assertIn('bindPlaybookJourneyHoverSync', rail)
+        self.assertIn('edgeLabelWidth', rail)
         self.assertIn("'Edge label'", rail)
         self.assertIn('playbook-flow-legend-section', overlay_styles)
         self.assertIn('playbook-flow-legend-edge-bg', overlay_styles)
         self.assertIn("setAttribute('rx', '16')", rail)
+        self.assertIn('resolveWriterPathFromResult', rail)
+        self.assertIn('applyWriterPathFromResult', rail)
+        self.assertIn('writer-path-library', rail)
         rail_styles = wus._runtime_rail_stylesheet()
-        self.assertIn('min(1500px, calc(100vw - 64px - var(--runtime-rail-width, 312px) - 16px))', rail_styles)
+        self.assertIn('min(1500px, calc(100vw - 64px - var(--runtime-rail-width, 248px) - 16px))', rail_styles)
         self.assertIn('@property --runtime-rail-width', rail_styles)
         self.assertIn('transition:--runtime-rail-width .18s ease', rail_styles)
         self.assertNotIn('transition:width .18s ease, min-width .18s ease', rail_styles)
-        self.assertIn('xMidYMid meet', rail)
+        self.assertIn('xMidYMin meet', rail)
         self.assertIn('z-index:410', rail_styles)
         self.assertNotIn('runtime-playbook-node', html)
         self.assertNotIn('.playbook-flow-icon {', overlay_styles)
@@ -339,8 +569,14 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertIn("connection_state", payload)
         self.assertIn("host", payload)
         self.assertIn("models_loaded", payload)
+        self.assertIn("models_loaded_names", payload)
         self.assertIn("gpu_vram_used_gb", payload)
         self.assertIn("gpu_vram_total_gb", payload)
+        self.assertIn("gpu_utilization_pct", payload)
+        self.assertIn("gpu_metrics_available", payload)
+        self.assertIn("cpu_utilization_pct", payload)
+        self.assertIn("cpu_metrics_available", payload)
+        self.assertIn("compute_target", payload)
         self.assertNotIn("log_source", payload)
         self.assertNotIn("models_installed", payload)
 
@@ -460,6 +696,23 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertNotIn('mcp-composer-sticky', html)
         self.assertNotIn('mcp-stack', html)
         self.assertIn("rawText.split('\\n')", html)
+
+    def test_mcp_layout_shows_actual_search_time_window(self) -> None:
+        """The SPL tab and answer trust-strip must surface the earliest/latest
+        time window actually dispatched to Splunk, distinct from the SPL query
+        text itself (time bounds are separate MCP tool args, never inline SPL)."""
+        html = wus._mcp_page_body()
+        self.assertIn('id="mcp-time-window"', html)
+        self.assertIn('time=n/a', html)
+        self.assertIn('id="mcp-spl-time-row"', html)
+        self.assertIn('id="mcp-spl-time-window-value"', html)
+        self.assertIn('function resolveMcpTimeWindow', html)
+        self.assertIn('function updateMcpTimeWindowUI', html)
+        self.assertIn('updateMcpTimeWindowUI(data)', html)
+        self.assertIn('id="mcp-save-query-btn"', html)
+        self.assertIn('id="mcp-save-query-modal"', html)
+        self.assertIn('function openMcpSaveQueryModal', html)
+        self.assertIn('function commitMcpSaveQuery', html)
         self.assertNotIn("rawText.split('\n');", html)
 
     def test_mcp_layout_uses_compact_composer_toggles(self) -> None:
@@ -614,6 +867,21 @@ class WebUiLayoutTests(unittest.TestCase):
         self.assertNotIn('overscroll-behavior:contain', html)
         self.assertNotIn('.splrepo-main{display:grid;gap:16px;order:2;min-width:0;}', html)
         self.assertNotIn('.splrepo-side{display:grid;gap:16px;order:1;position:sticky;top:88px;align-self:start;min-width:0;}', html)
+
+    def test_investigation_stage_sse_payload_includes_phase_and_duration(self) -> None:
+        payload = wus._investigation_stage_sse_payload(
+            "planner",
+            24,
+            "Planning investigation approach...",
+            "Planning",
+            source="llm_assisted",
+            phase="complete",
+            duration_ms=160000,
+        )
+        self.assertEqual(payload["node"], "planner")
+        self.assertEqual(payload["phase"], "complete")
+        self.assertEqual(payload["duration_ms"], 160000)
+        self.assertEqual(payload["status"], "complete")
 
 
 class WebUiSessionBehaviorTests(unittest.TestCase):

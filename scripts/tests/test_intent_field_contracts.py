@@ -41,6 +41,21 @@ class IntentFieldContractsTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("intent_contract", reason)
 
+    def test_linux_privilege_activity_rejects_stats_table_pipeline(self) -> None:
+        ok, reason = validate_query_for_intent(
+            "linux_privilege_escalation_activity",
+            {
+                "query": (
+                    'search index=linux (sourcetype="auth.log" OR sourcetype="syslog") '
+                    '"sudo:" OR "su:" | stats count by host user src_ip '
+                    "| table _time host sourcetype process_name outcome actor target_user command src_ip _raw"
+                )
+            },
+            question="Show Linux sudo activity in the last 24 hours",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "intent_contract_stats_table_pipeline_incompatible")
+
     def test_contract_rejects_rex_when_trusted_native_fields_satisfy_intent(self) -> None:
         ok, reason = validate_query_for_intent(
             "apache_access_top_ips",

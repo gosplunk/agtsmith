@@ -77,6 +77,66 @@ class IndexQuestionRoutingTests(unittest.TestCase):
         self.assertIn("dc(index)", query)
         self.assertNotRegex(query, r"\|\s*stats\s+count\s*$")
 
+    def test_misspelled_indexes_access_question_maps_to_top_indexes_not_failed_login(self) -> None:
+        """Regression: "idexes" (typo) + "access to" must not fall through to
+        the security/auth-failure template just because it is first in TEMPLATES."""
+        for question in (
+            "Which idexes do I have access to?",
+            "what indexs do i have access to",
+            "which indices do i have access to",
+        ):
+            template = self.map_question_to_template(question)
+            self.assertEqual(template.intent, "top_indexes", msg=question)
+            tool, _reason, _meta, _mode = self.determine_splunk_tool(question, template.intent)
+            self.assertEqual(tool, "splunk_get_indexes", msg=question)
+
+    def test_sourcetype_data_last_hour_routes_to_sourcetype_volume_not_index(self) -> None:
+        question = "What sourcetypes have data in the last hour?"
+        template = self.map_question_to_template(question)
+        self.assertEqual(template.intent, "index_sourcetype_volume")
+        tool, reason, _meta, _mode = self.determine_splunk_tool(question, template.intent)
+        self.assertEqual(tool, "splunk_run_query")
+        self.assertIn("event_search", reason)
+        args = self.template_to_query_args(template, question, apply_environment=False)
+        query = str(args.get("query", "")).lower()
+        self.assertIn("by sourcetype", query)
+        self.assertNotIn("by index", query)
+        self.assertEqual(args.get("earliest_time"), "-1h")
+
+    def test_internal_sourcetype_data_question_scopes_to_internal_index(self) -> None:
+        question = "What sourcetypes have data in _internal in the last hour?"
+        template = self.map_question_to_template(question)
+        self.assertEqual(template.intent, "internal_sourcetypes")
+        args = self.template_to_query_args(template, question, apply_environment=False)
+        query = str(args.get("query", "")).lower()
+        self.assertIn("index=_internal", query)
+        self.assertIn("by sourcetype", query)
+
+    def test_splunkd_volume_does_not_apply_host_filter(self) -> None:
+        question = "Show splunkd volume in _internal for the last 24 hours"
+        template = self.map_question_to_template(question)
+        self.assertEqual(template.intent, "internal_splunkd_health")
+        args = self.template_to_query_args(template, question, apply_environment=True)
+        query = str(args.get("query", ""))
+        self.assertIn("sourcetype=splunkd", query)
+        self.assertNotIn("host IN (splunkd)", query)
+        self.assertIn("by host component", query)
+
+    def test_hosts_with_data_last_hour_routes_to_host_activity_summary(self) -> None:
+        question = "Which hosts have data in the last hour?"
+        template = self.map_question_to_template(question)
+        self.assertEqual(template.intent, "host_activity_summary")
+        tool, _reason, _meta, _mode = self.determine_splunk_tool(question, template.intent)
+        self.assertEqual(tool, "splunk_run_query")
+
+    def test_list_sourcetypes_with_events_uses_stats_not_metadata_hosts(self) -> None:
+        question = "List sourcetypes with events in the last hour"
+        template = self.map_question_to_template(question)
+        args = self.template_to_query_args(template, question, apply_environment=False)
+        query = str(args.get("query", "")).lower()
+        self.assertIn("stats count by sourcetype", query)
+        self.assertNotIn("metadata type=hosts", query)
+
 
 class ReviewProfileRoutingIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -84,6 +144,41 @@ class ReviewProfileRoutingIntegrationTests(unittest.TestCase):
         import langgraph_multi_model_soc as mm
 
         self.mm = mm
+
+    def test_multi_model_execution_uses_fresh_profile_before_live_inventory_query(self) -> None:
+        structured = {
+            "results": [{"index": "main", "count": 5}],
+            "total_rows": 1,
+            "source": "environment_profile_index_activity",
+            "profile_window": "-1h",
+        }
+        state = {
+            "question": DEFAULT_INDEX_QUESTION,
+            "validation_ok": True,
+            "final_plan": {
+                "selected_tool": "splunk_run_query",
+                "intent": "top_indexes",
+                "tool_args": {
+                    "query": "search index=* NOT index=_* | stats count by index",
+                    "earliest_time": "-1h",
+                    "latest_time": "now",
+                    "row_limit": 20,
+                },
+            },
+        }
+        with patch.object(
+            self.mm,
+            "profile_inventory_structured_results",
+            return_value=structured,
+        ), patch.object(
+            self.mm,
+            "run_splunk_query_args",
+            side_effect=AssertionError("fresh profile inventory should avoid live MCP"),
+        ):
+            result = self.mm.run_tool_node(state)
+
+        self.assertTrue(result["splunk_data"]["profile_first"])
+        self.assertEqual(result["splunk_data"]["structured"]["results"], structured["results"])
 
     def _run_with_fake_ollama(
         self,
@@ -162,9 +257,24 @@ class ReviewProfileRoutingIntegrationTests(unittest.TestCase):
                 return "- finding one\n- finding two\n- finding three\n- finding four"
             raise AssertionError(f"unexpected model invocation: {model} / {prompt[:80]}")
 
-        def progress_cb(node: str, pct: int, label: str, title: str, skipped: bool = False) -> None:
+        def progress_cb(*args, **kwargs) -> None:
+            node = str(args[0] if args else "")
+            pct = int(args[1] if len(args) > 1 else 0)
+            label = str(args[2] if len(args) > 2 else "")
+            title = str(args[3] if len(args) > 3 else "")
+            skipped = bool(args[4] if len(args) > 4 else False)
+            phase = str(args[5] if len(args) > 5 else "enter")
+            duration_ms = args[6] if len(args) > 6 else None
             progress_events.append(
-                {"node": node, "pct": pct, "label": label, "title": title, "skipped": skipped}
+                {
+                    "node": node,
+                    "pct": pct,
+                    "label": label,
+                    "title": title,
+                    "skipped": skipped,
+                    "phase": phase,
+                    "duration_ms": duration_ms,
+                }
             )
 
         with patch.object(self.mm, "_call_ollama_json", side_effect=fake_ollama), patch.object(

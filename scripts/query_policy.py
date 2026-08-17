@@ -68,6 +68,11 @@ def _question_allows_internal_indexes(question: str) -> bool:
         "audittrail",
         "splunk platform",
         "platform health",
+        # "splunk internal health" is the canonical phrasing, but natural
+        # possessive variants like "Splunk's own internal health" break a
+        # rigid "splunk internal" substring match. "internal health" alone is
+        # specific enough to stand on its own here.
+        "internal health",
         "scheduler",
         "splunkd",
         "forwarder",
