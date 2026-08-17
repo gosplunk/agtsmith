@@ -109,7 +109,8 @@ Before calling `v1.3.2` ready, answer these directly:
 5. Are no-evidence and partial-coverage outcomes still presented conservatively?
 
 ## Relationship To Other Docs
-- [README](/home/joe/agtsmith/README.md): project overview and public roadmap summary
-- [Changelog](/home/joe/agtsmith/CHANGELOG.md): shipped changes only
-- [Model Strategy](/home/joe/agtsmith/docs/model_strategy.md): current role assignment guidance
-- [System Design](/home/joe/agtsmith/docs/architecture/system_design.md): current runtime architecture
+- [README](../../README.md): project overview and public roadmap summary
+- [Changelog](../../CHANGELOG.md): shipped changes only
+- [Model Strategy](../model_strategy.md): current role assignment guidance
+- [System Design](../architecture/system_design.md): current runtime architecture
+- [Initial Setup Guide](../runbooks/initial_setup.md): first-time install path

@@ -17155,9 +17155,9 @@ DOC_LABELS: dict[str, tuple[str, str]] = {
         "Initial Setup Guide",
         "Step-by-step setup for a new machine and new operator.",
     ),
-    "Initial_Setup_Guide.md": (
-        "Initial Setup Guide",
-        "Entry point that links to the canonical first-time install runbook.",
+    "README.md": (
+        "Documentation Index",
+        "GitHub-friendly index of runbooks, architecture, and release notes.",
     ),
     "runbooks/demo_walkthrough.md": (
         "Demo Walkthrough",
@@ -17193,6 +17193,8 @@ def _doc_section(path: str) -> str:
     if path == "whitepapers/project_one_page_white_paper.md":
         return "Start Here"
     if path == "project_overview.md":
+        return "Start Here"
+    if path == "README.md":
         return "Start Here"
     if path == "runbooks/initial_setup.md":
         return "Start Here"
@@ -17270,8 +17272,25 @@ def _resolve_doc_markdown_href(href: str, current_doc_path: str = "") -> str:
     if raw.startswith("/docs/view?"):
         return raw
     if re.match(r"^https?://", raw, re.I):
+        github_blob = re.match(
+            r"^https?://github\.com/gosplunk/agtsmith/blob/[^/]+/(.+)$",
+            raw,
+            re.I,
+        )
+        if github_blob:
+            doc_rel = github_blob.group(1).lstrip("/")
+            if _safe_docs_path(doc_rel) is not None:
+                return f"/docs/view?path={quote(doc_rel)}"
         return raw
     if raw.startswith("/") and not raw.startswith("/docs/"):
+        if raw.startswith("/home/"):
+            candidate = raw.split("/agtsmith/", 1)
+            if len(candidate) == 2 and candidate[1]:
+                doc_rel = candidate[1]
+                if doc_rel.startswith("docs/"):
+                    doc_rel = doc_rel[len("docs/") :]
+                if _safe_docs_path(doc_rel) is not None:
+                    return f"/docs/view?path={quote(doc_rel)}"
         return raw
 
     doc_rel = ""

@@ -8,7 +8,10 @@ This repository is published as a clean starting point. It ships with example co
 
 For a short operator-facing summary of what changed in `v1.5.2`, read [v1.5.2 Release Highlights](docs/project/v1_5_2_delta.md).
 
-**New install?** Start with the [Initial Setup Guide](docs/runbooks/initial_setup.md) — step-by-step Docker deploy, Splunk MCP, Ollama models, Data Domains, and first investigation.
+**New install?** Start with the [Initial Setup Guide](docs/runbooks/initial_setup.md) — step-by-step Docker deploy, Splunk MCP, Ollama models, Data Domains, and first investigation. Full doc index: [docs/README.md](docs/README.md).
+
+If GitHub web preview fails temporarily, clone the repo and open the same paths locally, or use:
+`https://raw.githubusercontent.com/gosplunk/agtsmith/main/docs/runbooks/initial_setup.md`
 
 ## Start Here
 If you are trying to get the platform running for the first time, read the [Initial Setup Guide](docs/runbooks/initial_setup.md) alongside the quick start below.

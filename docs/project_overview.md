@@ -4,21 +4,23 @@
 This page is the reader's starting point. It does not try to explain the whole platform again. It tells you which document to read next based on what you need.
 
 ## Start Here
-If you are standing up A.G.E.N.T. Smith for the first time, read:
-- [Initial Setup Guide](runbooks/initial_setup.md) (canonical runbook)
-- [Initial Setup Guide entry point](Initial_Setup_Guide.md) (GitHub-friendly alias)
-
 If you want the short explanation of what changed in `v1.5.2`, read:
 - [v1.5.2 Release Highlights](project/v1_5_2_delta.md)
 
 If you want the shortest explanation of what A.G.E.N.T. Smith is, read:
 - [What A.G.E.N.T. Smith Is](whitepapers/project_one_page_white_paper.md)
 
+If you are trying to stand the platform up for the first time, read:
+- [Initial Setup Guide](runbooks/initial_setup.md)
+
 If you want the technical explanation of how the runtime actually works, read:
 - [Technical Deep Dive](whitepapers/technical_deep_dive.md)
 
 If you want the technical explanation of how workflow changes are evaluated offline, read:
 - [LangGraph Eval Optimization](architecture/langgraph_eval_optimization.md)
+
+If you are installing or configuring the platform, read:
+- [Initial Setup Guide](runbooks/initial_setup.md)
 
 If you want the live workflow view in the UI, open:
 - Control Center -> LangGraph Graph
@@ -38,6 +40,7 @@ If you want the live workflow view in the UI, open:
   - [Health Check](runbooks/health_check.md)
   - [Laptop Model Profile](runbooks/laptop_model_profile.md)
   - [Weekly Maintenance](runbooks/weekly_maintenance.md)
+  - [Local Splunk Dev](runbooks/local_splunk_dev.md)
 
 ## What Exists Today
 - Authenticated web UI for LAN users
@@ -54,6 +57,7 @@ If you want the live workflow view in the UI, open:
 - Docker deployment path with first-run setup sequencing
 - Offline LangGraph eval and topology optimization harness
 - Control Center page for canonical graph, active topology, and latest executed path
+- Internal/Linux SPL benchmark programs and ten-domain learning loop (`v1.5.2`)
 
 ## Scope Boundary
 - Detect, Triage, and Investigate are implemented
@@ -73,3 +77,6 @@ If you want the live workflow view in the UI, open:
 
 ## Advanced Material
 The `docs/reference/` tree is the advanced knowledge and RAG support library. It is useful for model grounding and implementation work, but it is not the main reader path for understanding the platform.
+
+## GitHub Link Note
+Browse these docs from the repository root with normal relative links (for example `docs/runbooks/initial_setup.md` from `README.md`). If GitHub web rendering is temporarily unavailable, clone the repo and read the same files locally, or use the [Documentation Index](README.md).

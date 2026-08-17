@@ -31,4 +31,4 @@ make screenshots-diff SCREENSHOT_VERSION=v1.5.1
 
 `docs/images/screenshots/v<version>/`
 
-See [docs/runbooks/screenshot_capture.md](../../docs/runbooks/screenshot_capture.md).
+See [docs/runbooks/screenshot_capture.md](../../../docs/runbooks/screenshot_capture.md).

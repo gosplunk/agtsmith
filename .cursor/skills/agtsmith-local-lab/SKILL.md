@@ -48,4 +48,4 @@ the host `config/ui.env`; enter runtime endpoints and credentials through the
 first-run and Configuration pages. Host-runtime and local-lab commands may
 continue to use `config/ui.env`.
 
-See [docs/runbooks/local_splunk_dev.md](../../docs/runbooks/local_splunk_dev.md).
+See [docs/runbooks/local_splunk_dev.md](../../../docs/runbooks/local_splunk_dev.md).

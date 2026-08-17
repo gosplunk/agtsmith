@@ -23,7 +23,7 @@ If the shell still says the `docker` group does not exist, the Docker install st
 
 Then:
 ```bash
-git clone YOUR_REPO_URL
+git clone https://github.com/gosplunk/agtsmith.git
 cd agtsmith
 export AGTSMITH_UID=$(id -u)
 export AGTSMITH_GID=$(id -g)
