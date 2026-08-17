@@ -17190,6 +17190,8 @@ def _doc_section(path: str) -> str:
         return "Start Here"
     if path == "project_overview.md":
         return "Start Here"
+    if path == "runbooks/initial_setup.md":
+        return "Start Here"
     if path == "whitepapers/executive_white_paper.md":
         return "Business View"
     if path == "whitepapers/technical_deep_dive.md":
@@ -17568,6 +17570,7 @@ def _docs_index_body() -> str:
       <div class=\"card\">
         <h2>Start Here</h2>
         <p>If you are new to A.G.E.N.T. Smith, begin with the business overview and then move into the technical architecture only if you need deeper detail.</p>
+        <p><a href=\"/docs/view?path=runbooks/initial_setup.md\">Open the Initial Setup Guide</a></p>
         <p><a href=\"/docs\">Open the business overview</a></p>
         <p><a href=\"/docs/view?path=project/v1_5_2_delta.md\">Open the v1.5.2 release highlights</a></p>
       </div>
@@ -17614,6 +17617,7 @@ def _docs_index_body() -> str:
         <h2>How Do We Operate It?</h2>
         <p>Use these if you are bringing up the platform, running a demo, or managing the current environment.</p>
         <div class=\"guide-links\">
+          <a class=\"guide-link\" href=\"/docs/view?path=runbooks/initial_setup.md\"><strong>Initial Setup Guide</strong><span>Primary first-time install path for a new machine or airgapped deployment.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=runbooks/health_check.md\"><strong>Health Check</strong><span>Short post-install validation for an already-configured runtime.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=runbooks/demo_walkthrough.md\"><strong>Demo Walkthrough</strong><span>Presentation path for stakeholders.</span></a>
           <a class=\"guide-link\" href=\"/docs/view?path=runbooks/daily_ops.md\"><strong>Daily Operations</strong><span>Routine operational checks.</span></a>

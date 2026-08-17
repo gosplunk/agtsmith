@@ -4,6 +4,9 @@
 This page is the reader's starting point. It does not try to explain the whole platform again. It tells you which document to read next based on what you need.
 
 ## Start Here
+If you are standing up A.G.E.N.T. Smith for the first time, read:
+- [`docs/runbooks/initial_setup.md`](/docs/view?path=runbooks/initial_setup.md)
+
 If you want the short explanation of what changed in `v1.5.2`, read:
 - [`docs/project/v1_5_2_delta.md`](/docs/view?path=project/v1_5_2_delta.md)
 
